@@ -162,3 +162,21 @@ cython_debug/
 .idea/
 experiments/
 ignored/
+
+# Vina-GPU-2.1 build artifacts (compiled docking oracle)
+vina_workspace/
+quickvina_dir
+
+# Large installers / binaries (do not commit to git)
+Miniconda3-latest-Linux-x86_64.sh
+*.run
+
+# Scratch run symlinks
+experiments
+
+# Docking / structure data artifacts (regenerable from pre-processing scripts)
+*.pdb
+*.pdbqt
+*.cif
+*.sdf
+*.csv
