@@ -6,7 +6,8 @@ decompose *where* the speedup comes from (parallelism vs. multi-ligand batching)
 
 ## Configurations compared
 - **A — sequential (this node):** login node, 1 GPU, one gnina invocation **per molecule** (CNN
-  model reloads every call). The original `dock_6td3_batch.py` / `batch_anchor_dock.py` design.
+  model reloads every call). The original per-molecule `dock_6td3_batch.py` / `batch_anchor_dock.py`
+  design — both since removed (consolidated into the batching `dock_cluster*.py` drivers).
 - **B — single-GPU batched+parallel (this node):** login node, 1 GPU, 4 worker processes, each
   docking a **multi-ligand shard in one gnina call** (model loads once per shard). `dock_cluster.py`
   with `N_GPU=1 PROCS_PER_GPU=4`.
@@ -57,7 +58,8 @@ local run, 368 mols in 101 min).
    floor), e.g. cheaper/parallel ETKDG or fewer confs.
 
 ## Files & where results live
-- Benchmark configs: `docking_6td3/dock_6td3_batch.py` (A), `docking_6td3/dock_cluster.py` (B/C),
-  `docking_gnina/{batch_anchor_dock,dock_cluster_crbn}.py`.
+- Benchmark configs: A = the now-removed per-molecule sequential runners; B/C =
+  `docking_6td3/dock_cluster.py` / `docking_gnina/dock_cluster_crbn.py` (which run sequentially with
+  `N_GPU=1 PROCS_PER_GPU=1`, batched).
 - Cluster timings from SLURM logs: `/scratch/markymoo/rgfn_runs/dock6td3-69271.out`,
   `dockcrbn-69272.out`. (Benchmark A/B subset runs were transient, not saved.)

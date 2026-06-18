@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """High-throughput 6TD3/CR8 glue docking for a multi-GPU debug node.
 
-Maximises a Balam debug node (128 cores, 4x A100). Docks known CDK12-glues + decoys into the
-CR8 pocket and measures the DDB1 cooperativity (Tier2 vs Tier1), same science as
-dock_6td3_batch.py but parallelised:
+Docks known CDK12-glues + decoys into the CR8 pocket and measures the DDB1 cooperativity
+(Tier2 vs Tier1). Runs locally (set N_GPU=1) or on a multi-GPU node (e.g. a Balam debug node,
+4x A100). Three phases:
 
   phase 1  embed every molecule in parallel (all cores)
   phase 2  shard molecules across W workers (PROCS_PER_GPU per GPU x N_GPU); each worker docks
@@ -26,7 +26,9 @@ from rdkit.Chem import AllChem
 RDLogger.DisableLog("rdApp.*")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-GNINA = "/scratch/markymoo/gnina/run_gnina.sh"
+GNINA = os.environ.get(
+    "GNINA", "/scratch/markymoo/gnina/run_gnina.sh"
+)  # gnina launcher; override via $GNINA
 TIER2 = os.path.join(HERE, "6TD3_tier2.pdbqt")
 TIER1 = os.path.join(HERE, "6TD3_tier1.pdbqt")
 CRYSTAL = os.path.join(HERE, "crystal_RC8.pdb")

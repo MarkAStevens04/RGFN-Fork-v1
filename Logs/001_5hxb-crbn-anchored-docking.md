@@ -23,8 +23,9 @@ random warhead-bearing molecules (the property an RGFN reward must have).
      fit-rate jumps to 94% (known) / 80% (decoy). Pass B is the validated pipeline.
 4. **Decoy control** — `docking_gnina/make_decoys.py` builds realistic glutarimide molecules
    (IMiD scaffolds + random drug-like arms via amide/urea/sulfonamide/reductive-amination).
-   Score known (purchasable library 10% sample) vs decoys via `batch_anchor_dock.py`; compare with
-   `compare_passes.py`.
+   Score known (purchasable library 10% sample) vs decoys, then compare distributions. (The
+   sequential `batch_anchor_dock.py` + `compare_passes.py` used here were later consolidated into
+   `dock_cluster_crbn.py` + `compare_systems.py`; the docking method is unchanged.)
 
 ## Results
 - **Pass B recovers the native deep well** and is a faithful *docker*. ✔
@@ -43,8 +44,8 @@ motivated the pivot to a system where the glue interface is ligand-mediated (→
 
 ## Files & where results live
 - Scripts: `pre-processing/clean.py`, `docking_gnina/anchor_dock.py`,
-  `docking_gnina/batch_anchor_dock.py`, `docking_gnina/make_decoys.py`,
-  `docking_gnina/compare_passes.py`.
+  `docking_gnina/dock_cluster_crbn.py`, `docking_gnina/make_decoys.py`,
+  `pre-processing/compare_systems.py`.
 - Receptors/refs: `docking_gnina/5HXB_tier2.pdbqt`, `5HXB_tier1_CRBN.pdbqt`, `crystal_85C.pdb`.
 - Result CSVs (repo): `docking_gnina/batch_results_passB.csv` (known), `decoy_results_passB.csv`
   (decoys); Pass-A: `batch_results.csv`, `decoy_results.csv`.

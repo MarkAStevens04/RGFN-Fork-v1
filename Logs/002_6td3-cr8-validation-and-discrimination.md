@@ -49,7 +49,7 @@ gate. Warhead for warhead-constrained generation = the purine ATP-hinge binder.
 
 ## Files & where results live
 - Scripts: `pre-processing/clean_6td3.py`, `docking_6td3/redock_cr8.py`, `make_decoys_cdk.py`,
-  `dock_cluster.py`, `submit_dock_6td3.sh`, `compare_6td3.py`.
+  `dock_cluster.py`, `submit_dock_6td3.sh`, `pre-processing/compare_systems.py`.
 - Receptors/refs: `docking_6td3/6TD3_tier{1,2}.pdbqt`, `crystal_RC8.pdb`; structure `models/6TD3*.pdb`.
 - Result CSVs (repo): `docking_6td3/known_results.csv`, `decoy_cdk_results.csv`.
 - Scratch (full run + SLURM log): `/scratch/markymoo/rgfn_runs/dock_6td3_69271/`,

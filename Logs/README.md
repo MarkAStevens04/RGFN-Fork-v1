@@ -42,8 +42,7 @@ objective, method, key scripts, results, **where the result files live**, and co
   `pre-processing/docking_gnina/{batch_results_passB,decoy_results_passB}.csv`.
 - **Scratch run dirs** (full outputs + SLURM logs): `/scratch/markymoo/rgfn_runs/dock_6td3_<jobid>/`,
   `/scratch/markymoo/rgfn_runs/dock_crbn_<jobid>/`, and `dock6td3-<jobid>.out` / `dockcrbn-<jobid>.out`.
-- **Compare scripts:** `pre-processing/docking_6td3/compare_6td3.py`,
-  `pre-processing/docking_gnina/compare_passes.py`, cross-system `pre-processing/compare_systems.py`.
+- **Compare script:** `pre-processing/compare_systems.py` (per-system known-vs-decoy + cross-system).
 
 ## Datasets (`pre-processing/test-data/`)
 

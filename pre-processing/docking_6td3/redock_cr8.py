@@ -18,7 +18,9 @@ from rdkit.Chem import AllChem, rdMolAlign
 RDLogger.DisableLog("rdApp.*")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-GNINA = "/scratch/markymoo/gnina/run_gnina.sh"
+GNINA = os.environ.get(
+    "GNINA", "/scratch/markymoo/gnina/run_gnina.sh"
+)  # gnina launcher; override via $GNINA
 RECEPTOR = os.path.join(HERE, "6TD3_tier2.pdbqt")
 CRYSTAL = os.path.join(HERE, "crystal_RC8.pdb")
 # CR8: (2R)-2-({9-isopropyl-6-[(4-(pyridin-2-yl)benzyl)amino]-9H-purin-2-yl}amino)butan-1-ol
