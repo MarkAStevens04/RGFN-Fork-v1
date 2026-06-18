@@ -180,3 +180,6 @@ experiments
 *.cif
 *.sdf
 *.csv
+
+# superseded scaffold library (large; not part of the curated pipeline)
+pre-processing/test-data/Enamine_CRBN_Molecular_Glue_Library_*.smiles

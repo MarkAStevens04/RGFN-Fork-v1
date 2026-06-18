@@ -24,7 +24,9 @@ RDLogger.DisableLog("rdApp.*")
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-GNINA = "/scratch/markymoo/gnina/run_gnina.sh"
+GNINA = os.environ.get(
+    "GNINA", "/scratch/markymoo/gnina/run_gnina.sh"
+)  # gnina launcher; override via $GNINA
 RECEPTOR = os.path.join(HERE, "5HXB_tier2.pdbqt")
 CRYSTAL = os.path.join(HERE, "crystal_85C.pdb")
 CC885 = "c1c(CNC(=O)Nc2cc(Cl)c(C)cc2)cc2c(c1)C(=O)N(C2)C1C(=O)NC(=O)CC1"
