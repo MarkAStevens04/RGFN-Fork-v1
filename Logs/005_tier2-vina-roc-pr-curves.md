@@ -76,4 +76,6 @@ Root: `./pre-processing/docking_gnina/analysis/`
 | 6TD3 (CDK12–DDB1) | 0.890 | 0.872 | 160 | 248 | 0.392 |
 | 5HXB (CRBN–GSPT1) | 0.627 | 0.726 | 136 | 117 | 0.538 |
 
+Note average precision is also PR-AUC
+
 Only molecules with `status='ok'` included; CRBN n=136 known reflects the 177-anchorable set with 41 no-valid-pose failures (see entry 003). 6TD3 n=248 decoys reflects same decoy set scored in entry 002; all 248 returned `status='ok'`. Input score CSVs are from entries 002 and 003 — no new docking run.
