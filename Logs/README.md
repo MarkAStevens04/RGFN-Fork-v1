@@ -8,10 +8,10 @@ objective, method, key scripts, results, **where the result files live**, and co
 
 | # | Date | Title | Verdict |
 |---|------|-------|---------|
-| [001](001_5hxb-crbn-anchored-docking.md) | 2026-06-11 → 06-18 | 5HXB / CRBN warhead-anchored oracle + decoy control | Works as a docker; **discrimination ceiling** (blind to GSPT1 cooperativity) |
-| [002](002_6td3-cr8-validation-and-discrimination.md) | 2026-06-18 | Pivot to 6TD3 / CR8 — validation + discrimination run | **Decisive discrimination** (DDB1 bonus separates glues from decoys) |
-| [003](003_crbn-vs-6td3-cross-system.md) | 2026-06-18 | 5HXB vs 6TD3 head-to-head on the neosubstrate differential | **6TD3 differential discriminates (+78 pts); 5HXB does not (−3 pts)** |
-| [004](004_compute-benchmark.md) | 2026-06-18 | Compute benchmark: login node vs full debug node | **CRBN 21× / 6TD3 6.6× faster; batching > extra GPUs (dock is CPU-bound)** |
+| [001](001_5hxb-crbn-anchored-docking.md) | 2026-06-11 → 06-18 | 5HXB / CRBN — warhead-anchored docking oracle + decoy control | Works as a docker; **discrimination ceiling** — GSPT1 bonus is a geometric artifact, not a glue signal |
+| [002](002_6td3-cr8-validation-and-discrimination.md) | 2026-06-18 | 6TD3 / CDK12-DDB1 — oracle validation + discrimination run | **Decisive discrimination** — 85.6% vs 7.3% on DDB1 differential (+78 pts); validated oracle |
+| [003](003_crbn-vs-6td3-cross-system.md) | 2026-06-18 | 5HXB vs 6TD3 — head-to-head neosubstrate differential comparison | **6TD3 differential discriminates (+78 pts); 5HXB does not (−3 pts)** — failure is structural, not methodological |
+| [004](004_compute-benchmark.md) | 2026-06-18 | Compute benchmark — login node vs Balam debug_full_node (4× A100) | **CRBN 21× / 6TD3 6.6× faster; batching is the dominant lever** — conformer embedding is the new Amdahl bottleneck |
 
 ## The systems
 
