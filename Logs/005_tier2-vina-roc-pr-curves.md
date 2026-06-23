@@ -45,12 +45,7 @@ Root: `./pre-processing/docking_gnina/analysis/`
 
 ## Relevant Versions
 
-`[TODO — add commit hash after pushing]`
-
-Files to commit:
-- `pre-processing/docking_gnina/analysis/plot_discrimination_curves.py`
-- `pre-processing/docking_gnina/analysis/discrimination_curves.png`
-- `Logs/005_tier2-vina-roc-pr-curves.md`
+`0c3f154` — Add Tier 2 Vina ROC/PR discrimination curves (entry 005)
 
 ## Relevant Resources
 
