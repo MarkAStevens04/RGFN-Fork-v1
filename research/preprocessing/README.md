@@ -1,6 +1,6 @@
-# Molecular-glue docking oracle — pre-processing & benchmarking
+# Research Pass
 
-This directory builds and evaluates a **docking-based reward (oracle)** for an RGFN generative
+This directory is for small scale experiments to verify that things are working correctly. Currently, this directory builds and evaluates a **docking-based reward (oracle)** for an RGFN generative
 model that designs molecular-glue degraders. A glue must do two things: bind the E3-ligase pocket
 (via a conserved **warhead**) *and* present an **arm** that makes a productive contact with the
 neosubstrate. A good reward must reward the second part, not just warhead presence.

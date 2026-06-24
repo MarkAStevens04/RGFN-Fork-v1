@@ -22,6 +22,7 @@ For the science/goals, read `Logs/RESEARCH_CONTEXT.md`.
 | `benchmarks/`, `models/`, `data/synthetic/` | **Ours** | Benchmark harness, input structures/checkpoints, generated datasets. |
 | `research/preprocessing/` | **Ours** | Docking oracle validation pipeline (was `pre-processing/`). |
 | `Logs/`, `docs/` | **Ours** | Experiment logs + project documentation. |
+| `Logs/references/` | **Ours** | Canonical bibliography for papers we build on. Cite by key (`[koziarski2024rgfn]`); annotated index in its `README.md`. PDFs in `pdfs/` are git-ignored. |
 
 We keep `rgfn/` and `configs/` mergeable with upstream. The only deliberate edits
 to upstream files are three small operational overrides documented in

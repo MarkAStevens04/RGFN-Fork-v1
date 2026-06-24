@@ -1,5 +1,10 @@
 configs/grid_search/
 
+# Reference paper PDFs — local-only (copyrighted + binary; keep repo lean).
+# Cite papers via Logs/references/README.md + references.bib instead.
+Logs/references/pdfs/*
+!Logs/references/pdfs/.gitkeep
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
