@@ -70,7 +70,7 @@ When extending the model, "does this match RGFN?" is answered here.
 ### `[bengeoffrey2025molde]` — Molecular Glue-Design-Evaluator (ACS Omega 2025)
 In-silico method for **designing and scoring molecular glues**. Consult this when
 reasoning about glue design or oracle scoring choices — and note it's the reference
-behind our choice of the **6TD3** system as the testbed (`Logs/000_TEMPLATE.md`).
+behind our choice of the **6TD3** system as the testbed (`Logs/002_6td3-cr8-validation-and-discrimination.md`).
 &nbsp;`pdfs/bengeoffrey2025molde.pdf` · doi:10.1021/acsomega.4c08049
 
 ### `[slabicki2020cr8]` — CR8 is a molecular glue degrader of cyclin K (Nature 2020)

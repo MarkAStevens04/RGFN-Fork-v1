@@ -71,7 +71,7 @@ on the startup path — fix `glue/registry.py`, not the config.
   Balam. State clearly in your summary what you did vs. couldn't verify.
 - **Document as you go:** record structural changes and anything left unverified
   in `docs/REFACTOR_LOG.md` so the next agent can continue or repair the work.
-- **Experiment logs:** use the `experiment-log` skill / `Logs/000_TEMPLATE.md`
-  for any real computational experiment.
+- **Experiment logs:** use the `experiment-log` skill for any real computational
+  experiment.
 - **Historical logs** (`Logs/001`–`005`) predate the 2026-06-24 restructure and
   reference `pre-processing/`; read those paths as `research/preprocessing/`.
