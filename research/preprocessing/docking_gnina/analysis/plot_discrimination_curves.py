@@ -19,8 +19,8 @@ from sklearn.metrics import (
     roc_curve,
 )
 
-ROOT = Path(__file__).resolve().parents[3]  # RGFN-Fork root
-PRE = ROOT / "pre-processing"
+ROOT = Path(__file__).resolve().parents[4]  # RGFN-Fork root
+PRE = ROOT / "research" / "preprocessing"
 
 DATA = {
     "6TD3 (CDK12–DDB1)": {

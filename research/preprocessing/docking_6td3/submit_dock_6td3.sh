@@ -16,7 +16,7 @@
 set -euo pipefail
 
 REPO=/home/markymoo/projects/RGFN_Fork/RGFN-Fork
-DOCK=$REPO/pre-processing/docking_6td3
+DOCK=$REPO/research/preprocessing/docking_6td3
 export OUTDIR=$SCRATCH/rgfn_runs/dock_6td3_${SLURM_JOB_ID}
 export WORK=$SCRATCH/dock_6td3_cluster_${SLURM_JOB_ID}
 export N_GPU=4
@@ -32,5 +32,5 @@ nvidia-smi -L
 python "$DOCK/dock_cluster.py"
 
 echo "===== discrimination summary (fresh 6TD3 vs committed CRBN) ====="
-TD3_DIR="$OUTDIR" python "$REPO/pre-processing/compare_systems.py" || true
+TD3_DIR="$OUTDIR" python "$REPO/research/preprocessing/compare_systems.py" || true
 echo "results in $OUTDIR"

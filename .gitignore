@@ -1,4 +1,3 @@
-scripts/
 configs/grid_search/
 
 # Byte-compiled / optimized / DLL files
@@ -182,4 +181,19 @@ experiments
 *.csv
 
 # superseded scaffold library (large; not part of the curated pipeline)
-pre-processing/test-data/Enamine_CRBN_Molecular_Glue_Library_*.smiles
+research/preprocessing/test-data/Enamine_CRBN_Molecular_Glue_Library_*.smiles
+
+# Docking run outputs (regenerable; written by research/preprocessing docking scripts)
+cluster_out/
+cluster_out_crbn/
+research/preprocessing/**/cluster_out*/
+
+# Model checkpoints / weights (large; document provenance in models/README.md)
+models/**/*.ckpt
+models/**/*.pt
+models/**/*.pth
+
+# Generated synthetic datasets (keep the dir + docs, ignore the generated outputs)
+data/synthetic/*
+!data/synthetic/README.md
+!data/synthetic/.gitkeep
