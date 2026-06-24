@@ -26,15 +26,36 @@ We call this metric the **neosubstrate differential** for historical reasons —
 
 ### How the model learns: the active-learning loop
 
-RGFN never reads the expensive scoring function directly. We train it the way `[bengio2021gflownet]` runs its multi-round molecule experiments (§4.3; **Algorithm 1** in A.5): a fast **proxy** `M` is the in-loop reward, and the expensive **oracle** `O` is queried only on small batches to keep that proxy honest. One round is:
+RGFN never reads the expensive scoring function directly. We train it the way `[bengio2021gflownet]` runs its multi-round molecule experiments (§4.3; **Algorithm 1** in A.5): a fast **proxy** `M` is the in-loop reward, and the expensive **oracle** `O` is queried only on small batches to keep that proxy honest.
+
+**Before the loop (initialization).** Build a seed dataset `D_0` of `(x, O(x))` pairs labeled by the *true* oracle, then **warm-start** the proxy `M` by fitting it on `D_0`. Skip this and round 1 trains RGFN against an untrained proxy (noise). Also fix `N` (rounds), `β` (inverse temperature), and `K` (how many top molecules you want out at the end). One more constraint: a GFlowNet needs a **positive** reward, so `O(x)` — and hence `M(x)` — must be scaled/shifted to be `> 0` before use (docking is negative-is-better, so this matters).
+
+**One round** (higher β peaks the sampling distribution harder toward high reward):
 
 1. Fit the proxy `M` on everything labeled so far, `D_{i-1}`.
-2. Train RGFN to sample proportional to `M(x)^β` (β = inverse temperature; higher β peaks the distribution harder toward high reward).
-3. Sample a query batch `B ~ π_θ` from the trained policy.
-4. Score `B` with the expensive oracle `O`; append the new `(x, O(x))` pairs to the dataset.
-5. Repeat for `N` rounds.
+2. Train RGFN to sample proportional to `M(x)^β`.
+3. Sample a query batch `B = {x_1,…,x_b}`, each `x_j ~ π_θ`, from the trained policy.
+4. Score `B` with the expensive oracle `O`, giving `D̂_i = {(x_j, O(x_j)) : x_j ∈ B}`.
+5. Accumulate the **full history**: `D_i = D̂_i ∪ D_{i-1}` (the proxy is refit on everything, not just the latest batch).
+6. Repeat for `N` rounds; the deliverable is the top-`K` molecules in `D_N`.
 
-**Oracle scores enter the loop *only* by retraining `M`, never as a direct RGFN reward.** This is the single most common point of confusion: the chain is `oracle → improves proxy → proxy scores everything → RGFN learns`, not `oracle → RGFN`.
+Verbatim algorithm (`[bengio2021gflownet]`, Alg. 1, A.5; their generic oracle `O` = our docking/MD scorer, their proxy `M` = our fast learned reward):
+
+```
+Input:  D_0 = {(x_i, y_i)}   (y_i = true oracle reward);  K;  N;  β
+Result: TopK(D_N)
+Init:   proxy M;  policy π_θ;  oracle O;  i ← 1
+while i ≤ N:
+    fit M on dataset D_{i-1}
+    train π_θ with unnormalized target reward  r(x) = M(x)^β
+    sample query batch  B = {x_1,…,x_b},  x_j ~ π_θ
+    evaluate B with O:  D̂_i = {(x_1, O(x_1)), …, (x_b, O(x_b))}
+    update dataset  D_i = D̂_i ∪ D_{i-1}
+    i ← i + 1
+return TopK(D_N)
+```
+
+**The one gotcha to respect:** oracle scores enter the loop *only* by retraining `M`, never as a direct RGFN reward — the chain is `oracle → improves proxy → proxy scores everything → RGFN learns`, not `oracle → RGFN`.
 
 Why this needs a *diverse* sampler — i.e. why a GFlowNet rather than reward-maximizing RL — is the paper's own argument: the proxy is only trained on what the generator proposes, so a mode-collapsed generator gives the proxy no signal outside the modes it already found (`[bengio2021gflownet]`, A.5). RGFN's diversity keeps the proxy's training distribution broad, which is what makes the loop work at all.
 

@@ -43,12 +43,14 @@ The original **GFlowNet**. Two ideas to internalize:
    one optimum.
 2. **The training loop we use is theirs.** §4.3 ("Multi-Round Experiments") and
    **Algorithm 1** in Appendix A.5 define the active-learning loop: a learned **proxy `M`**
-   is the in-loop reward, RGFN trains against `M(x)^β`, a query batch is sampled and scored
-   by the expensive **oracle `O`**, and `M` is refit on the new labels each round. Their
-   molecule instantiation (A.5.2) is an MPNN proxy predicting AutoDock scores, refit on
-   ~200 freshly docked molecules per round — the direct template for our setup, with our
-   docking differential in the role of `O`. **`O` scores enter only by retraining `M`,
-   never as a direct RGFN reward.** &nbsp;`pdfs/bengio2021gflownet.pdf` · arXiv:2106.04399
+   (warm-started on a seed set `D_0` of true-oracle labels) is the in-loop reward, RGFN
+   trains against `M(x)^β`, a query batch is sampled and scored by the expensive
+   **oracle `O`**, the labels accumulate (`D_i = D̂_i ∪ D_{i-1}`), and `M` is refit on the
+   full history each round. Their molecule instantiation (A.5.2) is an MPNN proxy predicting
+   AutoDock scores, refit on ~200 freshly docked molecules per round — the direct template
+   for our setup, with our docking differential in the role of `O`. **`O` scores enter only
+   by retraining `M`, never as a direct RGFN reward.** Full pseudocode is transcribed in
+   `RESEARCH_CONTEXT.md` ("How the model learns"). &nbsp;`pdfs/bengio2021gflownet.pdf` · arXiv:2106.04399
 
 ### `[koziarski2024rgfn]` — RGFN: Synthesizable Molecular Generation (NeurIPS 2024)
 **The paper this whole fork builds on.** RGFN = Reaction-GFlowNet: instead of growing a
