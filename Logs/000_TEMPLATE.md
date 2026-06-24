@@ -35,7 +35,7 @@ We've shown our docking methodology can serve as a reliable oracle for generatin
 
 **Refining for Publication**
 - Publishers will likely want multiple trials of this experiment, so we may need to re-run with different seeds.
-- NeurIPS will want multiple oracles beyond just one molecular glue system so that we show our methodology is novel. Nature will likely want wet-lab validation.
+- Our realistic venue targets (see `RESEARCH_CONTEXT.md` → *Paper target*) are an ML workshop first (NeurIPS AI4Science / ICLR MLDD / GEM), then **Digital Discovery** or **J. Cheminformatics** as the primary journal. These want ≥2 validated systems, clean data splits, and strong baselines (including a non-synthesizable generator) — *not* wet-lab data. Synthesized/tested compounds are only required for the out-of-scope top tier (NeurIPS/ICLR main track, Nature-family).
 
 **Next steps in project**
 - Check if Molecular Dynamics can serve as a more accurate oracle. Is the *stability* of the ternary complex correlated strongly with molecular glues vs random molecules?

@@ -29,6 +29,8 @@ dataset tooling.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — full layout and rationale.
 - [`docs/PATCHES.md`](docs/PATCHES.md) — the few deliberate edits to upstream files.
 - [`Logs/RESEARCH_CONTEXT.md`](Logs/RESEARCH_CONTEXT.md) — the science and goals.
+- [`Logs/references/`](Logs/references/) — the short shelf of papers the method
+  and biology are grounded in; cite by key (e.g. `[koziarski2024rgfn]`).
 
 To train/infer with our components, use the wrappers (they register `glue` with
 gin first): `python scripts/train.py --cfg configs/glue/<cfg>.gin`.

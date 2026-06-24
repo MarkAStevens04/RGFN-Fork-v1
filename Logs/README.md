@@ -29,25 +29,27 @@ objective, method, key scripts, results, **where the result files live**, and co
   (loads CUDA-12). Conformers via RDKit.
 - **Receptor tiers:** Tier 1 = the **warhead-anchoring protein only**; Tier 2 = that protein
   **plus the recruited partner**. The **neosubstrate differential = Tier2 − Tier1 score of the
-  SAME pose** (via gnina `--score_only`) isolates the glue-specific cooperativity. The two systems
+  SAME pose** (via gnina `--score_only`) isolates the ligand arm's contribution to recruiting the
+  second partner — our working proxy for glue cooperativity (it can't see PPI stabilization that
+  doesn't run through the ligand; see `RESEARCH_CONTEXT.md`). The two systems
   are mirror images: CRBN anchors in the E3 (Tier 1 = CRBN, Tier 2 = CRBN+GSPT1 → GSPT1 bonus);
   6TD3 anchors in the kinase (Tier 1 = CDK12, Tier 2 = CDK12+DDB1 → DDB1 bonus).
 - **Decoy control:** realistic "fake" molecules = the conserved warhead + a random drug-like arm
   (not selected for glue activity). If decoys score like real glues, the proxy only reads E3-pocket
   binding; if real glues win, the proxy rewards a productive arm.
 - **Cluster:** SciNet Balam, `debug_full_node` (4× A100, 64 cores, 1 h). Sharded across 4 GPUs
-  (16 workers). See `pre-processing/*/submit_dock_*.sh`. Outputs go to `$SCRATCH` ($HOME is
+  (16 workers). See `research/preprocessing/*/submit_dock_*.sh`. Outputs go to `$SCRATCH` ($HOME is
   read-only on compute nodes).
 
 ## Where results live
 
-- **Repo CSVs** (committed, small): `pre-processing/docking_6td3/{known,decoy_cdk}_results.csv`,
-  `pre-processing/docking_gnina/{batch_results_passB,decoy_results_passB}.csv`.
+- **Repo CSVs** (committed, small): `research/preprocessing/docking_6td3/{known,decoy_cdk}_results.csv`,
+  `research/preprocessing/docking_gnina/{batch_results_passB,decoy_results_passB}.csv`.
 - **Scratch run dirs** (full outputs + SLURM logs): `/scratch/markymoo/rgfn_runs/dock_6td3_<jobid>/`,
   `/scratch/markymoo/rgfn_runs/dock_crbn_<jobid>/`, and `dock6td3-<jobid>.out` / `dockcrbn-<jobid>.out`.
-- **Compare script:** `pre-processing/compare_systems.py` (per-system known-vs-decoy + cross-system).
+- **Compare script:** `research/preprocessing/compare_systems.py` (per-system known-vs-decoy + cross-system).
 
-## Datasets (`pre-processing/test-data/`)
+## Datasets (`research/preprocessing/test-data/`)
 
 - `DDB1_CDK12_Glues.csv` — 175 real CDK12-CCNK/DDB1 glues (161 unique, 123 purine-based). KNOWN+.
 - `CRBN_GSPT1_Glues.csv` — 200 real CRBN/GSPT1 glues (199 active, 188 glutarimide-bearing, MW up
