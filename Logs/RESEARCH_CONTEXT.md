@@ -73,9 +73,16 @@ The core argument of the paper: RGFN + a properly designed docking oracle can ge
 ## Where things live
 
 - **Experiment logs**: `Logs/` (this directory)
-- **Pre-processing scripts**: `pre-processing/`
-- **Docking scripts (CRBN)**: `docking_gnina/`
-- **Docking scripts (6TD3)**: `pre-processing/docking_6td3/`
+- **Pre-processing scripts**: `research/preprocessing/`
+- **Docking scripts (CRBN)**: `research/preprocessing/docking_gnina/`
+- **Docking scripts (6TD3)**: `research/preprocessing/docking_6td3/`
 - **Protein models**: `models/`
-- **Test datasets**: `pre-processing/test-data/`
+- **Test datasets**: `research/preprocessing/test-data/`
 - **Scratch (Balam)**: `/scratch/markymoo/rgfn_runs/`
+
+> **Note (2026-06-24 refactor):** the docking/validation work moved from
+> `pre-processing/` to `research/preprocessing/` (internals unchanged). New code
+> for oracles/rewards/samplers lives in the `glue/` package, and new configs in
+> `configs/glue/`. See `CLAUDE.md` and `docs/ARCHITECTURE.md` for the full layout.
+> Experiment logs 001–005 still reference the old `pre-processing/` paths as a
+> point-in-time record; translate `pre-processing/` → `research/preprocessing/`.

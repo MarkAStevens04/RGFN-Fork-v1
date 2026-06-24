@@ -47,22 +47,22 @@ We've shown our docking methodology can serve as a reliable oracle for generatin
 ## Relevant Files:
 > Looking at what files were used can help explain what was done in this experiment. We should help future users understand what files helped us answer our question, and where to look for each step of our experiment. The files should be roughly categorized by their type, and ordered by when they were used. Again, this is just a rough categorization, and the exact order and how the files fit together will be explained more clearly by our Method section. Focus on not using jargon and keeping this section understandable and tight. This section also helps us figure out if our results don't make sense, where exactly we should check for errors. If after we've done like 30 experiments we go back through our files and find that one python script had an error, this section will help us figure out exactly what experiments also had that error. I don't love how we note the "root" and stuff in this section, so we may need to rework the exact conventions we use.
 
-Root: `pre-processing/docking_6td3/`
+Root: `research/preprocessing/docking_6td3/`
 
 **Scripts**
-- `pre-processing/clean_6td3.py`
+- `research/preprocessing/clean_6td3.py`
     - Generates Tier 1, Tier 2, Tier 3 structure files
     - Cleans PDB structure, removes everything except proteins & ligands relevant to given Tier
-- `pre-processing/docking_6td3/redock_cr8.py`
+- `research/preprocessing/docking_6td3/redock_cr8.py`
     - Performs docking on CR8 ligand to see if we can recover native known structure
 - `make_decoys_cdk.py`
     - Generate purine-armed decoy molecules
-- `pre-processing/docking_6td3/dock_cluster.py`
+- `research/preprocessing/docking_6td3/dock_cluster.py`
     - Run with `debug_full_node`.
     - Ran with both real glues and fake glues.
-- `pre-processing/docking_6td3/submit_dock_6td3.sh`
+- `research/preprocessing/docking_6td3/submit_dock_6td3.sh`
     - Actual job submit script for Balam.
-- `pre-processing/compare_systems.py`
+- `research/preprocessing/compare_systems.py`
     - Evaluation script for comparing our results.
 
 
@@ -114,12 +114,12 @@ Root: `pre-processing/docking_6td3/`
 
 **Packages**
 - Vina [Link here]
-- `pre-processing/clean.py` helpers used heavily in `pre-processing/clean_6td3.py`
+- `research/preprocessing/clean.py` helpers used heavily in `research/preprocessing/clean_6td3.py`
 
 ## Method
 > This sections helps us both audit and understand how the experiment worked. Write down what commands were run and why. Focus on the big commands run, not on small fixes or tiny experiments to validate packages.
 
-1. **Structure prep** — `pre-processing/clean_6td3.py` carves 6TD3 copy 1: Tier 1 = CDK12
+1. **Structure prep** — `research/preprocessing/clean_6td3.py` carves 6TD3 copy 1: Tier 1 = CDK12
    (`models/6TD3_tier1_CDK12.pdb`), Tier 2 = CDK12+DDB1 (`6TD3_tier2_CDK12_DDB1.pdb`), Tier 3 =
    +cyclinK; native CR8 → `crystal_RC8.pdb`. Receptors → pdbqt (obabel). No anchoring — straight box
    docking (`--autobox_ligand crystal_RC8.pdb --autobox_add 4`).

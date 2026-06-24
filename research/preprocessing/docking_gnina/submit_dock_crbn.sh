@@ -15,7 +15,7 @@
 set -euo pipefail
 
 REPO=/home/markymoo/projects/RGFN_Fork/RGFN-Fork
-DOCK=$REPO/pre-processing/docking_gnina
+DOCK=$REPO/research/preprocessing/docking_gnina
 export OUTDIR=$SCRATCH/rgfn_runs/dock_crbn_${SLURM_JOB_ID}
 export WORK=$SCRATCH/dock_crbn_cluster_${SLURM_JOB_ID}
 export N_GPU=4
@@ -34,5 +34,5 @@ nvidia-smi -L
 python "$DOCK/dock_cluster_crbn.py"
 
 echo "===== cross-system comparison (CRBN GSPT1 vs 6TD3 DDB1) ====="
-CRBN_DIR="$OUTDIR" TD3_DIR="$REPO/pre-processing/docking_6td3" python "$REPO/pre-processing/compare_systems.py" || true
+CRBN_DIR="$OUTDIR" TD3_DIR="$REPO/research/preprocessing/docking_6td3" python "$REPO/research/preprocessing/compare_systems.py" || true
 echo "results in $OUTDIR"

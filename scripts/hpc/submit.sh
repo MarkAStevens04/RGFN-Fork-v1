@@ -36,4 +36,6 @@ export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}:$SCRATCH/vina_gpu/boost/lib"
 export PYTHONUNBUFFERED=1
 nvidia-smi
 
-python train.py --cfg configs/rgfn_seh_docking.gin
+# Use scripts/train.py so any glue/ components are registered with gin first.
+# (Harmless for plain upstream configs like this one.)
+python scripts/train.py --cfg configs/rgfn_seh_docking.gin
