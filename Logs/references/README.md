@@ -5,26 +5,50 @@ handful of papers this project is *directly* built on — what the method is, wh
 chose these systems, and which paper to open when a question comes up. This is **not**
 an exhaustive bibliography; it's the short shelf of things you should actually know.
 
-If you find yourself unsure what RGFN is, how a GFlowNet works, or why we use the 6TD3
-system, the answer is here — read the relevant entry before reasoning further.
+If you find yourself unsure what RGFN is, how a GFlowNet works, how the training loop is
+supposed to run, or why we use the 6TD3 system, the answer is here — read the relevant
+entry before reasoning further.
 
 ## Conventions
 
 - **Cite by key, don't paraphrase.** In logs/docs write `[koziarski2024rgfn]`. The one
   authoritative citation string lives in `references.bib`.
 - **PDFs are in `pdfs/<key>.pdf`** and are **git-ignored** (copyrighted + binary; keeps
-  the repo clean for the NeurIPS code release). Open them locally by path. If one is
+  the repo clean for the code release). Open them locally by path. If one is
   missing, fetch it from the arXiv/DOI link below and name it after its key.
+
+---
+
+## What we're building (in one paragraph)
+
+We fork **RGFN** (`[koziarski2024rgfn]`) as the generator and train it through the
+**multi-round active-learning loop** from the original GFlowNet paper
+(`[bengio2021gflownet]`, §4.3 / Alg. 1): RGFN samples molecules proportional to a fast
+**proxy** reward; an expensive **oracle** (our docking-based *neosubstrate differential*,
+MD later) scores only the per-round query batch; the proxy is refit on those labels;
+repeat. The novel piece is **the oracle itself** — a two-tier, same-pose docking
+differential that scores whether a candidate's *arm* recruits the second protein of the
+ternary complex. Code: the generator lives in RGFN's `rgfn/gfns/reaction_gfn/`; our
+oracle/proxy/sampler code lives in the `glue/` package and plugs into RGFN's reward
+interface; configs in `configs/glue/`. See `RESEARCH_CONTEXT.md` for the full picture.
 
 ---
 
 ## Method — what we're building with
 
 ### `[bengio2021gflownet]` — Flow Network based Generative Models (NeurIPS 2021)
-The original **GFlowNet**. The one idea to internalize: a GFlowNet learns to *build an
-object step by step* and sample it with probability **proportional to a reward `R(x)`** —
-so you get many diverse high-reward samples, not one optimum. **Our oracle is that
-reward.** &nbsp;`pdfs/bengio2021gflownet.pdf` · arXiv:2106.04399
+The original **GFlowNet**. Two ideas to internalize:
+1. A GFlowNet learns to *build an object step by step* and sample it with probability
+   **proportional to a reward `R(x)`** — so you get many diverse high-reward samples, not
+   one optimum.
+2. **The training loop we use is theirs.** §4.3 ("Multi-Round Experiments") and
+   **Algorithm 1** in Appendix A.5 define the active-learning loop: a learned **proxy `M`**
+   is the in-loop reward, RGFN trains against `M(x)^β`, a query batch is sampled and scored
+   by the expensive **oracle `O`**, and `M` is refit on the new labels each round. Their
+   molecule instantiation (A.5.2) is an MPNN proxy predicting AutoDock scores, refit on
+   ~200 freshly docked molecules per round — the direct template for our setup, with our
+   docking differential in the role of `O`. **`O` scores enter only by retraining `M`,
+   never as a direct RGFN reward.** &nbsp;`pdfs/bengio2021gflownet.pdf` · arXiv:2106.04399
 
 ### `[koziarski2024rgfn]` — RGFN: Synthesizable Molecular Generation (NeurIPS 2024)
 **The paper this whole fork builds on.** RGFN = Reaction-GFlowNet: instead of growing a

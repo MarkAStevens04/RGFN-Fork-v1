@@ -27,9 +27,11 @@ objective, method, key scripts, results, **where the result files live**, and co
 
 - Docking engine: **gnina v1.3.2** (CNN-rescored), launcher `/scratch/markymoo/gnina/run_gnina.sh`
   (loads CUDA-12). Conformers via RDKit.
-- **Receptor tiers:** Tier 1 = E3 (pocket) only; Tier 2 = E3 + neosubstrate. The
-  **neosubstrate differential = Tier2 − Tier1 score of the SAME pose** (via gnina `--score_only`)
-  isolates the glue-specific cooperativity (GSPT1 bonus for CRBN, DDB1 bonus for 6TD3).
+- **Receptor tiers:** Tier 1 = the **warhead-anchoring protein only**; Tier 2 = that protein
+  **plus the recruited partner**. The **neosubstrate differential = Tier2 − Tier1 score of the
+  SAME pose** (via gnina `--score_only`) isolates the glue-specific cooperativity. The two systems
+  are mirror images: CRBN anchors in the E3 (Tier 1 = CRBN, Tier 2 = CRBN+GSPT1 → GSPT1 bonus);
+  6TD3 anchors in the kinase (Tier 1 = CDK12, Tier 2 = CDK12+DDB1 → DDB1 bonus).
 - **Decoy control:** realistic "fake" molecules = the conserved warhead + a random drug-like arm
   (not selected for glue activity). If decoys score like real glues, the proxy only reads E3-pocket
   binding; if real glues win, the proxy rewards a productive arm.
