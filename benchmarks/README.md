@@ -2,7 +2,7 @@
 
 Benchmark harness and committed results for evaluating our RGFN runs and oracles.
 
-This is a first-class goal of the project (see `Logs/RESEARCH_CONTEXT.md`):
+This is a first-class goal of the project (see `docs/RESEARCH_CONTEXT.md`):
 reviewers will ask whether RGFN beats random sampling **and a non-synthesizable
 generator baseline** (does "synthesizable" do real work?), whether the oracle
 generalizes across systems (≥2 validated), and whether the neosubstrate

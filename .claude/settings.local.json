@@ -19,7 +19,12 @@
       "Bash(conda env *)",
       "Bash(git status *)",
       "Bash(python *)",
-      "Bash(conda run *)"
+      "Bash(conda run *)",
+      "Bash(git mv *)",
+      "Bash(sed -i '' 's|Logs/RESEARCH_CONTEXT\\\\.md|docs/RESEARCH_CONTEXT.md|g' CLAUDE.md README.md benchmarks/README.md docs/REFACTOR_LOG.md experiments/active_learning_6td3/README.md glue/active_learning/__init__.py glue/active_learning/loop.py glue/oracles/base.py glue/oracles/docking_6td3_oracle.py glue/proxies/learned_proxy.py)",
+      "Bash(grep -rn \"[^/]RESEARCH_CONTEXT.md\\\\|^RESEARCH_CONTEXT.md\\\\|\\\\`RESEARCH_CONTEXT.md\" --include=\"*.md\" --include=\"*.py\" .)",
+      "Bash(sed -i '' 's|`RESEARCH_CONTEXT\\\\.md`|`docs/RESEARCH_CONTEXT.md`|g' Logs/references/README.md)",
+      "Bash(sed -i '' 's| RESEARCH_CONTEXT\\\\.md| docs/RESEARCH_CONTEXT.md|g' Logs/005_tier2-vina-roc-pr-curves.md)"
     ]
   }
 }

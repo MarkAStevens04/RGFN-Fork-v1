@@ -5,7 +5,7 @@ upstream/ours boundary. **If something is broken, start here**: this documents
 what changed, why, what was verified, and what could not be verified (Balam was
 down; work was done on a Mac laptop, so no GPU/docking/training runs were possible).
 
-Owner: Mark + Claude. Goal context: `Logs/RESEARCH_CONTEXT.md`. Layout: `docs/ARCHITECTURE.md`.
+Owner: Mark + Claude. Goal context: `docs/RESEARCH_CONTEXT.md`. Layout: `docs/ARCHITECTURE.md`.
 
 ---
 
@@ -50,7 +50,7 @@ moving our own files**, not extracting code out of `rgfn/`.
 - `research/preprocessing/docking_6td3/submit_dock_6td3.sh` — same (2 refs).
 - `research/preprocessing/docking_gnina/analysis/plot_discrimination_curves.py` —
   `ROOT` now `parents[4]`; `PRE = ROOT / "research" / "preprocessing"`.
-- `Logs/RESEARCH_CONTEXT.md` — "Where things live" updated + restructure note.
+- `docs/RESEARCH_CONTEXT.md` — "Where things live" updated + restructure note.
 - `Logs/000_TEMPLATE.md` — `pre-processing/` → `research/preprocessing/` prefixes.
 - `scripts/hpc/submit.sh` — train line → `python scripts/train.py ...`.
 
@@ -118,7 +118,7 @@ anything needing the GPU/heavy deps. Verified what is checkable statically.
 # 2026-06-24 — Active-learning loop (branch `active-learning-loop`)
 
 First implementation of the multi-round active-learning loop from
-`[bengio2021gflownet]` Alg. 1 (transcribed in `Logs/RESEARCH_CONTEXT.md`), wired
+`[bengio2021gflownet]` Alg. 1 (transcribed in `docs/RESEARCH_CONTEXT.md`), wired
 to our 6TD3 docking oracle and kept oracle-agnostic for future oracles (MD, etc.).
 
 ## Grounding decision (important — re-checked against the papers)
@@ -295,3 +295,28 @@ already aligned. What changed is documentation + the guard:
   exponential reward boosting doesn't explode/vanish on the real differential.
 - The headline plots reviewers will want: Top-K-vs-oracle-calls curve and a
   random-acquisition baseline (`[bengio2021gflownet]` Fig. 7 analog).
+
+---
+
+# 2026-06-25 (cont.): documentation consolidation
+
+Reduced duplication across the project docs (goal: one home per fact, fewer
+chances for versions to drift):
+- **Moved `Logs/RESEARCH_CONTEXT.md` → `docs/RESEARCH_CONTEXT.md`** (`git mv`);
+  updated all ~14 referencing files (code docstrings, READMEs, CLAUDE.md, configs).
+- **Slimmed `Logs/README.md`** to a short intro + pointers. Its duplicated
+  "The systems" and "Common methodology" sections were deleted (already covered by
+  RESEARCH_CONTEXT's systems table + terminology; 5HXB anchoring specifics remain
+  in log 001). Its experiment **Index** moved into `RESEARCH_CONTEXT.md` (links now
+  `../Logs/`). Its "Where results live" + "Datasets" moved into `ARCHITECTURE.md`.
+- **`ARCHITECTURE.md`** is now the single source for repo layout + data/result
+  locations (new "Data, datasets & results" section); RESEARCH_CONTEXT's
+  "Where things live" trimmed to a pointer to it.
+- Net: systems/terminology live once (RESEARCH_CONTEXT); locations live once
+  (ARCHITECTURE); the experiment index lives once (RESEARCH_CONTEXT).
+- **Path-corrected the historical logs** (001–005): their `pre-processing/` path
+  references are now `research/preprocessing/` (real, clickable paths), so the
+  "read these as research/preprocessing/" translation note was **removed** from
+  both `RESEARCH_CONTEXT.md` and `CLAUDE.md`. Only verbatim *commit messages* in
+  the logs' "Relevant Versions" blocks still say "pre-processing" — left intact,
+  since those quote real historical commits.

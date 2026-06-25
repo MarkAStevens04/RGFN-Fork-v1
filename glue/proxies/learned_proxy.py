@@ -1,7 +1,7 @@
 """Trainable atom-graph MPNN surrogate (the proxy ``M``) for the active-learning loop.
 
 This is the fast in-loop reward of the active-learning loop described in
-``Logs/RESEARCH_CONTEXT.md`` (``[bengio2021gflownet]`` §4.3 / Alg. 1). RGFN trains
+``docs/RESEARCH_CONTEXT.md`` (``[bengio2021gflownet]`` §4.3 / Alg. 1). RGFN trains
 against ``M(x)^beta``; the expensive oracle ``O`` is queried only on per-round
 query batches and ``M`` is refit on the accumulated labels each round.
 

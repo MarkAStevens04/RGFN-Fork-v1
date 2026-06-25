@@ -2,7 +2,7 @@
 
 This directory is the runnable **example of the active-learning loop** with our
 6TD3 docking oracle. It implements Algorithm 1 of `[bengio2021gflownet]` (see
-`Logs/RESEARCH_CONTEXT.md` → "How the model learns") on the validated CDK12-DDB1
+`docs/RESEARCH_CONTEXT.md` → "How the model learns") on the validated CDK12-DDB1
 system.
 
 ## The loop (one round)

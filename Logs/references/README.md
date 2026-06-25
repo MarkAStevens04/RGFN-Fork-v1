@@ -30,7 +30,7 @@ repeat. The novel piece is **the oracle itself** — a two-tier, same-pose docki
 differential that scores whether a candidate's *arm* recruits the second protein of the
 ternary complex. Code: the generator lives in RGFN's `rgfn/gfns/reaction_gfn/`; our
 oracle/proxy/sampler code lives in the `glue/` package and plugs into RGFN's reward
-interface; configs in `configs/glue/`. See `RESEARCH_CONTEXT.md` for the full picture.
+interface; configs in `configs/glue/`. See `docs/RESEARCH_CONTEXT.md` for the full picture.
 
 ---
 
@@ -50,7 +50,7 @@ The original **GFlowNet**. Two ideas to internalize:
    AutoDock scores, refit on ~200 freshly docked molecules per round — the direct template
    for our setup, with our docking differential in the role of `O`. **`O` scores enter only
    by retraining `M`, never as a direct RGFN reward.** Full pseudocode is transcribed in
-   `RESEARCH_CONTEXT.md` ("How the model learns"). &nbsp;`pdfs/bengio2021gflownet.pdf` · arXiv:2106.04399
+   `docs/RESEARCH_CONTEXT.md` ("How the model learns"). &nbsp;`pdfs/bengio2021gflownet.pdf` · arXiv:2106.04399
 
 ### `[koziarski2024rgfn]` — RGFN: Synthesizable Molecular Generation (NeurIPS 2024)
 **The paper this whole fork builds on.** RGFN = Reaction-GFlowNet: instead of growing a

@@ -5,7 +5,7 @@ This is a research fork of **RGFN** (Reaction-GFlowNet) for generating novel
 shaping, batch-selection strategies, benchmarks, and dataset tooling.
 
 **Read this file and `docs/ARCHITECTURE.md` before making structural changes.**
-For the science/goals, read `Logs/RESEARCH_CONTEXT.md`.
+For the science/goals, read `docs/RESEARCH_CONTEXT.md`.
 
 ---
 
@@ -32,6 +32,17 @@ to upstream files are three small operational overrides documented in
 
 ## How to extend the system (don't edit `rgfn/`)
 
+0. **Understand before you change.** Ground the work in the science *first*: read
+   `docs/RESEARCH_CONTEXT.md` (goals, the validated oracle/metric, terminology),
+   the relevant experiment logs in `Logs/`, and the source papers in
+   `Logs/references/`. Base each consequential choice — architecture, metric, sign
+   convention — on the file that *recorded* the decision (paper section, upstream
+   `rgfn/` code, or our own log/analysis script), **never** on what merely seems
+   plausible. Confirm the change is consistent with prior results and the
+   project's direction, and **ask the user to clarify** anything ambiguous before
+   building. A design that looks reasonable but silently diverges from the
+   publications or our findings is the costliest mistake here — and it passes
+   compile/import/smoke tests, so only this step catches it.
 1. **New oracle** → implement the science in `glue/oracles/`.
 2. **Expose it to training** → write a `@gin.configurable` adapter in
    `glue/proxies/` subclassing upstream `CachedProxyBase`/`ProxyBase`. See
@@ -73,5 +84,3 @@ on the startup path — fix `glue/registry.py`, not the config.
   in `docs/REFACTOR_LOG.md` so the next agent can continue or repair the work.
 - **Experiment logs:** use the `experiment-log` skill for any real computational
   experiment.
-- **Historical logs** (`Logs/001`–`005`) predate the 2026-06-24 restructure and
-  reference `pre-processing/`; read those paths as `research/preprocessing/`.

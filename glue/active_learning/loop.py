@@ -1,6 +1,6 @@
 """``ActiveLearningLoop`` — the multi-round loop of ``[bengio2021gflownet]`` Alg. 1.
 
-Verbatim algorithm (see ``Logs/RESEARCH_CONTEXT.md``):
+Verbatim algorithm (see ``docs/RESEARCH_CONTEXT.md``):
 
     Init: proxy M; policy pi_theta; oracle O; i = 1
     while i <= N:

@@ -2,7 +2,7 @@
 
 Scores a molecule by the **neosubstrate differential** (the DDB1 cooperativity
 bonus) on the 6TD3 system — our validated discrimination metric, and the
-best-ranked of six candidate signals (see ``Logs/RESEARCH_CONTEXT.md``,
+best-ranked of six candidate signals (see ``docs/RESEARCH_CONTEXT.md``,
 ``Logs/002`` validation, ``Logs/006`` six-way ablation, ``Logs/007`` MW control).
 For one molecule:
 

@@ -4,7 +4,7 @@ In ``[bengio2021gflownet]`` Alg. 1 the *oracle* ``O`` is the expensive, trusted
 scorer queried only on the per-round query batch; its labels enter training only
 by retraining the proxy ``M`` (never as a direct RGFN reward). Here ``O`` is our
 docking neosubstrate differential today, and an MD-stability score later (see
-``Logs/RESEARCH_CONTEXT.md``).
+``docs/RESEARCH_CONTEXT.md``).
 
 This module defines the thin, modular seam that lets the loop stay oracle-agnostic:
 any scorer that maps a list of SMILES to a list of floats can drive the loop.

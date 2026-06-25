@@ -26,7 +26,8 @@ name from a config in `configs/glue/`.
 RGFN-Fork/
 ├── CLAUDE.md                  # agent/contributor guide (rules + how to extend)
 ├── docs/
-│   ├── ARCHITECTURE.md        # this file
+│   ├── ARCHITECTURE.md        # this file (repo layout + where data/results live)
+│   ├── RESEARCH_CONTEXT.md    # the science, goals, terminology + experiment index
 │   ├── REFACTOR_LOG.md        # running record of the restructure + open items
 │   └── PATCHES.md             # the deliberate edits we made to upstream files
 │
@@ -66,7 +67,8 @@ RGFN-Fork/
 │       ├── docking_6td3/      #   6TD3/CR8 validated oracle
 │       ├── docking_gnina/     #   5HXB/CRBN system (+ analysis/)
 │       └── test-data/         #   curated known-glue datasets
-└── Logs/                      # OURS — experiment logs + RESEARCH_CONTEXT.md
+└── Logs/                      # OURS — experiment logs (index lives in RESEARCH_CONTEXT.md)
+    └── references/             #   paper shelf (bib + git-ignored PDFs)
 ```
 
 ## Component flow (training)
@@ -100,3 +102,32 @@ proxy plumbing so oracles stay unit-testable without the training stack.
 - **`models/` + `data/synthetic/`:** explicit input/output homes for the
   "models & datasets in, synthetic datasets out" goal; large/regenerable
   artifacts are gitignored.
+
+## Data, datasets & results
+
+Where the oracle's inputs and outputs live (single source of truth — the science
+narrative in `RESEARCH_CONTEXT.md` points here rather than re-listing locations).
+
+**Curated input datasets** (`research/preprocessing/test-data/`):
+- `DDB1_CDK12_Glues.csv` — 175 real CDK12-CCNK/DDB1 glues (161 unique, 123
+  purine-based). The 6TD3 KNOWN+ positives.
+- `CRBN_GSPT1_Glues.csv` — 200 real CRBN/GSPT1 glues (199 active, 188
+  glutarimide-bearing; MW up to ~1009, so a few are likely bivalent/PROTAC-range,
+  not pure glues). The CRBN KNOWN+ positives.
+- `Enamine_CRBN_Molecular_Glue_Library_*.smiles` — purchasable SCAFFOLD library
+  (potential glues, **not** validated degraders); git-ignored (large). Used in
+  early CRBN runs; superseded by the curated set above for the "known" positives.
+
+**Docking results:**
+- **Committed CSVs** (small, per-molecule scores):
+  `research/preprocessing/docking_6td3/{known,decoy_cdk}_results.csv` and
+  `research/preprocessing/docking_gnina/{batch_results_passB,decoy_results_passB}.csv`.
+  (`*.csv` is git-ignored by default; these are force-tracked — see `.gitignore`.)
+- **Full run outputs + SLURM logs** (Balam scratch, not in the repo):
+  `/scratch/markymoo/rgfn_runs/dock_6td3_<jobid>/`, `dock_crbn_<jobid>/`, and the
+  `dock6td3-<jobid>.out` / `dockcrbn-<jobid>.out` job logs.
+- **Cross-system comparison:** `research/preprocessing/compare_systems.py`
+  (per-system known-vs-decoy + cross-system); the six-signal ablation and
+  MW-control analyses live in `research/preprocessing/full_comparison*/`.
+- **Active-learning loop outputs:** per-round datasets + Top-K under each run's
+  `experiments/<config>/<timestamp>/active_learning/` (git-ignored run outputs).

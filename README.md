@@ -28,7 +28,7 @@ dataset tooling.
 - [`CLAUDE.md`](CLAUDE.md) — the boundary rules + how to add a new oracle/reward/sampler.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — full layout and rationale.
 - [`docs/PATCHES.md`](docs/PATCHES.md) — the few deliberate edits to upstream files.
-- [`Logs/RESEARCH_CONTEXT.md`](Logs/RESEARCH_CONTEXT.md) — the science and goals.
+- [`docs/RESEARCH_CONTEXT.md`](docs/RESEARCH_CONTEXT.md) — the science and goals.
 - [`Logs/references/`](Logs/references/) — the short shelf of papers the method
   and biology are grounded in; cite by key (e.g. `[koziarski2024rgfn]`).
 

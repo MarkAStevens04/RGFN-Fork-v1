@@ -89,10 +89,10 @@ A list of objectives for our project. Tiers: **MVP** (minimum publishable result
 
 
 ### Objective 0 — Oracle validation *(Foundation)*
-- [X] Validate the docking oracle on **6TD3**: 78-pp separation between known glues and warhead-matched decoys on the DDB1 neosubstrate differential — the validated testbed for RGFN.
-- [X] Confirm the **neosubstrate differential** (Tier2 − Tier1, same pose) as the discrimination metric. **The specific signal is the *Vina* Tier2 − Tier1 differential.** A six-way ablation (Vina/CNN × Tier1/Tier2/differential, entry 006) ranks it best of all six candidate signals (AUROC 0.946, vs 0.85 for the CNN differential and 0.69 for absolute Vina Tier 1), and molecular-weight matching (entry 007) confirms the edge is genuine cooperativity, not ligand size: it stays 0.95 → 0.87 under size-matching while the absolute scores collapse (absolute Vina Tier 1 falls below chance). This is the signal wired into the active-learning loop (`glue/oracles/Docking6TD3Oracle`, `ddb1_dvina`).
-- [X] Stand up the batched **gnina** pipeline on Balam (16 workers, 4× A100; ~14 min / 400 molecules).
-- [ ] ⚠️ **CRBN / 5HXB docking oracle** — blocked at a ceiling (−3 pp; docking can't see CRBN's PPI-driven recognition). Not usable as-is; revisit via MD (Objective 3) rather than sinking more time into box-docking tweaks.
+- [X] Validate the docking oracle on **6TD3**: 78-pp separation between known glues and warhead-matched decoys on the DDB1 neosubstrate differential — the validated testbed for RGFN. (exp `002`)
+- [X] Confirm the **neosubstrate differential** (Tier2 − Tier1, same pose) as the discrimination metric. **The specific signal is the *Vina* Tier2 − Tier1 differential.** Did six-way ablation and validated again with MW matching. (exp `006`, `007`)
+- [X] Stand up the batched **gnina** pipeline on Balam (16 workers, 4× A100; ~14 min / 400 molecules). (exp `004`)
+- [ ] ⚠️ **CRBN / 5HXB docking oracle** — blocked at a ceiling (−3 pp; docking can't see CRBN's PPI-driven recognition). Not usable as-is; revisit via MD (Objective 3) rather than sinking more time into box-docking tweaks. (exp `001`, `003`)
 - [ ] Validate the oracle on **≥1 additional system** from MolGlueDB (generalization evidence the journals require).
 ### Objective 1 — First end-to-end RGFN run *(MVP)*
 - [ ] Wire the glue oracle into RGFN's reward interface (`glue/` package → `[koziarski2024rgfn]` proxy/reward API).
@@ -121,6 +121,22 @@ A list of objectives for our project. Tiers: **MVP** (minimum publishable result
 - [ ] Write the **novelty paragraph** vs. the conditioned JT-VAE glue generator (reaction-grounded synthesizability + goal-directed sampling, not a conditioned VAE).
 - [ ] Keep **code/data release-ready**: pinned env, fixed seeds, dataset provenance; archive every run's full output.
 
+
+---
+
+## Experiment log index
+
+Chronological record; the objectives above cite these by number. Full entries in `../Logs/`.
+
+| # | Date | Title | Verdict |
+|---|------|-------|---------|
+| [001](../Logs/001_5hxb-crbn-anchored-docking.md) | 2026-06-11 → 06-18 | 5HXB / CRBN — warhead-anchored docking oracle + decoy control | Works as a docker; **discrimination ceiling** — GSPT1 bonus is a geometric artifact, not a glue signal |
+| [002](../Logs/002_6td3-cr8-validation-and-discrimination.md) | 2026-06-18 | 6TD3 / CDK12-DDB1 — oracle validation + discrimination run | **Decisive discrimination** — 85.6% vs 7.3% on DDB1 differential (+78 pts); validated oracle |
+| [003](../Logs/003_crbn-vs-6td3-cross-system.md) | 2026-06-18 | 5HXB vs 6TD3 — head-to-head neosubstrate differential comparison | **6TD3 discriminates (+78 pts); 5HXB does not (−3 pts)** — failure is structural, not methodological |
+| [004](../Logs/004_compute-benchmark.md) | 2026-06-18 | Compute benchmark — login node vs Balam debug_full_node (4× A100) | **CRBN 21× / 6TD3 6.6× faster; batching is the dominant lever** — conformer embedding is the new bottleneck |
+| [005](../Logs/005_tier2-vina-roc-pr-curves.md) | 2026-06-23 | Tier 2 Vina — ROC and PR curves for 6TD3 and 5HXB | **6TD3 AUC=0.890 / AP=0.872; CRBN AUC=0.627** — absolute Tier 2 is a strong 6TD3 oracle; CRBN ceiling confirmed structural |
+| [006](../Logs/006_6td3-violin-distributions.md) | 2026-06-25 | 6TD3 — which metric discriminates best (Tier 1 vs Tier 2 vs Δ, Vina vs CNN) | **Vina ΔT2−T1 wins (AUROC 0.946)**; Vina Tier 1 worst (0.691) — the signal lives in what DDB1 adds |
+| [007](../Logs/007_6td3-molecular-weight-control.md) | 2026-06-25 | 6TD3 — controlling glue-vs-decoy discrimination for molecular weight | **Differential survives MW-matching (0.95→0.87); absolute scores collapse (Vina Tier 1 → 0.38)** — it isn't reading ligand size |
 
 ---
 
@@ -156,18 +172,6 @@ A list of objectives for our project. Tiers: **MVP** (minimum publishable result
 
 ## Where things live
 
-- **Experiment logs**: `Logs/` (this directory)
-- **Key publications** (method + biology): `Logs/references/` — orientation sheet + PDFs; ground method/biology claims here
-- **Pre-processing scripts**: `research/preprocessing/`
-- **Docking scripts (CRBN)**: `research/preprocessing/docking_gnina/`
-- **Docking scripts (6TD3)**: `research/preprocessing/docking_6td3/`
-- **Protein models**: `models/`
-- **Test datasets**: `research/preprocessing/test-data/`
-- **Scratch (Balam)**: `/scratch/markymoo/rgfn_runs/`
-
-> **Note (2026-06-24 refactor):** the docking/validation work moved from
-> `pre-processing/` to `research/preprocessing/` (internals unchanged). New code
-> for oracles/rewards/samplers lives in the `glue/` package, and new configs in
-> `configs/glue/`. See `CLAUDE.md` and `docs/ARCHITECTURE.md` for the full layout.
-> Experiment logs 001–005 still reference the old `pre-processing/` paths as a
-> point-in-time record; translate `pre-processing/` → `research/preprocessing/`.
+- **Experiment logs**: `Logs/` (indexed above).
+- **Key publications** (method + biology): `Logs/references/` — orientation sheet + PDFs; ground method/biology claims here.
+- **Repo layout, code, datasets, and result/scratch locations**: see `docs/ARCHITECTURE.md` (the single source for where things live in the repo) — kept there so locations aren't duplicated across docs.
