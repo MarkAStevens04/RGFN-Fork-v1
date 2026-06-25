@@ -85,19 +85,42 @@ Realistic tiering (revised down from an earlier "NeurIPS primary / Nature stretc
 
 ## Current project status
 
-### Validated ✅
-- **CDK12-DDB1 system (6TD3)** works as an oracle: straight box docking produces 78-percentage-point separation between known glues and random warhead-bearing decoys on the DDB1 neosubstrate differential. This is the right testbed for RGFN.
-- The neosubstrate differential (Tier2 − Tier1, same pose) is the right metric — it isolates the arm's contribution to recruiting the second protein. **The specific signal is the *Vina* Tier2 − Tier1 differential.** A six-way ablation (Vina/CNN × Tier1/Tier2/differential, entry 006) ranks it best of all six candidate signals (AUROC 0.946, vs 0.85 for the CNN differential and 0.69 for absolute Vina Tier 1), and molecular-weight matching (entry 007) confirms the edge is genuine cooperativity, not ligand size: it stays 0.95 → 0.87 under size-matching while the absolute scores collapse (absolute Vina Tier 1 falls below chance). This is the signal wired into the active-learning loop (`glue/oracles/Docking6TD3Oracle`, `ddb1_dvina`).
-- Compute pipeline on Balam: batched gnina docking (16 workers, 4× A100) reduces wall time from ~90 min to ~14 min for 400 molecules.
+A list of objectives for our project. Tiers: **MVP** (minimum publishable result), **Target** (the full glue story), **Stretch** (upside). Check items `[X]` as they land; blocked items carry a ⚠️.
 
-### Does NOT work / ceiling hit ⚠️
-- **CRBN system (5HXB)** shows near-zero neosubstrate differential discrimination (−3 percentage points) even with warhead-anchored docking. The oracle successfully docks into the CRBN binding pocket, but can't tell real glues from random warhead-bearing molecules. Most likely cause: CRBN neosubstrate recognition is dominated by protein–protein interface complementarity that a same-pose ligand-contact differential can't see (see the caveat above). This system is **not suitable as the RGFN oracle** in its current form.
 
-### Open / next experiments 🔲
-- Test whether **Molecular Dynamics stability** can serve as a better or complementary oracle `O` (especially for CRBN-type systems where docking has a ceiling). In active-learning terms, MD becomes the expensive `O` and a learned model becomes the proxy `M`.
-- Validate oracle on additional systems (MolGlueDB has other known-glue systems to test).
-- **Run RGFN with the validated 6TD3 oracle through the active-learning loop** (`[bengio2021gflownet]` Alg. 1) and evaluate generated molecules; produce the top-k-vs-oracle-calls curve and a random-acquisition baseline. (Loop scaffolding is built — `glue/active_learning/`, `configs/glue/active_learning_6td3.gin` — and validated locally with a mock oracle; the real docking run needs Balam.)
-- ~~Ablation: does Tier 2 absolute score alone work, or is the differential necessary?~~ **Answered (entries 006/007):** the differential is necessary — absolute Tier 2 trails it and absolute Tier 1 falls below chance once molecular weight is controlled.
+### Objective 0 — Oracle validation *(Foundation)*
+- [X] Validate the docking oracle on **6TD3**: 78-pp separation between known glues and warhead-matched decoys on the DDB1 neosubstrate differential — the validated testbed for RGFN.
+- [X] Confirm the **neosubstrate differential** (Tier2 − Tier1, same pose) as the discrimination metric. **The specific signal is the *Vina* Tier2 − Tier1 differential.** A six-way ablation (Vina/CNN × Tier1/Tier2/differential, entry 006) ranks it best of all six candidate signals (AUROC 0.946, vs 0.85 for the CNN differential and 0.69 for absolute Vina Tier 1), and molecular-weight matching (entry 007) confirms the edge is genuine cooperativity, not ligand size: it stays 0.95 → 0.87 under size-matching while the absolute scores collapse (absolute Vina Tier 1 falls below chance). This is the signal wired into the active-learning loop (`glue/oracles/Docking6TD3Oracle`, `ddb1_dvina`).
+- [X] Stand up the batched **gnina** pipeline on Balam (16 workers, 4× A100; ~14 min / 400 molecules).
+- [ ] ⚠️ **CRBN / 5HXB docking oracle** — blocked at a ceiling (−3 pp; docking can't see CRBN's PPI-driven recognition). Not usable as-is; revisit via MD (Objective 3) rather than sinking more time into box-docking tweaks.
+- [ ] Validate the oracle on **≥1 additional system** from MolGlueDB (generalization evidence the journals require).
+### Objective 1 — First end-to-end RGFN run *(MVP)*
+- [ ] Wire the glue oracle into RGFN's reward interface (`glue/` package → `[koziarski2024rgfn]` proxy/reward API).
+- [ ] Build the seed dataset `D_0` and **warm-start the proxy** (`[bengio2021gflownet]` Alg. 1 init).
+- [ ] Run RGFN through the **active-learning loop** on the validated 6TD3 oracle.
+- [ ] **Instrument oracle-call counting from the very first run** (cannot be reconstructed later).
+- [ ] Produce the **top-k-vs-oracle-calls** curve with a **random-acquisition baseline**.
+### Objective 2 — Reward design & ablations *(Target)*
+- [ ] Assemble the multi-objective reward: differential + QED (+ synthesizability comes free from RGFN).
+- [ ] Ablation: **differential vs. Tier-2-absolute-only** — does the cooperativity term actually matter?
+- [ ] Ablation: contribution of each reward component / building-block set.
+### Objective 3 — Beat the CRBN ceiling with MD *(Target)*
+- [ ] Test **MD stability** as oracle `O` for CRBN-type systems where docking plateaus.
+- [ ] If MD discriminates, fold it in as the expensive `O` with a learned proxy `M` (multi-fidelity loop).
+### Objective 4 — Generalization & baselines *(Target / journal bar)*
+- [ ] Drive **≥2 systems** end-to-end through generation (not just oracle validation).
+- [ ] Add a **non-synthesizable baseline generator** (e.g., graph GFlowNet / REINVENT) on the *same* oracle and budget.
+- [ ] **≥3 seeds** per headline result, reported with error bars.
+### Objective 5 — Evaluation suite *(Target)*
+- [ ] **Synthesizability**: SA distribution + by-construction route advantage vs. the non-synthesizable baseline (the headline differentiator).
+- [ ] **Diversity** (internal + scaffold) under a fixed oracle budget.
+- [ ] **Recovery** of known glues / glutarimide chemistry (retrospective enrichment).
+- [ ] **Anti-gaming**: in-loop-proxy vs. high-fidelity-oracle correlation on top-k; medchem sanity (PAINS, MW, logP).
+- [ ] **High-fidelity validation** of top-k (co-folding / Boltz-2 / short MD).
+### Objective 6 — Positioning & release *(always-on)*
+- [ ] Write the **novelty paragraph** vs. the conditioned JT-VAE glue generator (reaction-grounded synthesizability + goal-directed sampling, not a conditioned VAE).
+- [ ] Keep **code/data release-ready**: pinned env, fixed seeds, dataset provenance; archive every run's full output.
+
 
 ---
 
