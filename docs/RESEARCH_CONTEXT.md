@@ -95,15 +95,16 @@ A list of objectives for our project. Tiers: **MVP** (minimum publishable result
 - [ ] ⚠️ **CRBN / 5HXB docking oracle** — blocked at a ceiling (−3 pp; docking can't see CRBN's PPI-driven recognition). Not usable as-is; revisit via MD (Objective 3) rather than sinking more time into box-docking tweaks. (exp `001`, `003`)
 - [ ] Validate the oracle on **≥1 additional system** from MolGlueDB (generalization evidence the journals require).
 ### Objective 1 — First end-to-end RGFN run *(MVP)*
-- [ ] Wire the glue oracle into RGFN's reward interface (`glue/` package → `[koziarski2024rgfn]` proxy/reward API).
-- [ ] Build the seed dataset `D_0` and **warm-start the proxy** (`[bengio2021gflownet]` Alg. 1 init).
-- [ ] Run RGFN through the **active-learning loop** on the validated 6TD3 oracle.
+- [X] Wire the glue oracle into RGFN's reward interface (`glue/` package → `[koziarski2024rgfn]` proxy/reward API). (exp `009`)
+- [X] Build the seed dataset `D_0` and **warm-start the proxy** (`[bengio2021gflownet]` Alg. 1 init) — 408 labels, proxy val MSE 0.243. (exp `009`)
+- [ ] Run RGFN through the **active-learning loop** on the validated 6TD3 oracle. ⚠️ Inner-loop learning confirmed (1 round, exp `009`); multi-round + true-oracle labels still pending a compute-node run (login-node CPU cap killed the query-batch docking).
 - [ ] **Instrument oracle-call counting from the very first run** (cannot be reconstructed later).
 - [ ] Produce the **top-k-vs-oracle-calls** curve with a **random-acquisition baseline**.
 ### Objective 2 — Reward design & ablations *(Target)*
 - [ ] Assemble the multi-objective reward: differential + QED (+ synthesizability comes free from RGFN).
 - [ ] Ablation: **differential vs. Tier-2-absolute-only** — does the cooperativity term actually matter?
 - [ ] Ablation: contribution of each reward component / building-block set.
+- [ ] Ablation: **pose selection — CNN vs. Vina** — does keeping the top-Vina pose discriminate as well as the CNN-selected pose? **Scripts ready, awaiting Balam** (exp `008`): `sbatch research/preprocessing/pose_selection_ablation/submit_pose_ablation.sh` (smoke-test off-Balam first: `python research/preprocessing/pose_selection_ablation/smoke_test.py`).
 ### Objective 3 — Beat the CRBN ceiling with MD *(Target)*
 - [ ] Test **MD stability** as oracle `O` for CRBN-type systems where docking plateaus.
 - [ ] If MD discriminates, fold it in as the expensive `O` with a learned proxy `M` (multi-fidelity loop).
@@ -137,6 +138,8 @@ Chronological record; the objectives above cite these by number. Full entries in
 | [005](../Logs/005_tier2-vina-roc-pr-curves.md) | 2026-06-23 | Tier 2 Vina — ROC and PR curves for 6TD3 and 5HXB | **6TD3 AUC=0.890 / AP=0.872; CRBN AUC=0.627** — absolute Tier 2 is a strong 6TD3 oracle; CRBN ceiling confirmed structural |
 | [006](../Logs/006_6td3-violin-distributions.md) | 2026-06-25 | 6TD3 — which metric discriminates best (Tier 1 vs Tier 2 vs Δ, Vina vs CNN) | **Vina ΔT2−T1 wins (AUROC 0.946)**; Vina Tier 1 worst (0.691) — the signal lives in what DDB1 adds |
 | [007](../Logs/007_6td3-molecular-weight-control.md) | 2026-06-25 | 6TD3 — controlling glue-vs-decoy discrimination for molecular weight | **Differential survives MW-matching (0.95→0.87); absolute scores collapse (Vina Tier 1 → 0.38)** — it isn't reading ligand size |
+| [008](../Logs/008_pose-selection-cnn-vs-vina.md) | 2026-06-25 | 6TD3 — does pose selection (CNN vs Vina) change discrimination? | *Pending Balam run* — scripts ready; tests whether picking the top-Vina pose degrades the Vina ΔT2−T1 oracle vs. the CNN-selected pose |
+| [009](../Logs/009_first-rgfn-inner-loop-learning.md) | 2026-06-25 | 6TD3 / RGFN — first end-to-end active-learning run (1 round, inner-loop learning) | **Generator learns** — loss ↓24×, mean predicted ΔT2−T1 0→−0.62, stays diverse; but best plateaus short of real glues (no scaffold <−2.0) and QED drifts down 0.40→0.17. Query-batch docking killed by login-node CPU cap — no true labels yet |
 
 ---
 

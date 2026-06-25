@@ -24,7 +24,17 @@
       "Bash(sed -i '' 's|Logs/RESEARCH_CONTEXT\\\\.md|docs/RESEARCH_CONTEXT.md|g' CLAUDE.md README.md benchmarks/README.md docs/REFACTOR_LOG.md experiments/active_learning_6td3/README.md glue/active_learning/__init__.py glue/active_learning/loop.py glue/oracles/base.py glue/oracles/docking_6td3_oracle.py glue/proxies/learned_proxy.py)",
       "Bash(grep -rn \"[^/]RESEARCH_CONTEXT.md\\\\|^RESEARCH_CONTEXT.md\\\\|\\\\`RESEARCH_CONTEXT.md\" --include=\"*.md\" --include=\"*.py\" .)",
       "Bash(sed -i '' 's|`RESEARCH_CONTEXT\\\\.md`|`docs/RESEARCH_CONTEXT.md`|g' Logs/references/README.md)",
-      "Bash(sed -i '' 's| RESEARCH_CONTEXT\\\\.md| docs/RESEARCH_CONTEXT.md|g' Logs/005_tier2-vina-roc-pr-curves.md)"
+      "Bash(sed -i '' 's| RESEARCH_CONTEXT\\\\.md| docs/RESEARCH_CONTEXT.md|g' Logs/005_tier2-vina-roc-pr-curves.md)",
+      "Bash(pip show *)",
+      "Read(//scratch/markymoo/**)",
+      "Read(//scratch/markymoo/gnina/**)",
+      "Bash(/scratch/markymoo/gnina/run_gnina.sh --version)",
+      "Bash(pkill -f \"active_learning.py --cfg /scratch/markymoo/al_probe.gin\")",
+      "Bash(mkdir -p .claude/skills)",
+      "Bash(mv .claude/experiment-log .claude/skills/experiment-log)",
+      "Bash(bash -n research/preprocessing/pose_selection_ablation/submit_pose_ablation.sh)",
+      "Bash(bash -n research/preprocessing/pose_selection_ablation/collect_results.sh)",
+      "WebFetch(domain:ar5iv.labs.arxiv.org)"
     ]
   }
 }
