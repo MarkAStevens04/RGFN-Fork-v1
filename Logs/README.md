@@ -13,6 +13,7 @@ objective, method, key scripts, results, **where the result files live**, and co
 | [003](003_crbn-vs-6td3-cross-system.md) | 2026-06-18 | 5HXB vs 6TD3 — head-to-head neosubstrate differential comparison | **6TD3 differential discriminates (+78 pts); 5HXB does not (−3 pts)** — failure is structural, not methodological |
 | [004](004_compute-benchmark.md) | 2026-06-18 | Compute benchmark — login node vs Balam debug_full_node (4× A100) | **CRBN 21× / 6TD3 6.6× faster; batching is the dominant lever** — conformer embedding is the new Amdahl bottleneck |
 | [005](005_tier2-vina-roc-pr-curves.md) | 2026-06-23 | Tier 2 Vina — ROC and PR curves for 6TD3 and 5HXB | **6TD3 AUC=0.890 / AP=0.872; CRBN AUC=0.627 / AP=0.726** — absolute Tier 2 score alone is a strong 6TD3 oracle; CRBN ceiling confirmed as structural |
+| [006](006_6td3-violin-distributions.md) | 2026-06-25 | 6TD3 / CDK12-DDB1 — which metric discriminates best (Tier 1 vs Tier 2 vs Δ, Vina vs CNN) | **Vina ΔT2−T1 wins (AUROC 0.946)**; Vina Tier 1 worst (0.691) — the signal lives in what DDB1 adds, justifying the differential as the oracle reward |
 
 ## The systems
 

@@ -182,11 +182,31 @@ the *cheap MPNN proxy*, so GFN training uses the `reaction` env (not
 `reaction_docking`) — **docking never runs in the inner loop**, only on the
 per-round query batch.
 
+## Correction (2026-06-25): oracle uses the VINA differential, lower-is-better
+
+The first draft of `Docking6TD3Oracle` computed the **CNNaffinity** differential
+(`ddb1_dcnnaff`) with `higher_is_better=True`. That was wrong on both counts.
+Checking log 002 + `compare_systems.py` + the result CSVs: the validated +78pt
+discrimination is on **`ddb1_dvina` = `Vina(Tier2) − Vina(Tier1)`**, where *more
+negative = better glue* (known median −2.20 vs decoy −0.60; 85.6% vs 7.3% below
+−1.5). The CNNaffinity differential does **not** discriminate (known +0.23 vs
+decoy +0.04, decoy range up to +1.80). CNNscore is still used — but only to pick
+the pose (`max cnnsc`), matching `dock_cluster.py`. Fixed (user chose: store raw
+`ddb1_dvina`, lower-is-better):
+- `docking_6td3_oracle.py` now returns `vina_t2 − vina_t1`; `higher_is_better=False`.
+- `LearnedGlueProxy.higher_is_better` is now a constructor arg (set `False` in
+  `active_learning_6td3.gin`); dropped the positive output clip (the base config's
+  exponential boosting makes the reward positive for any prediction) in favour of
+  a symmetric `±clip` sanity bound; invalid molecules get a sign-aware worst-case.
+- `ActiveLearningLoop.run()` now asserts `proxy.higher_is_better ==
+  oracle.higher_is_better` to catch this class of bug.
+- `seed_6td3.csv` / `build_seeds.py` rebuilt from the `ddb1_dvina` column.
+
 ## Deliberate divergences from the publications (validate/revisit on Balam)
 
-1. **Proxy target** — predicts our docking neosubstrate *differential*, not
-   AutoDock sEH affinity. (The project's novel oracle; our differential is
-   higher-is-better, so no sign flip — unlike the paper's affinity.)
+1. **Proxy target** — predicts our docking neosubstrate *differential*
+   (`ddb1_dvina`, lower-is-better), not AutoDock sEH affinity. The project's
+   novel oracle.
 2. **Trainable proxy** — `SehMoleculeProxy` is inference-only with frozen
    weights; we add `.fit()`. This is what Alg. 1 requires; the shipped proxy just
    doesn't expose it.

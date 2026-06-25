@@ -36,13 +36,16 @@ Documented divergences from the publications (flag for Balam validation):
        ``SEHProxyWrapper`` from ``seh_proxy.py`` are never imported here). The
        sEH proxy predicts a different target (sEH affinity), so its weights would
        be the wrong prior anyway.
-    4. Label scaling. ``[bengio2021gflownet]`` A.5 scales ``O(x)`` to be positive
-       before fitting ``M`` (GFlowNet needs a positive reward). We standardise
-       labels (subtract mean / divide std) at ``fit`` time and clip predictions
-       at ``min_value`` at inference — mirroring the paper's renormalisation and
-       ``SehMoleculeProxy``'s own ``clip(1e-4, 100)``. Unlike docking-affinity
-       (lower-is-better, so the paper negates it), our differential is already
-       higher-is-better, so no sign flip is applied. See ``higher_is_better``.
+    4. Label scaling & sign. ``[bengio2021gflownet]`` A.5 scales ``O(x)`` to be
+       positive before fitting ``M`` and, for docking (lower-is-better), "takes
+       its opposite". We instead standardise labels (subtract mean / divide std)
+       at ``fit`` time for a stable prediction scale, and let the Reward handle
+       sign + positivity: the base config uses *exponential* boosting, so the
+       reward ``exp(signed_value * beta)`` is positive for any real prediction,
+       and ``higher_is_better`` (a constructor arg) sets the sign. For the 6TD3
+       ``ddb1_dvina`` differential, ``higher_is_better=False`` (Vina binding
+       energy: more negative = better) — so we do NOT negate the label; the
+       Reward negates ``signed_value`` for us.
     5. Scale. The molecule-domain run in the paper uses ``|D_0| = 2000`` and 200
        freshly-docked molecules per round. Ours are gin-configurable and default
        to whatever labelled data we have; the gap is expected and logged.
@@ -93,8 +96,8 @@ class LearnedGlueProxy(CachedProxyBase[ReactionState]):
         max_epochs: int = 100,
         patience: int = 10,
         val_fraction: float = 0.1,
-        min_value: float = 1e-4,
-        max_value: float = 100.0,
+        higher_is_better: bool = True,
+        clip: float = 10.0,
         seed: int = 42,
     ):
         """
@@ -109,8 +112,15 @@ class LearnedGlueProxy(CachedProxyBase[ReactionState]):
             val_fraction: fraction of the dataset held out for early stopping
                 (the paper uses a fixed 3000-molecule validation set; we hold out
                 a fraction instead — documented divergence for small datasets).
-            min_value / max_value: inference predictions are clipped to this range
-                so the GFN always sees a positive reward (cf. SehMoleculeProxy).
+            higher_is_better: MUST match the oracle whose labels this proxy is fit
+                on. For the 6TD3 ``ddb1_dvina`` differential this is **False**
+                (Vina binding energy: more negative = better). The loop asserts
+                this equals the oracle's flag to catch mismatches.
+            clip: symmetric sanity bound on (standardised) predictions, ``[-clip,
+                +clip]``. This is NOT a positivity assumption — the base config
+                uses *exponential* reward boosting, so the GFN reward
+                (``exp(signed_value * beta)``) is positive regardless of sign;
+                the clip only guards against runaway outliers blowing up ``exp``.
             seed: RNG seed for the train/val split and weight init reproducibility.
         """
         super().__init__()
@@ -123,19 +133,26 @@ class LearnedGlueProxy(CachedProxyBase[ReactionState]):
         self.max_epochs = max_epochs
         self.patience = patience
         self.val_fraction = val_fraction
-        self.min_value = min_value
-        self.max_value = max_value
+        self._higher_is_better = higher_is_better
+        self.clip = clip
         self.seed = seed
 
         self.model = self._build_model()
-        # Standardisation stats learned at fit() time (predictions live in the
-        # standardised, positive-ish space; raw labels are mapped through these).
+        # Predictions live in standardised label space (mean 0, std 1); these
+        # stats are learned at fit() time and kept for logging.
         self._label_mean: float = 0.0
         self._label_std: float = 1.0
         self._is_fitted: bool = False
 
-        # Invalid (early-terminal) states get the worst possible reward.
-        self.cache = {ReactionStateEarlyTerminal(None): self.min_value}
+        # Invalid (early-terminal) states get the worst-case standardised value so
+        # they always receive the lowest reward. Sign-aware: with lower-is-better
+        # the worst case is the *largest* value (reward ~ exp(-value*beta)).
+        self.cache = {ReactionStateEarlyTerminal(None): self._failed_value}
+
+    @property
+    def _failed_value(self) -> float:
+        """Worst-case standardised prediction for invalid molecules (sign-aware)."""
+        return -self.clip if self._higher_is_better else self.clip
 
     def _build_model(self) -> MPNNet:
         torch.manual_seed(self.seed)
@@ -153,22 +170,26 @@ class LearnedGlueProxy(CachedProxyBase[ReactionState]):
 
     @property
     def is_non_negative(self) -> bool:
-        return True
+        # Predictions are standardised (mean ~0) and may be negative. That's fine
+        # for the base config's *exponential* reward boosting; this proxy does not
+        # support "linear" boosting (which requires non-negative proxy values).
+        return False
 
     @property
     def higher_is_better(self) -> bool:
-        # Our differential is already higher-is-better (more arm-driven affinity
-        # gain when the recruited partner is present). No sign flip, unlike the
-        # paper's docking-affinity target.
-        return True
+        # Set to match the oracle being fit (False for the 6TD3 ddb1_dvina
+        # binding-energy differential, where more negative = better).
+        return self._higher_is_better
 
     # ------------------------------------------------------------------ training
     def fit(self, smiles: List[str], labels: List[float]) -> dict:
         """Refit the MPNN on accumulated (SMILES, oracle-label) pairs.
 
         Implements the "Fit M on D_{i-1}" step of ``[bengio2021gflownet]`` Alg. 1.
-        Labels are standardised (subtract mean / divide std) so the GFN reward is
-        positive after clipping; the standardisation stats are stored for logging.
+        Labels are standardised (subtract mean / divide std) so the prediction
+        scale is stable across rounds; sign/positivity of the reward is handled
+        downstream by the Reward (via ``higher_is_better`` + exponential boosting).
+        The standardisation stats are stored for logging.
 
         Returns a small dict of fit metrics (best val MSE, epochs, n) for logging.
         """
@@ -264,7 +285,7 @@ class LearnedGlueProxy(CachedProxyBase[ReactionState]):
         # Robust to early-terminal (invalid) states, which have no `.molecule`.
         # The loop clears the cache after each refit, so we can't rely on the
         # pre-seeded ReactionStateEarlyTerminal entry being present here.
-        out: List[float] = [self.min_value] * len(states)
+        out: List[float] = [self._failed_value] * len(states)
         positions, smiles = [], []
         for i, state in enumerate(states):
             mol = getattr(state, "molecule", None)
@@ -296,12 +317,11 @@ class LearnedGlueProxy(CachedProxyBase[ReactionState]):
                 preds = list(vals)
             it = iter(preds)
             for ok in valid:
-                # Predictions live in standardised space; clip to a positive range
-                # so the GFN reward is always > 0 (cf. SehMoleculeProxy.clip).
+                # Standardised prediction, clamped to +/-clip as numerical safety
+                # (NOT a positivity assumption — sign is handled by the Reward via
+                # higher_is_better). Invalid molecules get the worst-case value.
                 out.append(
-                    float(np.clip(next(it), self.min_value, self.max_value))
-                    if ok
-                    else self.min_value
+                    float(np.clip(next(it), -self.clip, self.clip)) if ok else self._failed_value
                 )
         return out
 

@@ -29,7 +29,9 @@ def build_6td3():
             for r in csv.DictReader(fh):
                 if r.get("status") != "ok":
                     continue
-                smi, diff = r.get("smiles", "").strip(), r.get("ddb1_dcnnaff", "").strip()
+                # ddb1_dvina = Vina(Tier2) - Vina(Tier1), the VALIDATED differential
+                # (Log 002); more negative = better glue. NOT ddb1_dcnnaff.
+                smi, diff = r.get("smiles", "").strip(), r.get("ddb1_dvina", "").strip()
                 if not smi or not diff:
                     continue
                 try:

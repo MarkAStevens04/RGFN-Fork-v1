@@ -6,17 +6,23 @@ bonus) on the 6TD3 system — our validated discrimination metric (see
 
     1. embed + MMFF-optimise a 3D conformer (RDKit);
     2. dock into Tier 2 (CDK12 + DDB1) with gnina, autoboxed on the crystal CR8;
-    3. keep the most native-like pose (highest CNNscore);
+    3. keep the most native-like pose (highest CNNscore — pose selection only);
     4. ``--score_only`` that same pose against Tier 1 (CDK12 alone);
-    5. differential = ``CNNaffinity(Tier2) - CNNaffinity(Tier1)`` — higher means
-       the arm gains affinity once the recruited partner (DDB1) is present.
+    5. differential = ``Vina(Tier2) - Vina(Tier1)`` (= ``ddb1_dvina``) — *more
+       negative* means the arm gains binding once the recruited partner (DDB1) is
+       present. This is the **validated** discrimination metric (Log 002: known
+       median -2.20 vs decoy -0.60; 85.6% vs 7.3% of molecules below -1.5, the
+       +78pt gap). Vina is a binding energy, so **lower is better** ->
+       ``higher_is_better = False``. (We use the Vina differential, NOT the
+       CNNaffinity differential ``ddb1_dcnnaff``, which does not discriminate;
+       CNNscore is used only to pick the pose.)
 
 Provenance / faithfulness:
     This mirrors the **validated** batch pipeline in
     ``research/preprocessing/docking_6td3/dock_cluster.py`` — identical gnina
     flags (``--autobox_ligand`` crystal, ``--autobox_add 4``, exhaustiveness,
     num_modes), identical "best pose = max CNNscore", identical Tier-1
-    ``--score_only`` rescoring, and the same ``ddb1_dcnnaff`` differential. The
+    ``--score_only`` rescoring, and the same ``ddb1_dvina`` differential. The
     difference is orchestration only: this runs one in-process batch (the AL loop
     queries ~hundreds of molecules per round) instead of ``dock_cluster.py``'s
     multi-GPU sharded job. **The two implementations duplicate the docking logic;
@@ -58,7 +64,9 @@ class Docking6TD3Oracle(GlueOracle):
     """Expensive 6TD3 docking oracle returning the DDB1 neosubstrate differential."""
 
     name = "docking_6td3"
-    higher_is_better = True  # larger differential = more arm-driven cooperativity
+    # ddb1_dvina is a Vina binding-energy differential: MORE NEGATIVE = stronger
+    # DDB1 cooperativity = better glue. So lower is better.
+    higher_is_better = False
 
     def __init__(
         self,
@@ -144,7 +152,9 @@ class Docking6TD3Oracle(GlueOracle):
         )
 
         poses = self._poses(docked)  # idx(str) -> [pose dicts]
-        order, best_mols, best_t2 = [], [], {}
+        # Pose selection is by CNNscore (most native-like), exactly as
+        # dock_cluster.py; the *scored differential* is Vina, not CNNaffinity.
+        order, best_mols, vina_t2 = [], [], {}
         for i in sorted(blocks):
             ps = poses.get(str(i))
             if not ps:
@@ -152,7 +162,7 @@ class Docking6TD3Oracle(GlueOracle):
             best = max(ps, key=lambda p: p["cnnsc"])  # most native-like pose
             order.append(i)
             best_mols.append(best["mol"])
-            best_t2[i] = best["cnnaff"]
+            vina_t2[i] = best["vina"]  # Tier-2 Vina affinity of that pose
 
         if best_mols:
             best_sdf = work / "batch_best.sdf"
@@ -160,11 +170,13 @@ class Docking6TD3Oracle(GlueOracle):
             for m in best_mols:
                 writer.write(m)
             writer.close()
-            t1 = self._score_only(self.tier1_path, best_sdf)  # ordered [(aff, cnnaff)]
+            t1 = self._score_only(self.tier1_path, best_sdf)  # ordered [(Affinity, CNNaffinity)]
             for k, i in enumerate(order):
                 if k < len(t1):
-                    cnnaff_t1 = t1[k][1]
-                    results[i] = float(best_t2[i] - cnnaff_t1)  # ddb1_dcnnaff
+                    vina_t1 = t1[k][0]  # Tier-1 Vina affinity of the same pose
+                    # ddb1_dvina = Vina(Tier2) - Vina(Tier1); more negative = better
+                    # glue (validated discrimination metric, Log 002).
+                    results[i] = float(vina_t2[i] - vina_t1)
 
         return [results[i] for i in range(len(smiles))]
 

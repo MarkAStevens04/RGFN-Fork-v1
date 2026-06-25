@@ -28,9 +28,12 @@ a direct RGFN reward.
 ## Seed datasets (`D_0`)
 
 - **`seed_6td3.csv`** — 408 real validated-docking labels (160 known glues + 248
-  decoys), `label` = the `ddb1_dcnnaff` differential from
-  `research/preprocessing/docking_6td3/{known,decoy_cdk}_results.csv`. Smaller
-  than the paper's `|D_0| = 2000` (documented divergence).
+  decoys), `label` = the **`ddb1_dvina`** differential (`Vina(Tier2) −
+  Vina(Tier1)`, more-negative = better) from
+  `research/preprocessing/docking_6td3/{known,decoy_cdk}_results.csv`. This is the
+  metric behind log 002's +78pt discrimination (known median −2.20 vs decoy
+  −0.60) — **not** the CNNaffinity differential. Smaller than the paper's
+  `|D_0| = 2000` (documented divergence).
 - **`seed_mock.csv`** — 14 molecules scored by `MockGlueOracle`, for the local
   smoke test only.
 

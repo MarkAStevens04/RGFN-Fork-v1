@@ -100,6 +100,15 @@ class ActiveLearningLoop:
                 "Active learning needs a seed dataset D_0 (>=2 labelled molecules). "
                 "Set OracleLabeledDataset.seed_csv in the config."
             )
+        # The proxy is fit on the oracle's labels, so their sign conventions must
+        # agree or the GFN would be rewarded for the wrong end of the metric.
+        if self.proxy.higher_is_better != self.oracle.higher_is_better:
+            raise ValueError(
+                "Sign mismatch: proxy.higher_is_better="
+                f"{self.proxy.higher_is_better} but oracle.higher_is_better="
+                f"{self.oracle.higher_is_better}. Set LearnedGlueProxy.higher_is_better "
+                "to match the oracle in the gin config."
+            )
 
         for rnd in range(1, self.n_rounds + 1):
             # 1. fit M on D_{i-1}

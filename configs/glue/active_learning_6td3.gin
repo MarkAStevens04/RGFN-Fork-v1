@@ -20,6 +20,9 @@ beta = 8
 proxy/gin.singleton.constructor = @LearnedGlueProxy
 train_proxy = @proxy/gin.singleton()
 valid_proxy = %train_proxy
+# The oracle differential (ddb1_dvina) is a Vina binding energy: lower is better.
+# The proxy's sign MUST match the oracle (the loop asserts this).
+LearnedGlueProxy.higher_is_better = False
 # Proxy-fit budget per round (validate/tune on Balam).
 LearnedGlueProxy.max_epochs = 100
 LearnedGlueProxy.patience = 10
