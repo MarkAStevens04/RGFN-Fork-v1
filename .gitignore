@@ -217,4 +217,3 @@ experiments/active_learning_6td3/*
 !experiments/active_learning_6td3/build_seeds.py
 !experiments/active_learning_6td3/seed_6td3.csv
 !experiments/active_learning_6td3/seed_mock.csv
-research/preprocessing/full_comparison/violins_known_vs_decoy.png

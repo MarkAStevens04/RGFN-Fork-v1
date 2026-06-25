@@ -57,7 +57,7 @@ a3d21c1 [DOCS] Remove 000 Template
 1c54a01 [DOCS] Remove template
 ```
 
-The three scripts and their outputs (`research/preprocessing/full_comparison/`) are new and not yet committed. **[TODO — add commit hash after committing `full_comparison/` and this log.]** The input CSVs were committed previously with entry 002 (`106a4e6`).
+The three scripts and their outputs (`research/preprocessing/full_comparison/`) were committed in `c723fcb`. The input CSVs were committed previously with entry 002 (`106a4e6`).
 
 ## Relevant Resources
 
