@@ -87,7 +87,7 @@ Realistic tiering (revised down from an earlier "NeurIPS primary / Nature stretc
 
 ### Validated ✅
 - **CDK12-DDB1 system (6TD3)** works as an oracle: straight box docking produces 78-percentage-point separation between known glues and random warhead-bearing decoys on the DDB1 neosubstrate differential. This is the right testbed for RGFN.
-- The neosubstrate differential (Tier2 − Tier1, same pose) is the right metric — it isolates the arm's contribution to recruiting the second protein.
+- The neosubstrate differential (Tier2 − Tier1, same pose) is the right metric — it isolates the arm's contribution to recruiting the second protein. **The specific signal is the *Vina* Tier2 − Tier1 differential.** A six-way ablation (Vina/CNN × Tier1/Tier2/differential, entry 006) ranks it best of all six candidate signals (AUROC 0.946, vs 0.85 for the CNN differential and 0.69 for absolute Vina Tier 1), and molecular-weight matching (entry 007) confirms the edge is genuine cooperativity, not ligand size: it stays 0.95 → 0.87 under size-matching while the absolute scores collapse (absolute Vina Tier 1 falls below chance). This is the signal wired into the active-learning loop (`glue/oracles/Docking6TD3Oracle`, `ddb1_dvina`).
 - Compute pipeline on Balam: batched gnina docking (16 workers, 4× A100) reduces wall time from ~90 min to ~14 min for 400 molecules.
 
 ### Does NOT work / ceiling hit ⚠️
@@ -96,8 +96,8 @@ Realistic tiering (revised down from an earlier "NeurIPS primary / Nature stretc
 ### Open / next experiments 🔲
 - Test whether **Molecular Dynamics stability** can serve as a better or complementary oracle `O` (especially for CRBN-type systems where docking has a ceiling). In active-learning terms, MD becomes the expensive `O` and a learned model becomes the proxy `M`.
 - Validate oracle on additional systems (MolGlueDB has other known-glue systems to test).
-- **Run RGFN with the validated 6TD3 oracle through the active-learning loop** (`[bengio2021gflownet]` Alg. 1) and evaluate generated molecules; produce the top-k-vs-oracle-calls curve and a random-acquisition baseline.
-- Ablation: does Tier 2 absolute score alone work, or is the differential necessary?
+- **Run RGFN with the validated 6TD3 oracle through the active-learning loop** (`[bengio2021gflownet]` Alg. 1) and evaluate generated molecules; produce the top-k-vs-oracle-calls curve and a random-acquisition baseline. (Loop scaffolding is built — `glue/active_learning/`, `configs/glue/active_learning_6td3.gin` — and validated locally with a mock oracle; the real docking run needs Balam.)
+- ~~Ablation: does Tier 2 absolute score alone work, or is the differential necessary?~~ **Answered (entries 006/007):** the differential is necessary — absolute Tier 2 trails it and absolute Tier 1 falls below chance once molecular weight is controlled.
 
 ---
 
@@ -123,7 +123,7 @@ Realistic tiering (revised down from an earlier "NeurIPS primary / Nature stretc
 - **E3 ligase**: The degradation machinery. We study CRBN (part of the CRL4 complex) and DDB1 (adaptor for CDK12).
 - **Neosubstrate**: The protein being degraded. GSPT1 (CRBN system); cyclin K, presented by CDK12 (6TD3 system).
 - **Warhead**: The part of the glue that anchors into a fixed pocket. That pocket is on the **E3** for CRBN (glutarimide → CRBN tri-Trp cage) but on the **target kinase** for 6TD3 (purine → CDK12 ATP pocket) — *not* the E3. This flip is the mirror-image point above.
-- **Neosubstrate differential**: Tier2 − Tier1 score for the same docked pose. Isolates the arm's contribution to recruiting the second protein (the neosubstrate GSPT1 for CRBN; the E3 adaptor DDB1 for 6TD3). Our primary discrimination metric and the project's novel contribution.
+- **Neosubstrate differential**: Tier2 − Tier1 score for the same docked pose. Isolates the arm's contribution to recruiting the second protein (the neosubstrate GSPT1 for CRBN; the E3 adaptor DDB1 for 6TD3). Our primary discrimination metric and the project's novel contribution. The validated signal uses the **Vina** score (lower = better binding, so the differential is lower-is-better; entries 006/007); gnina's CNN score is used only to pick the docked pose, not as the differential.
 - **Tier 1 / Tier 2**: Tier 1 = the **warhead-anchoring protein only**. Tier 2 = that protein **plus the recruited partner**. Same pose scored against both. (CRBN: Tier 1 = CRBN, Tier 2 = CRBN+GSPT1. 6TD3: Tier 1 = CDK12, Tier 2 = CDK12+DDB1.)
 - **Decoys**: Realistic fake glues — correct warhead, random drug-like arm. If decoys score like known glues, the oracle only reads warhead binding and is useless for RGFN.
 - **gnina**: Our docking engine (v1.3.2, CNN-rescored). Launched from `/scratch/markymoo/gnina/run_gnina.sh`.

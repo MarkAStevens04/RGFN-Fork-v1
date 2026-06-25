@@ -201,12 +201,50 @@ the pose (`max cnnsc`), matching `dock_cluster.py`. Fixed (user chose: store raw
 - `ActiveLearningLoop.run()` now asserts `proxy.higher_is_better ==
   oracle.higher_is_better` to catch this class of bug.
 - `seed_6td3.csv` / `build_seeds.py` rebuilt from the `ddb1_dvina` column.
+- **Regression guard added:** `glue/tests/test_oracle_discrimination.py` — the
+  "science validated" counterpart to the wiring smoke test. It checks the metric
+  feeding the loop actually separates known glues from decoys (reproduces Log
+  002: known 85.6% vs decoy 7.3% strong-bonus, +78pts), and a contrast check
+  shows the Vina differential discriminates (+78pts) while CNNaffinity does not
+  (+0pts). Verified non-vacuous: it FAILS if the seed is built from
+  `ddb1_dcnnaff`. Runs on a laptop from committed data (no gnina); also runnable
+  standalone (`python glue/tests/test_oracle_discrimination.py`).
+
+**Process lesson (root cause of both this and the MLP/MPNN error):** each
+consequential scientific choice was filled by inference instead of reading the
+file that recorded the decision. The fix is to read all three where they exist —
+the paper section, the upstream `rgfn/` code, AND our own `Logs/` experiment log
++ analysis script (`compare_systems.py`) — and to treat "smoke test passed" as
+"wiring works", never "science is correct". The discrimination test above
+operationalises the latter.
+
+## Update (2026-06-25, cont.): Logs 006 + 007 confirm the Vina ΔT2−T1 choice
+
+After the metric correction above, experiment logs **006** (six-way signal
+ablation) and **007** (molecular-weight control) were written and independently
+confirm `ddb1_dvina` (Vina Tier2−Tier1, lower-is-better) is the right oracle
+signal — so **no reward-signal code change was needed**; the implementation was
+already aligned. What changed is documentation + the guard:
+- 006: ranked all six candidate signals on the entry-002 poses; **Vina ΔT2−T1
+  wins, AUROC 0.946** (Cohen's d 2.38); its Youden cut −1.58 matches our −1.5.
+  CNNaffinity differential is 0.850; absolute Vina Tier 1 is 0.69.
+- 007: after matching glues/decoys on molecular weight, Vina ΔT2−T1 stays top
+  (0.946 → 0.866) while absolute Vina Tier 1 falls below chance (0.38) — the
+  differential isn't a size artifact.
+- Citations to 006/007 added to: `docking_6td3_oracle.py` docstring,
+  `test_oracle_discrimination.py`, the example README, and the gin config.
+- Fixed two stale comments that still said `ddb1_dcnnaff` (config + build_seeds).
+- Strengthened the discrimination test with an **AUROC check** (asserts > 0.90;
+  reproduces 006's 0.946) and an AUROC-based contrast (Vina 0.946 vs CNN 0.850).
+  Caught a sign slip while doing so: CNNaffinity is higher-is-better (pK), Vina is
+  lower-is-better (energy) — using one orientation for both flips AUROC to
+  1−AUROC. Now oriented per metric; both reproduce 006 exactly.
 
 ## Deliberate divergences from the publications (validate/revisit on Balam)
 
 1. **Proxy target** — predicts our docking neosubstrate *differential*
    (`ddb1_dvina`, lower-is-better), not AutoDock sEH affinity. The project's
-   novel oracle.
+   novel oracle. Signal choice justified by Logs 002/006/007.
 2. **Trainable proxy** — `SehMoleculeProxy` is inference-only with frozen
    weights; we add `.fit()`. This is what Alg. 1 requires; the shipped proxy just
    doesn't expose it.

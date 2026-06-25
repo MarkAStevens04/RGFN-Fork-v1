@@ -45,7 +45,8 @@ oracle/gin.singleton.constructor = @Docking6TD3Oracle
 oracle = @oracle/gin.singleton()
 
 # --- Seed dataset D_0: 408 validated docking labels (160 known + 248 decoys). -
-# Column 'label' holds the validated ddb1_dcnnaff differential.
+# Column 'label' holds the validated ddb1_dvina differential (Vina T2-T1, the
+# best of six candidate signals: Logs 006 AUROC 0.946 / 007 MW-robust).
 OracleLabeledDataset.seed_csv = 'experiments/active_learning_6td3/seed_6td3.csv'
 OracleLabeledDataset.label_column = 'label'
 dataset/gin.singleton.constructor = @OracleLabeledDataset

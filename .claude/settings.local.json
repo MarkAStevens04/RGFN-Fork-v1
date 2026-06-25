@@ -18,7 +18,8 @@
       "Bash(grep -E \"\\\\.py$\")",
       "Bash(conda env *)",
       "Bash(git status *)",
-      "Bash(python *)"
+      "Bash(python *)",
+      "Bash(conda run *)"
     ]
   }
 }

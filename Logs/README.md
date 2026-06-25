@@ -14,6 +14,7 @@ objective, method, key scripts, results, **where the result files live**, and co
 | [004](004_compute-benchmark.md) | 2026-06-18 | Compute benchmark — login node vs Balam debug_full_node (4× A100) | **CRBN 21× / 6TD3 6.6× faster; batching is the dominant lever** — conformer embedding is the new Amdahl bottleneck |
 | [005](005_tier2-vina-roc-pr-curves.md) | 2026-06-23 | Tier 2 Vina — ROC and PR curves for 6TD3 and 5HXB | **6TD3 AUC=0.890 / AP=0.872; CRBN AUC=0.627 / AP=0.726** — absolute Tier 2 score alone is a strong 6TD3 oracle; CRBN ceiling confirmed as structural |
 | [006](006_6td3-violin-distributions.md) | 2026-06-25 | 6TD3 / CDK12-DDB1 — which metric discriminates best (Tier 1 vs Tier 2 vs Δ, Vina vs CNN) | **Vina ΔT2−T1 wins (AUROC 0.946)**; Vina Tier 1 worst (0.691) — the signal lives in what DDB1 adds, justifying the differential as the oracle reward |
+| [007](007_6td3-molecular-weight-control.md) | 2026-06-25 | 6TD3 / CDK12-DDB1 — controlling glue-vs-decoy discrimination for molecular weight | **Differential survives MW-matching (0.95→0.87); absolute scores collapse (Vina Tier 1 → 0.38, below chance)** — the differential wins *because* it isn't reading ligand size |
 
 ## The systems
 

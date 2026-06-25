@@ -1,8 +1,10 @@
 """6TD3 / CR8 two-tier docking oracle ``O`` for the active-learning loop.
 
 Scores a molecule by the **neosubstrate differential** (the DDB1 cooperativity
-bonus) on the 6TD3 system — our validated discrimination metric (see
-``Logs/RESEARCH_CONTEXT.md`` and ``Logs/002_...``). For one molecule:
+bonus) on the 6TD3 system — our validated discrimination metric, and the
+best-ranked of six candidate signals (see ``Logs/RESEARCH_CONTEXT.md``,
+``Logs/002`` validation, ``Logs/006`` six-way ablation, ``Logs/007`` MW control).
+For one molecule:
 
     1. embed + MMFF-optimise a 3D conformer (RDKit);
     2. dock into Tier 2 (CDK12 + DDB1) with gnina, autoboxed on the crystal CR8;
@@ -10,12 +12,23 @@ bonus) on the 6TD3 system — our validated discrimination metric (see
     4. ``--score_only`` that same pose against Tier 1 (CDK12 alone);
     5. differential = ``Vina(Tier2) - Vina(Tier1)`` (= ``ddb1_dvina``) — *more
        negative* means the arm gains binding once the recruited partner (DDB1) is
-       present. This is the **validated** discrimination metric (Log 002: known
-       median -2.20 vs decoy -0.60; 85.6% vs 7.3% of molecules below -1.5, the
-       +78pt gap). Vina is a binding energy, so **lower is better** ->
-       ``higher_is_better = False``. (We use the Vina differential, NOT the
-       CNNaffinity differential ``ddb1_dcnnaff``, which does not discriminate;
-       CNNscore is used only to pick the pose.)
+       present. Vina is a binding energy, so **lower is better** ->
+       ``higher_is_better = False``.
+
+    Why this exact signal (Vina Tier2-Tier1), with evidence:
+        - Log 002: known median -2.20 vs decoy -0.60; 85.6% vs 7.3% below -1.5
+          (+78pt gap).
+        - Log 006 ranked all SIX candidate signals (Vina/CNN x Tier1/Tier2/diff)
+          on the same poses: **Vina ΔT2-T1 wins, AUROC 0.946** (Cohen's d 2.38);
+          its Youden-optimal cut (-1.58) independently lands on the -1.5 above.
+          The CNNaffinity differential ``ddb1_dcnnaff`` is far weaker (AUROC 0.850
+          here, ~0 separation at the -1.5 threshold) — so we do NOT use it;
+          CNNscore is used only to pick the pose (step 3).
+        - Log 007 (MW control): after matching glues/decoys on molecular weight,
+          Vina ΔT2-T1 stays the top discriminator (0.946 -> 0.866, -0.08), while
+          absolute Vina Tier 1 collapses below chance (0.69 -> 0.38). The
+          differential is the right signal precisely because it cancels ligand
+          size and isolates the DDB1-recruitment contribution.
 
 Provenance / faithfulness:
     This mirrors the **validated** batch pipeline in

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """(Re)build the seed datasets D_0 for the 6TD3 active-learning example.
 
-- seed_6td3.csv : real validated-docking labels (ddb1_dcnnaff differential) for
-  known glues + decoys, pulled from research/preprocessing/docking_6td3/.
+- seed_6td3.csv : real validated-docking labels (ddb1_dvina differential, Vina
+  Tier2-Tier1) for known glues + decoys, pulled from
+  research/preprocessing/docking_6td3/. Vina T2-T1 is the best of six candidate
+  signals (Logs 006/007); more negative = better glue.
 - seed_mock.csv : a handful of drug-like SMILES scored by MockGlueOracle, for the
   local CPU smoke test.
 

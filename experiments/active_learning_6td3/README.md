@@ -31,9 +31,15 @@ a direct RGFN reward.
   decoys), `label` = the **`ddb1_dvina`** differential (`Vina(Tier2) −
   Vina(Tier1)`, more-negative = better) from
   `research/preprocessing/docking_6td3/{known,decoy_cdk}_results.csv`. This is the
-  metric behind log 002's +78pt discrimination (known median −2.20 vs decoy
-  −0.60) — **not** the CNNaffinity differential. Smaller than the paper's
-  `|D_0| = 2000` (documented divergence).
+  signal the evidence selected — **not** the CNNaffinity differential:
+    - Log 002: +78pt discrimination (known median −2.20 vs decoy −0.60);
+    - Log 006: best of six candidate signals, **AUROC 0.946** (CNN ΔT2−T1 only
+      0.850; absolute Vina Tier 1 just 0.69);
+    - Log 007: that edge is **molecular-weight-robust** (0.946 → 0.866 after
+      size-matching, while absolute scores collapse — the differential cancels
+      ligand size and isolates DDB1 recruitment).
+
+  Smaller than the paper's `|D_0| = 2000` (documented divergence).
 - **`seed_mock.csv`** — 14 molecules scored by `MockGlueOracle`, for the local
   smoke test only.
 
@@ -53,6 +59,19 @@ python scripts/active_learning.py --cfg configs/glue/active_learning_6td3.gin --
 
 Per-round `dataset_round_NNN.csv` and the final `top_k.csv` are written under the
 run's `active_learning/` directory.
+
+## Tests
+
+`glue/tests/test_oracle_discrimination.py` is the **science-validated** guard
+(complementing the wiring smoke test): it asserts the oracle metric separates
+known glues from decoys, reproducing Log 002's +78pt gap, and would fail if the
+seed were built from the wrong differential. Runs on a laptop (no gnina):
+
+```bash
+python -m pytest glue/tests/test_oracle_discrimination.py -v -s
+# or, without pytest:
+python glue/tests/test_oracle_discrimination.py
+```
 
 ## Status / what still needs Balam
 
