@@ -17,4 +17,8 @@ neosubstrate-differential oracle work belongs here rather than inside `rgfn/`.
 Add new oracle modules here and import them below so `glue.registry` picks them up.
 """
 
-# from glue.oracles.ternary_docking import TernaryDockingOracle  # noqa: F401
+from glue.oracles.base import GlueOracle  # noqa: F401
+from glue.oracles.docking_6td3_oracle import Docking6TD3Oracle  # noqa: F401
+from glue.oracles.mock_oracle import MockGlueOracle  # noqa: F401
+
+__all__ = ["GlueOracle", "Docking6TD3Oracle", "MockGlueOracle"]

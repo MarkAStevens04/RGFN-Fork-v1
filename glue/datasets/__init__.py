@@ -15,4 +15,8 @@ Import new dataset modules below so `glue.registry` registers any gin-configurab
 loaders or generators.
 """
 
+from glue.datasets.oracle_labeled import OracleLabeledDataset  # noqa: F401
+
 # from glue.datasets.synthetic import SyntheticDatasetGenerator  # noqa: F401
+
+__all__ = ["OracleLabeledDataset"]

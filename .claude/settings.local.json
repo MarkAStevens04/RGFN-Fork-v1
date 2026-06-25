@@ -14,7 +14,10 @@
       "Bash(python3)",
       "Bash(grep -rniE \"glue-specific cooperativity|direct.{0,12}reward|oracle.{0,15}reward signal|trains? \\(against|on\\) the oracle|reward-maximiz|reinforcement\" docs README.md benchmarks models scripts Logs/README.md Logs/000_TEMPLATE.md)",
       "Bash(grep -E \"__pycache__|\\\\.pyc$\")",
-      "Bash(git rm *)"
+      "Bash(git rm *)",
+      "Bash(grep -E \"\\\\.py$\")",
+      "Bash(conda env *)",
+      "Bash(git status *)"
     ]
   }
 }

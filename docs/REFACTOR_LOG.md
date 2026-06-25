@@ -112,3 +112,128 @@ anything needing the GPU/heavy deps. Verified what is checkable statically.
   `research/preprocessing/` — grep for any stragglers: `grep -rn pre-processing .`
 - **An upstream patch vanished after a merge:** re-apply from `docs/PATCHES.md`.
 - **Adding new components:** follow the steps in `CLAUDE.md` ("How to extend").
+
+---
+
+# 2026-06-24 — Active-learning loop (branch `active-learning-loop`)
+
+First implementation of the multi-round active-learning loop from
+`[bengio2021gflownet]` Alg. 1 (transcribed in `Logs/RESEARCH_CONTEXT.md`), wired
+to our 6TD3 docking oracle and kept oracle-agnostic for future oracles (MD, etc.).
+
+## Grounding decision (important — re-checked against the papers)
+
+An earlier draft proposed a hand-rolled **MLP** proxy. That was wrong: the proxy
+in `[bengio2021gflownet]` A.4 is an **MPNN over the RDKit atom graph** (NNConv +
+GRU ×12 → Set2Set → 3-layer MLP, dim 64, LeakyReLU). RGFN already ships *exactly*
+that network as `MPNNet` (the class behind `SehMoleculeProxy`, which loads
+Bengio's pretrained sEH weights). Key point that resolves the "RGFN isn't
+atom-by-atom" worry: RGFN's **reaction/fragment graph drives only the policy/flow
+predictor**; the **proxy scores a finished molecule from its atom graph**
+(`mol2graph(SMILES)`), identically in both `[bengio2021gflownet]` and RGFN's own
+sEH proxy. So we **reuse `MPNNet` + `mol2graph`/`mols2batch` verbatim** rather
+than reinventing an architecture.
+
+**We reuse the architecture, NOT the weights.** `LearnedGlueProxy` never calls
+`seh_proxy.load_original_model` / `SEHProxyWrapper` — it constructs a fresh
+random-init `MPNNet` and trains it from scratch on `D_0` (and refits each round),
+exactly as `[bengio2021gflownet]` does ("initializes an MPNN proxy"). Loading the
+pretrained sEH weights would be wrong anyway: that proxy predicts sEH affinity,
+not our DDB1 differential. (Verified at runtime: our init weights ≠ the pretrained
+weights, and differ across seeds.)
+
+## Added (all under `glue/`, zero edits to `rgfn/`)
+
+- `glue/oracles/base.py` — `GlueOracle` ABC (`score(smiles) -> list[float]`): the
+  modular seam so the loop is oracle-agnostic.
+- `glue/oracles/mock_oracle.py` — `MockGlueOracle`: cheap CPU oracle (QED × MW
+  band) so the whole loop runs on a laptop without gnina/GPU. Test fixture, not
+  science.
+- `glue/oracles/docking_6td3_oracle.py` — `Docking6TD3Oracle`: real two-tier
+  gnina docking returning the DDB1 neosubstrate differential (`ddb1_dcnnaff`).
+  **Mirrors `research/preprocessing/docking_6td3/dock_cluster.py`** (identical
+  gnina flags, best-pose-by-CNNscore, Tier-1 `--score_only`, same differential);
+  differs only in orchestration (one in-process batch vs sharded multi-GPU job).
+- `glue/proxies/learned_proxy.py` — `LearnedGlueProxy`: trainable wrapper around
+  RGFN's `MPNNet` with a `.fit()` (the in-loop reward `M`).
+- `glue/datasets/oracle_labeled.py` — `OracleLabeledDataset`: the accumulating
+  `D_i = D̂_i ∪ D_{i-1}` store (canonical-SMILES keyed, seed-CSV load, Top-K).
+- `glue/active_learning/{__init__,loop}.py` — `ActiveLearningLoop`: the outer
+  Alg. 1 orchestrator. New subpackage (registered in `glue/registry.py`).
+- `scripts/active_learning.py` — entry point (imports `glue` **and** `Trainer`,
+  parses an `configs/glue/` config, builds the loop, runs it).
+- `configs/glue/active_learning_mock.gin` (local smoke) and
+  `configs/glue/active_learning_6td3.gin` (Balam real run).
+- `experiments/active_learning_6td3/` — worked example: `README.md`,
+  `build_seeds.py`, `seed_6td3.csv` (408 real validated-docking labels = 160
+  known + 248 decoys), `seed_mock.csv` (14 mols for the smoke test).
+- Registrations: `glue/registry.py` (+`active_learning`), and the `oracles` /
+  `proxies` / `datasets` subpackage `__init__.py` exports.
+
+## How the loop works (and the one invariant)
+
+Each round: **fit `M` on `D_{i-1}`** → `clear_cache()` → **`Trainer.train()`**
+against `M(x)^β` → **sample query batch** from the trained forward policy →
+**score with `O`** → **`D_i = D̂_i ∪ D_{i-1}`**. The trainer's reward and the loop
+share **one** `LearnedGlueProxy` singleton, so refitting updates the reward RGFN
+trains on. Invariant preserved: oracle labels enter training **only** by
+retraining `M`, never as a direct RGFN reward. Critically, the in-loop reward is
+the *cheap MPNN proxy*, so GFN training uses the `reaction` env (not
+`reaction_docking`) — **docking never runs in the inner loop**, only on the
+per-round query batch.
+
+## Deliberate divergences from the publications (validate/revisit on Balam)
+
+1. **Proxy target** — predicts our docking neosubstrate *differential*, not
+   AutoDock sEH affinity. (The project's novel oracle; our differential is
+   higher-is-better, so no sign flip — unlike the paper's affinity.)
+2. **Trainable proxy** — `SehMoleculeProxy` is inference-only with frozen
+   weights; we add `.fit()`. This is what Alg. 1 requires; the shipped proxy just
+   doesn't expose it.
+3. **Random init each round** — we rebuild `MPNNet` weights every `fit()` rather
+   than annealing from the previous round (avoids compounding drift; revisit).
+4. **Label scaling** — we standardise labels at `fit` time and clip predictions
+   to `[min_value, max_value]` at inference (mirrors the paper's renormalisation
+   to a positive reward and `SehMoleculeProxy`'s `clip(1e-4, 100)`).
+5. **Scale** — paper uses `|D_0|=2000` and 200 mols/round; our `D_0` is 408
+   (all the validated labels we have). `query_batch_size=200` matches the paper.
+6. **Validation split** — paper uses a fixed 3000-mol val set for early stopping;
+   we hold out a fraction (`val_fraction`) — matters for small `D`.
+7. **Replay buffer reset** — we clear it each round (its priorities go stale once
+   `M` is refit). Best-effort, guarded against upstream layout changes.
+
+## Verified locally (Mac, `rgfn` conda env — has torch/rdkit/gin/torch_geometric)
+
+- `py_compile` of all new modules; `import glue` registers every new component.
+- Both AL configs parse (after the `Trainer`-import fix below).
+- `LearnedGlueProxy` fits on toy data, predicts positive rewards, handles invalid
+  SMILES and early-terminal states.
+- **Full mock loop end-to-end** via `scripts/active_learning.py` (2 rounds, CPU,
+  `WANDB_MODE=offline`): seed `|D_0|=13` → fit → `Trainer.train()` → sample 16 →
+  score → accumulate → `|D|=29` → round 2 → `|D|=45` → `top_k.csv` written. EXIT 0.
+  RGFN-generated (reaction-assembled) molecules out-scored seeds under the mock
+  oracle and rose to the top of the Top-K. (Smoke artifacts deleted, not committed.)
+- `Docking6TD3Oracle` imports without gnina and raises a clear `FileNotFoundError`
+  when receptors are absent (laptop) — Balam-only by design.
+
+### Two bugs found and fixed during local validation
+- **`scripts/active_learning.py` didn't register `Trainer`** → gin "No
+  configurable matching 'Trainer'". Upstream `train.py` imports it explicitly;
+  added `from rgfn.trainer.trainer import Trainer`.
+- **`LearnedGlueProxy._compute_proxy_output` assumed `.molecule`** → crashed on
+  `ReactionStateEarlyTerminal` after the loop's post-`fit` `clear_cache()` wiped
+  the pre-seeded entry. Now guards early-terminal states → `min_value`.
+
+## NOT verified — needs Balam (gnina + GPU + prepared receptors)
+
+- `Docking6TD3Oracle.score()` against real `6TD3_tier{1,2}.pdbqt` + `crystal_RC8.pdb`
+  (git-ignored, absent on laptop). **Reconcile/cross-validate it against
+  `dock_cluster.py`** — the two duplicate the docking logic; `dock_cluster.py` is
+  the source of truth. Consider unifying them into one shared `dock_batch_6td3()`.
+- `scripts/active_learning.py --cfg configs/glue/active_learning_6td3.gin` full run.
+- Hyperparameters: `β`, per-round `Trainer.n_iterations`, proxy `max_epochs` /
+  `patience`, `query_batch_size` — all first-guess defaults, untuned.
+- Reward-scale sanity: with `β=8` and standardised proxy outputs, confirm the
+  exponential reward boosting doesn't explode/vanish on the real differential.
+- The headline plots reviewers will want: Top-K-vs-oracle-calls curve and a
+  random-acquisition baseline (`[bengio2021gflownet]` Fig. 7 analog).
