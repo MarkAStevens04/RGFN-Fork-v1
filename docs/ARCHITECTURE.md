@@ -11,8 +11,12 @@ sibling package** (`glue/`) plus clearly-owned top-level directories. The mental
 model is simple:
 
 > **Anything under `rgfn/` or `configs/` is upstream. Anything under `glue/`,
-> `configs/glue/`, `scripts/`, `benchmarks/`, `research/`, `models/`,
+> `configs/glue/`, `scripts/`, `validation/`, `research/`, `models/`,
 > `data/synthetic/`, `Logs/`, or `docs/` is ours.**
+
+Our own code further splits along a **second axis** — the production training
+pipeline vs. the validation/benchmarking layer (see
+"[Two axes](#two-axes-upstreamours-and-pipelinevalidation)" below).
 
 This works because **gin resolves components by class name**, not file location.
 A `@gin.configurable` class can live anywhere, as long as it is *imported* before
@@ -44,22 +48,40 @@ RGFN-Fork/
 │   └── synthetic/             # OURS — generated datasets (gitignored outputs)
 ├── external/                  # setup scripts (setup_qv2gpu.sh is OURS)
 │
-├── glue/                      # OURS — the package holding all new code
+├── glue/                      # OURS — PRODUCTION PIPELINE package (all in-loop code)
 │   ├── __init__.py            #   imports glue.registry on import
 │   ├── registry.py            #   imports every submodule so gin sees our classes
-│   ├── oracles/               #   scoring science (docking ternary, MD, ...)
+│   ├── oracles/               #   in-loop scoring science (docking ternary, MD, ...)
 │   ├── rewards/               #   reward shaping (neosubstrate differential, ...)
 │   ├── samplers/              #   batch-selection strategies
 │   ├── proxies/               #   rgfn ProxyBase adapters (gin-registered)
 │   │   └── example_glue_proxy.py   # working template adapter
-│   └── datasets/              #   input loaders + synthetic dataset generators
+│   ├── datasets/              #   input loaders + synthetic dataset generators
+│   ├── metrics/               #   pipeline-side metrics (e.g. scaffold counts)
+│   └── active_learning/       #   the multi-round loop driver
 │
 ├── scripts/                   # OURS — entry points
 │   ├── train.py               #   imports glue, then runs root train.py
 │   ├── infer.py               #   imports glue, then runs root infer.py
 │   └── hpc/submit.sh          #   SLURM submit (Balam)
 │
-├── benchmarks/                # OURS — benchmark harness + committed results
+│   # ── VALIDATION (imports glue/+rgfn/; NEVER imported by them) ──
+├── validation/                # OURS — the whole comparative-evaluation world
+│   ├── generators/            #   entrants — baseline generators (thin adapters):
+│   │   ├── rgfn/              #     adapter → our glue/ pipeline
+│   │   ├── synflownet/        #     reaction-based GFlowNet baseline
+│   │   ├── fraggfn/           #     fragment-based GFlowNet (non-synthesizable)
+│   │   └── vae_bo/            #     VAE + Bayesian optimization
+│   ├── oracles/              #   validation-only oracles (never in-loop):
+│   │   └── boltz2/           #     Boltz-2 co-folding high-fidelity check
+│   ├── suites/               #   benchmark tasks/metrics:
+│   │   ├── pmo/              #     Practical Molecular Optimization (external)
+│   │   └── glue_suite/      #     our own glue benchmarks (run on every entrant)
+│   ├── harness/             #   runner that drives entrants through suites + eval metrics
+│   ├── configs/             #   run specs (entrants × suite × oracle × budget × seeds)
+│   └── results/             #   committed tables + plots (small artifacts only)
+│   # heavy baseline code installed via external/setup_{synflownet,fraggfn,vae_bo}.sh
+│
 ├── models/                    # OURS — protein structures + checkpoints (weights gitignored)
 ├── research/
 │   └── preprocessing/         # OURS — docking oracle validation (was pre-processing/)
@@ -70,6 +92,55 @@ RGFN-Fork/
 └── Logs/                      # OURS — experiment logs (index lives in RESEARCH_CONTEXT.md)
     └── references/             #   paper shelf (bib + git-ignored PDFs)
 ```
+
+## Two axes: upstream/ours AND pipeline/validation
+
+Our code is organized on two independent axes. The first keeps us mergeable with
+upstream; the second keeps the thing we *ship* separate from the machinery that
+*measures* it.
+
+| | **Upstream** | **Ours — production pipeline** | **Ours — validation** |
+|---|---|---|---|
+| What | pristine RGFN | the glue generator we ship | how we prove it's good |
+| Where | `rgfn/`, `configs/` | `glue/`, `configs/glue/`, `scripts/` | `validation/` |
+| Examples | GFlowNet core | in-loop oracle, proxy, reward, AL loop | baseline generators, PMO, Boltz-2, result tables |
+
+The validation axis is enforced by a **one-way dependency rule**:
+
+> `validation/` may import from `glue/` and `rgfn/`. The production pipeline
+> (`glue/`, `scripts/train.py`, `configs/glue/`) must **never** import from
+> `validation/`.
+
+Consequences this buys us:
+
+- **No accidental slow rewards.** A validation-only oracle (Boltz-2, co-folding,
+  MD) physically cannot be wired into the in-loop reward, because `glue/` can't
+  see `validation/`. In-loop oracles live in `glue/oracles/`; post-hoc scorers
+  live in `validation/oracles/`.
+- **A shippable core.** `glue/` reads as the pipeline alone — none of the baseline
+  or benchmark code leaks into it.
+- **Honest baselines.** The RGFN benchmark entrant (`validation/generators/rgfn/`)
+  is a *thin adapter* over the real `glue/` pipeline, so it can't drift from what
+  we ship. Other baselines (SynFlowNet, FragGFN, VAE-BO) are thin adapters too;
+  their heavy upstream code is installed via `external/setup_*.sh`, never vendored.
+
+If you ever want `glue/` to import something from `validation/`, the abstraction
+is in the wrong place — push it down into `glue/` (or `glue/metrics/`) instead.
+
+## Component flow (validation)
+
+```
+spec (validation/configs/*)
+  └─ names entrants + suite + oracle + budget/seeds
+       └─ validation/harness  ── import ──▶ validation/generators/<entrant>
+            │                                   └─ rgfn/ adapter ──▶ glue/ + rgfn/ pipeline
+            │                                   └─ synflownet/ … (pkg from external/setup_*.sh)
+            ├─ runs each entrant on a validation/suites/<suite> at equal oracle budget
+            ├─ optionally scores top-k with validation/oracles/<scorer> (e.g. boltz2)
+            └─ writes summarized tables/plots ──▶ validation/results/  (+ a Logs/ entry)
+```
+
+The arrow only ever points *into* `glue/`+`rgfn/`, never back out.
 
 ## Component flow (training)
 

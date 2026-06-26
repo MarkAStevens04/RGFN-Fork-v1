@@ -16,10 +16,11 @@ For the science/goals, read `docs/RESEARCH_CONTEXT.md`.
 | `rgfn/` | **Upstream** | Pristine RGFN. **Do not edit.** Extend it from `glue/`. |
 | `configs/` (except `configs/glue/`) | **Upstream** | Treat as pristine. New configs go in `configs/glue/`. |
 | `gin_config/`, `train.py`, `grid_search.py`, `tests/` (upstream parts), `data/chemistry.xlsx`, `data/targets/`, `external/setup_{gnina,gneprop,reinvent,shared}.sh` | **Upstream** | Leave as-is. |
-| `glue/` | **Ours** | All new Python: oracles, rewards, samplers, proxies, datasets. |
+| `glue/` (**production pipeline**) | **Ours** | All new pipeline Python: oracles, rewards, samplers, proxies, datasets, the active-learning loop. The thing we ship. |
 | `configs/glue/` | **Ours** | All new gin configs (overlay upstream via `include`). |
 | `scripts/` | **Ours** | Entry points (`train.py`/`infer.py` wrappers) + `hpc/`. |
-| `benchmarks/`, `models/`, `data/synthetic/` | **Ours** | Benchmark harness, input structures/checkpoints, generated datasets. |
+| `validation/` (**validation**) | **Ours** | The whole comparative-evaluation world: baseline generators (SynFlowNet, FragGFN, VAE-BO, RGFN adapter), validation-only oracles (Boltz-2), benchmark suites (PMO + our own), the harness, and committed results. |
+| `models/`, `data/synthetic/` | **Ours** | Input structures/checkpoints; generated datasets. |
 | `research/preprocessing/` | **Ours** | Docking oracle validation pipeline (was `pre-processing/`). |
 | `Logs/`, `docs/` | **Ours** | Experiment logs + project documentation. |
 | `Logs/references/` | **Ours** | Canonical bibliography for papers we build on. Cite by key (`[koziarski2024rgfn]`); annotated index in its `README.md`. PDFs in `pdfs/` are git-ignored. |
@@ -27,6 +28,24 @@ For the science/goals, read `docs/RESEARCH_CONTEXT.md`.
 We keep `rgfn/` and `configs/` mergeable with upstream. The only deliberate edits
 to upstream files are three small operational overrides documented in
 **`docs/PATCHES.md`** — read that before "fixing" anything odd in those files.
+
+### The second axis: production pipeline vs. validation
+
+Beyond upstream-vs-ours, our own code splits along a second axis — the **training
+pipeline** (`glue/`) vs. the **validation/benchmarking layer** (`validation/`) —
+kept apart by one rule:
+
+> **The dependency arrow points one way.** `validation/` may import from `glue/`
+> and `rgfn/`. The production pipeline — `glue/`, `scripts/train.py`,
+> `configs/glue/` — must **never** import from `validation/`.
+
+This is what keeps slow validation-only oracles (Boltz-2, co-folding, MD) out of
+the in-loop reward by construction, and keeps the shipped pipeline understandable
+without dragging in every baseline. Everything comparative lives under the single
+`validation/` umbrella (generators, oracles, `suites/`, `harness/`, `results/`);
+baseline generators are **thin adapters** in `validation/generators/`, their heavy
+upstream code installed via `external/setup_*.sh`, not vendored. See
+`validation/README.md` and `docs/ARCHITECTURE.md` for the full picture.
 
 ---
 

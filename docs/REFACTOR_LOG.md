@@ -320,3 +320,66 @@ chances for versions to drift):
   both `RESEARCH_CONTEXT.md` and `CLAUDE.md`. Only verbatim *commit messages* in
   the logs' "Relevant Versions" blocks still say "pre-processing" — left intact,
   since those quote real historical commits.
+
+---
+
+# 2026-06-26: validation/benchmarking scaffold (second axis)
+
+Introduced a **second organizing axis** for our own code — **production pipeline
+vs. validation** — on top of the existing upstream/ours boundary. Goal: get the
+structure ready for the comparative studies (multiple generators, PMO, our own
+benchmarks, VAE-BO, Boltz-2) **before** Balam is back, keeping the validation
+layer as separate as possible from the training pipeline. **Scaffolding only — no
+implementation code imported yet** (per the user's request).
+
+### Decisions (chosen by the user)
+- **One umbrella folder, not two.** Initially scaffolded as two top-level dirs
+  (`validation/` for entrants/scorers + `benchmarks/` for suites/harness/results),
+  but the split was thin and tightly coupled (the harness only exists to run the
+  generators) and produced two `configs/` dirs. Consolidated into a single
+  `validation/` holding everything; the "benchmark" idea survives as
+  `validation/suites/`. (`benchmarks/` was created and then removed in the same
+  session — it was never committed.)
+- **Validation oracles separate from in-loop oracles.** Boltz-2 / co-folding /
+  high-fidelity checks go in `validation/oracles/` (never in-loop). In-loop
+  oracles stay in `glue/oracles/`. Short-MD as a *complementary in-loop* oracle
+  (CRBN ceiling, Objective 3) would still go in `glue/`, not here.
+- **Baselines = thin adapters + external installs:** each baseline is a thin
+  adapter in `validation/generators/<name>/`; heavy upstream code installs via
+  `external/setup_<name>.sh` (not vendored).
+
+### The rule that enforces the split
+> `validation/` may import from `glue/` and `rgfn/`; the production pipeline
+> (`glue/`, `scripts/train.py`, `configs/glue/`) must **never** import from
+> `validation/`. The dependency arrow points one way.
+
+### Created (directories + READMEs / `.gitkeep` only)
+- `validation/` + `README.md` (boundary rule, full single-folder layout,
+  what-goes-where guide, and the "why reviewers care" rationale).
+  - `validation/generators/{rgfn,synflownet,fraggfn,vae_bo}/` + `generators/README.md`
+    (entrant table, planned common `Generator` interface).
+  - `validation/oracles/boltz2/` + `oracles/README.md`
+    (in-loop vs. validation-oracle contrast table).
+  - `validation/suites/{pmo,glue_suite}/` + `suites/README.md`.
+  - `validation/harness/README.md`, `validation/configs/README.md`,
+    `validation/results/` (`.gitkeep`).
+- `external/setup_{synflownet,fraggfn,vae_bo}.sh` — **placeholder stubs** (valid
+  bash, `exit 1` with a TODO; mirror `setup_reinvent.sh` when implemented).
+
+### Docs updated
+- `CLAUDE.md`: ownership table now tags `glue/` as *production pipeline* and adds
+  a single `validation/` row as *validation*; new "second axis" subsection with
+  the dependency rule.
+- `docs/ARCHITECTURE.md`: layout tree expanded with the `validation/` subtree;
+  new "Two axes" section + "Component flow (validation)" diagram.
+
+### Verified
+- `bash -n` on all three new `external/setup_*.sh` stubs (pass).
+- Directory tree + placeholder files created as listed; `benchmarks/` removed.
+
+### NOT done / deferred (by design — structure only)
+- No `Generator` base class, adapters, harness, suite, or oracle code written.
+- `__init__.py` files intentionally omitted until real code lands (each Python
+  subtree gets one then, so the harness can import it).
+- Config format for `validation/configs/` (gin vs. YAML) not decided yet.
+- The setup stubs do not actually install anything.
