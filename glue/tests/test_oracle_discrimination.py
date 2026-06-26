@@ -8,8 +8,8 @@ decoys. It reproduces the validated results:
   - ``Logs/006``: Vina ΔT2-T1 is the best of six signals, AUROC 0.946;
   - ``Logs/007``: that AUROC is molecular-weight-robust (the differential, unlike
     absolute scores, isn't just reading ligand size).
-(See also ``research/preprocessing/compare_systems.py`` and
-``research/preprocessing/full_comparison/``.)
+(See also ``experiments/oracle_validation/compare_systems.py`` and
+``experiments/ablations/sixway/``.)
 
 Why this exists: we once shipped the oracle using the **CNNaffinity** differential
 (``ddb1_dcnnaff``) instead of the validated **Vina** differential (``ddb1_dvina``).
@@ -29,8 +29,8 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
-SEED_CSV = REPO / "experiments" / "active_learning_6td3" / "seed_6td3.csv"
-DOCK_DIR = REPO / "research" / "preprocessing" / "docking_6td3"
+SEED_CSV = REPO / "experiments" / "active_learning" / "6td3" / "seed_6td3.csv"
+DOCK_DIR = REPO / "experiments" / "oracle_validation" / "docking_6td3"
 
 # Validated threshold + expected separation from Logs/002 (compare_systems.py uses
 # the same "dVina < -1.5" strong-bonus criterion). The +78pt gap is the headline;

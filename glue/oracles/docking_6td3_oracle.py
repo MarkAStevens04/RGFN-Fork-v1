@@ -32,7 +32,7 @@ For one molecule:
 
 Provenance / faithfulness:
     This mirrors the **validated** batch pipeline in
-    ``research/preprocessing/docking_6td3/dock_cluster.py`` — identical gnina
+    ``experiments/oracle_validation/docking_6td3/dock_cluster.py`` — identical gnina
     flags (``--autobox_ligand`` crystal, ``--autobox_add 4``, exhaustiveness,
     num_modes), identical "best pose = max CNNscore", identical Tier-1
     ``--score_only`` rescoring, and the same ``ddb1_dvina`` differential. The
@@ -64,7 +64,9 @@ from glue.oracles.base import GlueOracle
 RDLogger.DisableLog("rdApp.*")
 
 # Default inputs live alongside dock_cluster.py (git-ignored .pdbqt; present on Balam).
-_DOCK_DIR = Path(__file__).resolve().parents[2] / "research" / "preprocessing" / "docking_6td3"
+_DOCK_DIR = (
+    Path(__file__).resolve().parents[2] / "experiments" / "oracle_validation" / "docking_6td3"
+)
 
 
 def _largest_frag(mol):
@@ -99,7 +101,7 @@ class Docking6TD3Oracle(GlueOracle):
 
         Args:
             tier2_path / tier1_path / crystal_path: receptor and reference paths;
-                default to ``research/preprocessing/docking_6td3/`` (Balam).
+                default to ``experiments/oracle_validation/docking_6td3/`` (Balam).
             gnina: gnina launcher; defaults to ``$GNINA`` or dock_cluster.py's path.
             exhaustiveness / num_modes / autobox_add / seed: gnina docking params
                 (identical defaults to dock_cluster.py).

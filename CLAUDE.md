@@ -18,10 +18,10 @@ For the science/goals, read `docs/RESEARCH_CONTEXT.md`.
 | `gin_config/`, `train.py`, `grid_search.py`, `tests/` (upstream parts), `data/chemistry.xlsx`, `data/targets/`, `external/setup_{gnina,gneprop,reinvent,shared}.sh` | **Upstream** | Leave as-is. |
 | `glue/` (**production pipeline**) | **Ours** | All new pipeline Python: oracles, rewards, samplers, proxies, datasets, the active-learning loop. The thing we ship. |
 | `configs/glue/` | **Ours** | All new gin configs (overlay upstream via `include`). |
-| `scripts/` | **Ours** | Entry points (`train.py`/`infer.py` wrappers) + `hpc/`. |
+| `scripts/` | **Ours** | **Generic** launch layer only: pipeline-wide entry points (`train.py`/`infer.py` wrappers, `active_learning.py`) + generic `submit.sh`. Experiment-specific scripts go in `experiments/<group>/<run>/`, not here. |
 | `validation/` (**validation**) | **Ours** | The whole comparative-evaluation world: baseline generators (SynFlowNet, FragGFN, VAE-BO, RGFN adapter), validation-only oracles (Boltz-2), benchmark suites (PMO + our own), the harness, and committed results. |
-| `models/`, `data/synthetic/` | **Ours** | Input structures/checkpoints; generated datasets. |
-| `research/preprocessing/` | **Ours** | Docking oracle validation pipeline (was `pre-processing/`). |
+| `data/` | **Ours** (+ upstream files) | The single **inputs** dir. Ours: `data/models/` (structures/checkpoints), `data/validation-molecules/` (curated known-glue sets), `data/synthetic/` (generated, git-ignored). Upstream (don't move): `data/chemistry.xlsx`, `data/targets/`. |
+| `experiments/` | **Ours** | One self-contained dir **per run/experiment**, grouped by type: `active_learning/`, `oracle_validation/`, `ablations/`. Holds that run's code + seeds + small results + README; timestamped run outputs land alongside (git-ignored). Reusable science graduates into `glue/`. See `experiments/README.md`. |
 | `Logs/`, `docs/` | **Ours** | Experiment logs + project documentation. |
 | `Logs/references/` | **Ours** | Canonical bibliography for papers we build on. Cite by key (`[koziarski2024rgfn]`); annotated index in its `README.md`. PDFs in `pdfs/` are git-ignored. |
 

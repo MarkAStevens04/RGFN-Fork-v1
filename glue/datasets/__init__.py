@@ -7,7 +7,7 @@ Two responsibilities:
        score them, emit a dataset artifact).
 
 Conventions:
-    - Raw / curated inputs live under `data/` and `research/preprocessing/test-data/`.
+    - Raw / curated inputs live under `data/` and `data/validation-molecules/`.
     - Generated synthetic datasets are written under `data/synthetic/` (gitignored).
     - Keep file formats simple (csv / smiles / parquet) and documented.
 

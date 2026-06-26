@@ -46,6 +46,12 @@ if __name__ == "__main__":
 
     seed_everything(args.seed)
     config_name = Path(args.cfg).stem
+    # Group AL run outputs under experiments/active_learning/<run>/ so they land in
+    # the same per-run dir as the committed code + seed (e.g. active_learning_seh ->
+    # active_learning/seh). See docs/ARCHITECTURE.md. (Run outputs are timestamped
+    # subdirs and stay git-ignored.)
+    if config_name.startswith("active_learning_"):
+        config_name = "active_learning/" + config_name[len("active_learning_") :]
     run_name = f"{config_name}/{get_time_stamp()}"
     bindings = [f'run_name="{run_name}"']
     if args.root_dir is not None:

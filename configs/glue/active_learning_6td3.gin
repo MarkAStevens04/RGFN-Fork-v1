@@ -38,7 +38,7 @@ trainer/gin.singleton.constructor = @Trainer
 trainer = @trainer/gin.singleton()
 
 # --- Oracle O: expensive two-tier 6TD3 docking (DDB1 neosubstrate differential).
-# Inputs default to research/preprocessing/docking_6td3/ (present on Balam).
+# Inputs default to experiments/oracle_validation/docking_6td3/ (present on Balam).
 Docking6TD3Oracle.exhaustiveness = 16
 Docking6TD3Oracle.num_modes = 9
 oracle/gin.singleton.constructor = @Docking6TD3Oracle
@@ -47,7 +47,7 @@ oracle = @oracle/gin.singleton()
 # --- Seed dataset D_0: 408 validated docking labels (160 known + 248 decoys). -
 # Column 'label' holds the validated ddb1_dvina differential (Vina T2-T1, the
 # best of six candidate signals: Logs 006 AUROC 0.946 / 007 MW-robust).
-OracleLabeledDataset.seed_csv = 'experiments/active_learning_6td3/seed_6td3.csv'
+OracleLabeledDataset.seed_csv = 'experiments/active_learning/6td3/seed_6td3.csv'
 OracleLabeledDataset.label_column = 'label'
 dataset/gin.singleton.constructor = @OracleLabeledDataset
 dataset = @dataset/gin.singleton()

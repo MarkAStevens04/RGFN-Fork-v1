@@ -21,8 +21,8 @@ dataset tooling.
 
 - `rgfn/` and `configs/` = **pristine upstream RGFN** (kept mergeable; do not edit).
 - `glue/` = **all of our new code** (oracles, rewards, samplers, proxies, datasets).
-- `configs/glue/`, `scripts/`, `benchmarks/`, `models/`, `data/synthetic/`,
-  `research/preprocessing/`, `Logs/`, `docs/` = our configs, entry points, and work.
+- `configs/glue/`, `scripts/`, `validation/`, `experiments/`, `data/`,
+  `Logs/`, `docs/` = our configs, entry points, per-run experiments, inputs, and work.
 
 **Start here:**
 - [`CLAUDE.md`](CLAUDE.md) — the boundary rules + how to add a new oracle/reward/sampler.

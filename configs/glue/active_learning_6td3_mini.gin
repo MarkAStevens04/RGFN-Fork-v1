@@ -45,7 +45,7 @@ oracle/gin.singleton.constructor = @Docking6TD3Oracle
 oracle = @oracle/gin.singleton()
 
 # --- Seed dataset D_0: 408 validated docking labels. -------------------------
-OracleLabeledDataset.seed_csv = 'experiments/active_learning_6td3/seed_6td3.csv'
+OracleLabeledDataset.seed_csv = 'experiments/active_learning/6td3/seed_6td3.csv'
 OracleLabeledDataset.label_column = 'label'
 dataset/gin.singleton.constructor = @OracleLabeledDataset
 dataset = @dataset/gin.singleton()

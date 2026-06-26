@@ -383,3 +383,142 @@ implementation code imported yet** (per the user's request).
   subtree gets one then, so the harness can import it).
 - Config format for `validation/configs/` (gin vs. YAML) not decided yet.
 - The setup stubs do not actually install anything.
+
+---
+
+## 2026-06-26 — sEH GPU-docking oracle for the active-learning loop
+
+Added a fast docking oracle so the multi-round AL loop can actually finish (the
+CPU-bound 6TD3 gnina oracle was killed by the login-node CPU cap; exp `009`/`010`).
+
+### Created (ours)
+- `glue/oracles/docking_seh_oracle.py` — `DockingSEHOracle(GlueOracle)`. Real sEH
+  docking via QuickVina2-GPU-2.1. **Composes** upstream `DockingMoleculeProxy` and
+  calls its `dock_batch_qv2gpu` directly on SMILES — the docking is byte-for-byte
+  the upstream path (no duplication, unlike the 6TD3 oracle). `higher_is_better=
+  False` (Vina energy); returns `nan` on failure per the `GlueOracle` contract;
+  the heavy proxy is built lazily so the module imports on a laptop.
+- `configs/glue/active_learning_seh.gin` — AL loop wiring (mirrors
+  `active_learning_6td3.gin`): `LearnedGlueProxy` (MPNN) as `M`, `DockingSEHOracle`
+  as `O`, `reaction` env (docking stays out of the inner loop).
+- `research/active_learning_seh/` — sEH-specific run tooling (sibling of
+  `research/preprocessing/`; bundles scripts + submit + README like the
+  `pose_selection_ablation/` precedent): `make_seh_seed.py` (builds `D_0` by
+  sampling the untrained RGFN policy and docking → `seed_seh.csv`; reports
+  s/mol), `validate_seh_oracle.py` (quick live smoke), `submit_al_seh.sh` (Balam
+  compute-node run; cuda module + boost libs; regenerates a 300-mol seed on
+  `$SCRATCH`), `README.md`. The generic `scripts/active_learning.py` entry point
+  stays in `scripts/` (shared with 6TD3).
+- `experiments/active_learning_seh/seed_seh.csv` — committed starter seed.
+
+### Edited (ours)
+- `glue/oracles/__init__.py` — export/register `DockingSEHOracle`.
+- `docs/RESEARCH_CONTEXT.md` — index row 010 + Objective 1 note.
+
+### Verified (on balam-login01 A100, `rgfn` env)
+- `py_compile`; import via `glue.registry`; gin parse of the config + class
+  resolves by name.
+- **Live GPU dock**: aspirin −6.30 (matches the recorded sEH validation),
+  ibuprofen −6.90, caffeine −6.50; invalid SMILES → `nan`; ~3.7 s/mol.
+- **Seed gen**: 36/40 RGFN-sampled molecules docked; dataset loads |D_0|=36;
+  proxy/oracle sign check passes (both `higher_is_better=False`).
+- `bash -n` on `submit_al_seh.sh`.
+
+### NOT done / deferred
+- The **full multi-round loop** has not been run yet (needs a compute node;
+  `submit_al_seh.sh` is ready). No top-k-vs-oracle-calls curve / random baseline.
+- Oracle outputs not yet cross-checked against an actual
+  `configs/rgfn_seh_docking.gin` run on the same molecules (numbers should match).
+
+---
+
+## 2026-06-26 — per-phase timing for the active-learning loop
+
+Experiment 009 could not say where the loop spent its time (only eyeballed
+per-step rates; the run died at the oracle step with no number for it). Added
+intrinsic, always-on phase timing.
+
+### Added (ours)
+- `glue/active_learning/timing.py` — `PhaseTimer`: a context-manager that times
+  the four per-round phases (`fit_proxy`, `train_gfn`, `sample_batch`,
+  `oracle_score`). On each phase exit it prints (`[AL]`), logs to the trainer
+  logger under the `timing` prefix (→ wandb), and **appends** to
+  `<run_dir>/active_learning/phase_timings.csv`. The append-before-next-phase
+  ordering means a mid-run crash (the SIGXCPU that ended exp 009) still leaves a
+  record of every phase that finished. `report_total()` ranks phases by share of
+  total wall-clock — the "where to save time" answer.
+
+### Edited (ours)
+- `glue/active_learning/loop.py` — wrapped the four phases in `timer.phase(...)`,
+  added `report_round`/`report_total`. No behavioural change to the algorithm;
+  recorded via `finally`, so timing is robust to a raising phase.
+
+### Verified (laptop, no heavy deps)
+- `py_compile` on both files. Standalone smoke test of `PhaseTimer`: `_fmt`
+  formatting, CSV append, crash-phase recorded via `finally`, share-ranked
+  summary.
+
+### NOT done / deferred
+- Not yet run inside a real loop on Balam (needs the `rgfn` env / GPU). The four
+  phase labels and their wiring are unverified against a live `Trainer.train()`.
+- Overhead is negligible (one `perf_counter` + a CSV append per phase, 4/round),
+  but unconfirmed under the real loop.
+
+---
+
+## 2026-06-26 — directory reorg: experiments/ (per-run), data/ (inputs), flat scripts/
+
+Reorganized the top-level layout for clarity (one home per concept). No `glue/`
+or `rgfn/` logic changed; this is moves + path-rewiring + docs.
+
+### Moved / merged
+- **`research/` dissolved into `experiments/`**, now **grouped by type, one dir
+  per run**: `experiments/{active_learning,oracle_validation,ablations}/<run>/`.
+  - `research/active_learning_{seh,6td3}/` → `experiments/active_learning/{seh,6td3}/`
+    (merged with the matching `experiments/active_learning_*` seeds/outputs).
+  - `research/preprocessing/{docking_6td3, docking_gnina→docking_crbn, clean*.py,
+    compare_systems.py}` → `experiments/oracle_validation/…`.
+  - `research/preprocessing/{pose_selection_ablation→pose_selection,
+    full_comparison→sixway, full_comparison_mw→mw}` → `experiments/ablations/…`.
+  - Old flat AL output dirs (`active_learning_mock`, `al_probe→probe`,
+    `active_learning_6td3_inner→6td3_inner`) → under `experiments/active_learning/`.
+  - `experiments/oracle_validation/` chosen over `validation/` to avoid clashing
+    with the top-level `validation/` benchmarking layer.
+- **`models/` + `research/preprocessing/test-data/` folded into `data/`** (the
+  single inputs dir): `data/models/`, `data/validation-molecules/` (renamed from
+  "test-data" — they're validation *inputs*, not fixtures). `data/` keeps its name
+  because upstream hardcodes `data/chemistry.xlsx` + `data/targets/`.
+- **`scripts/hpc/` removed**; the one generic `submit.sh` → `scripts/submit.sh`.
+  Run-specific submit scripts already live with their experiment.
+
+### Rewired
+- All `git mv`/`mv` done so git detected pure **renames** (history preserved).
+- Code paths: `glue/oracles/docking_6td3_oracle.py` `_DOCK_DIR`,
+  `glue/tests/test_oracle_discrimination.py` (`SEED_CSV`/`DOCK_DIR`), the moved
+  docking/analysis scripts (`../test-data`→`data/validation-molecules`,
+  `docking_gnina`→`docking_crbn`, `models/`→`data/models/`), `clean*.py` in/out dirs.
+- Configs: 5 AL `seed_csv` paths repointed to `experiments/active_learning/<run>/`.
+- `scripts/active_learning.py`: run_name now groups outputs under
+  `experiments/active_learning/<run>/<ts>/` so outputs co-locate with each run's
+  committed material.
+- `.gitignore`: replaced the blanket `experiments/*` ignore with a **pattern-based**
+  scheme — ignore timestamped run-output dirs (`experiments/**/YYYY-MM-DD_*/`),
+  force-track `seed_*.csv` / `*_results.csv`; updated `models/`→`data/models/`,
+  `test-data`→`data/validation-molecules`, cluster_out/violins paths.
+
+### Verified (balam-login01, `rgfn` env)
+- `git status` shows clean renames; no committed file under a timestamped run dir;
+  `git check-ignore` confirms run outputs ignored / seeds+results+code tracked.
+- `py_compile` of all moved scripts; `import glue`; all 5 AL configs parse **and
+  their seed paths resolve**; `pytest glue/tests/test_oracle_discrimination.py` (2
+  passed); `bash -n` on all 6 submit scripts.
+- READMEs updated/added: `experiments/README.md` (structure guide), per-group/run
+  READMEs, `data/README.md` + `data/{models,validation-molecules}/README.md`,
+  `scripts/README.md`; plus `CLAUDE.md`, `docs/ARCHITECTURE.md`, README/context.
+
+### NOT done / deferred
+- Balam-side `$SCRATCH` paths (e.g. where the user keeps `.cif`/receptors) may need
+  the same `models/`→`data/models/` move on Balam; the repo-relative refs are fixed.
+- The 6TD3 docking-oracle pdbqt receptors live (git-ignored) at the new
+  `experiments/oracle_validation/docking_6td3/` path on this login node; confirm
+  they're present at that path on Balam compute nodes before the next 6TD3 run.

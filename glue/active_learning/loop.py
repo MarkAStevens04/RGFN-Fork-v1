@@ -34,6 +34,7 @@ from typing import List, Optional
 
 import gin
 
+from glue.active_learning.timing import PhaseTimer
 from glue.datasets.oracle_labeled import OracleLabeledDataset
 from glue.oracles.base import GlueOracle
 from glue.proxies.learned_proxy import LearnedGlueProxy
@@ -93,6 +94,9 @@ class ActiveLearningLoop:
         out_dir = self.run_dir / "active_learning"
         out_dir.mkdir(parents=True, exist_ok=True)
         logger = self.trainer.logger
+        # Per-phase wall-clock, reported live and appended to CSV so the record
+        # survives a mid-run crash (cf. experiment 009's SIGXCPU at the oracle).
+        timer = PhaseTimer(logger=logger, csv_path=out_dir / "phase_timings.csv")
 
         print(f"[AL] start: {self.n_rounds} rounds, seed |D_0|={len(self.dataset)}", flush=True)
         if len(self.dataset) < 2:
@@ -113,8 +117,9 @@ class ActiveLearningLoop:
         for rnd in range(1, self.n_rounds + 1):
             # 1. fit M on D_{i-1}
             smiles, labels = self.dataset.to_lists()
-            fit_metrics = self.proxy.fit(smiles, labels)
-            self.proxy.clear_cache()  # predictions changed -> drop stale cache
+            with timer.phase("fit_proxy", rnd):
+                fit_metrics = self.proxy.fit(smiles, labels)
+                self.proxy.clear_cache()  # predictions changed -> drop stale cache
             print(
                 f"[AL] round {rnd}: fit M on |D|={len(self.dataset)} -> {fit_metrics}", flush=True
             )
@@ -122,14 +127,17 @@ class ActiveLearningLoop:
             # 2. train pi_theta against r(x) = M(x)^beta  (RGFN's own inner loop)
             if self.reset_replay_each_round:
                 self._reset_replay_buffer()
-            self.trainer.train()
+            with timer.phase("train_gfn", rnd):
+                self.trainer.train()
 
             # 3. sample a query batch B ~ pi_theta
-            batch = self._sample_query_batch()
+            with timer.phase("sample_batch", rnd):
+                batch = self._sample_query_batch()
             print(f"[AL] round {rnd}: sampled {len(batch)} unique candidates", flush=True)
 
             # 4. score B with the expensive oracle O
-            oracle_scores = self.oracle.score(batch) if batch else []
+            with timer.phase("oracle_score", rnd):
+                oracle_scores = self.oracle.score(batch) if batch else []
 
             # 5. D_i = D̂_i ∪ D_{i-1}
             n_added = self.dataset.add(batch, oracle_scores)
@@ -148,7 +156,9 @@ class ActiveLearningLoop:
             logger.log_metrics(metrics=round_metrics, prefix="active_learning")
             self.dataset.save_csv(str(out_dir / f"dataset_round_{rnd:03d}.csv"))
             print(f"[AL] round {rnd}: |D|={len(self.dataset)} (+{n_added})", flush=True)
+            timer.report_round(rnd)
 
+        timer.report_total()
         top = self.dataset.top_k(self.top_k)
         self._write_top_k(out_dir / "top_k.csv", top)
         print(f"[AL] done. Top-{self.top_k} written ({len(top)} rows).", flush=True)
