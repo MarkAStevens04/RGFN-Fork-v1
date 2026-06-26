@@ -34,7 +34,21 @@
       "Bash(mv .claude/experiment-log .claude/skills/experiment-log)",
       "Bash(bash -n research/preprocessing/pose_selection_ablation/submit_pose_ablation.sh)",
       "Bash(bash -n research/preprocessing/pose_selection_ablation/collect_results.sh)",
-      "WebFetch(domain:ar5iv.labs.arxiv.org)"
+      "WebFetch(domain:ar5iv.labs.arxiv.org)",
+      "Bash(sinfo -o \"%P %a %l %D %G\")",
+      "Bash(squeue -u markymoo)",
+      "Bash(squeue -j 69425 -o \"%.10i %.2t %.50R\")",
+      "Bash(sinfo -p compute -o \"%P %a %D %T %C %G\")",
+      "Bash(scontrol show *)",
+      "Bash(sinfo -o \"%P %a %D %T %l\")",
+      "Bash(sinfo -o \"%.18P %.6a %.6D %.10T\")",
+      "Bash(echo \"EXIT=$?\")",
+      "Read(//home/markymoo/projects/RGFN_Fork/docking_6td3/**)",
+      "Read(//home/markymoo/projects/RGFN_Fork/test-data/**)",
+      "Bash(sinfo -p debug_full_node)",
+      "Bash(sinfo)",
+      "Bash(sbatch research/preprocessing/pose_selection_ablation/submit_pose_ablation.sh)",
+      "Bash(squeue *)"
     ]
   }
 }

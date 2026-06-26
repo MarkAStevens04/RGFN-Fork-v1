@@ -31,12 +31,26 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--cfg", type=str, required=True)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--root-dir",
+        type=str,
+        default=None,
+        help=(
+            "Override gin's user_root_dir (where run dirs/CSVs/checkpoints are "
+            "written). Required on a Balam compute node, where $HOME is read-only "
+            "and run outputs must go to $SCRATCH; the default 'experiments' is a "
+            "repo-relative path that only works on the writable login node."
+        ),
+    )
     args = parser.parse_args()
 
     seed_everything(args.seed)
     config_name = Path(args.cfg).stem
     run_name = f"{config_name}/{get_time_stamp()}"
-    gin.parse_config_files_and_bindings([args.cfg], bindings=[f'run_name="{run_name}"'])
+    bindings = [f'run_name="{run_name}"']
+    if args.root_dir is not None:
+        bindings.append(f'user_root_dir="{args.root_dir}"')
+    gin.parse_config_files_and_bindings([args.cfg], bindings=bindings)
 
     loop = ActiveLearningLoop()
     loop.trainer.logger.log_to_file(gin.operative_config_str(), "operative_config")
