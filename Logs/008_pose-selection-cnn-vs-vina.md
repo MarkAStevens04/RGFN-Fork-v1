@@ -1,6 +1,6 @@
 # 6TD3 — does pose selection (CNN vs. Vina) change the glue/decoy discrimination?
 
-**Date:** 2026-06-25, ~4pm
+**Date:** 2026-06-25, ~4pm (drafted); run completed 2026-06-26, ~5:25pm (Balam job 69443)
 
 ## Question
 
@@ -16,7 +16,31 @@ This experiment re-docks the same known-glue and decoy molecules from entry 002 
 
 ## Answer
 
-*[TODO — fill after the Balam run. Expected shape: "Selecting by Vina instead of CNN changes the differential's AUROC from X to Y; the two rules pick the same pose Z% of the time, so pose selection {does / does not} materially affect discrimination."]*
+**Pose selection matters, and the CNN earns its keep.** Selecting each molecule's
+scored pose by Vina energy instead of CNN score drops the validated differential's
+AUROC from **0.946 → 0.795** (ΔAUROC −0.151) and more than halves the effect size
+(Cohen's d 2.38 → 0.95). The two rules pick the **same** pose only 40.6% of the
+time on known glues and 17.7% on decoys — so they disagree on the majority of
+molecules, and that disagreement is exactly what degrades discrimination. The
+in-run CNN control reproduced the entry-006 published baseline to the digit
+(AUROC 0.946, Δ +0.000 vs. published — well within docking stochasticity),
+confirming the all-poses pipeline is faithful to production and the gap is a real
+effect, not a setup artifact.
+
+The mechanism is visible in the violins (`pose_selection_violins.png`): under Vina
+selection the **decoy** differential grows a long low-energy tail — plain Vina
+ranking happily promotes spuriously tight-scoring poses for decoys too, so the
+decoy and known distributions overlap far more. The CNN ranker suppresses those
+junk poses, keeping decoys near zero. This is the 6TD3 echo of the 5HXB finding
+(entry 001) that Vina ranking buries the correct pose: it still holds.
+
+**Decision: CNN selection IS necessary — gnina stays.** This is the positive
+branch below: the CNN has a demonstrated, load-bearing role as pose picker, so the
+slower CPU gnina oracle is now justified by evidence rather than inherited from the
+5HXB work. The go/no-go went *against* retiring gnina; we therefore owe a
+GPU-docking-**plus-CNN-rescore** path for the glue loop to ever run multi-round
+(see Next Experiments), rather than the pure GPU-Vina path a null result would have
+unlocked.
 
 **The decision this answer drives:**
 - **If CNN selection is NOT necessary** (Vina-selected poses discriminate as well — AUROC within noise of the CNN arm, high pose agreement): the gnina CNN has no surviving role in the oracle, since the differential is already pure Vina. **We should retire gnina and dock with QuickVina2-GPU instead** — the engine RGFN uses in-loop — for the ~2.6× speedup measured in entry 010 (1.57 → 0.60 s/mol) and a much simpler, single-engine stack. This is the concrete payoff of a null result here, and the route to giving the 6TD3 glue loop the GPU oracle it still lacks.
@@ -40,7 +64,7 @@ This is a design-justification ablation that Digital Discovery / J. Cheminformat
 
 ## Relevant Files
 
-Root: `research/preprocessing/pose_selection_ablation/`
+Root: `experiments/ablations/pose_selection/` (was `research/preprocessing/pose_selection_ablation/` when this entry was drafted; the repo was reorganized to the `experiments/<type>/<run>/` layout — entry-002 inputs it references now live under `experiments/oracle_validation/docking_6td3/`).
 
 **Scripts**
 - `dock_allposes.py` — variant of `docking_6td3/dock_cluster.py` that retains **all** `num_modes` docked poses and `--score_only`s every pose against Tier 1, emitting a per-pose CSV. Identical gnina flags / embedding / autobox / exhaustiveness / num_modes / seed / sharding to `dock_cluster.py` so the CNN-selected arm reproduces production as an in-run control.
@@ -62,7 +86,13 @@ Root: `research/preprocessing/pose_selection_ablation/`
 
 ## Relevant Versions
 
-*[TODO — add commit hash after pushing.]* The three scripts in `research/preprocessing/pose_selection_ablation/` are uncommitted as of writing. Result CSVs do not exist yet (Balam run pending). **Action needed:** commit `dock_allposes.py`, `analyze_pose_selection.py`, `submit_pose_ablation.sh`, and this log; once the run completes, commit the `*_allposes.csv` outputs and update this section + the Results table.
+*[TODO — add commit hash after pushing.]* The run completed (Balam job 69443) and
+results were pulled into the repo with `collect_results.sh 69443` from balam-login01.
+**Uncommitted as of this writing**, all under `experiments/ablations/pose_selection/`:
+the scripts (`dock_allposes.py`, `analyze_pose_selection.py`, `submit_pose_ablation.sh`,
+`collect_results.sh`, `smoke_test.py`, `README.md`), the collected results
+(`known_allposes.csv`, `decoy_allposes.csv`, `pose_selection_stats.csv`,
+`pose_selection_violins.png`), and this log. **Action needed:** commit them together.
 
 ## Relevant Resources
 
@@ -79,19 +109,28 @@ Root: `research/preprocessing/pose_selection_ablation/`
 
 ## Method
 
-*(Planned; not yet run — Balam compute node unavailable at time of writing.)*
+*(Executed 2026-06-26 as Balam job 69443, debug_full_node, 4× A100 on balam007, 13.9 min.)*
 
-1. **Redock retaining all poses** — `sbatch research/preprocessing/pose_selection_ablation/submit_pose_ablation.sh`. Embeds the entry-002 known+decoy molecules, docks each into Tier 2 (CDK12+DDB1, autoboxed on crystal CR8, exhaustiveness 16, num_modes 9, seed 42), keeps every pose, and `--score_only`s all poses against Tier 1 (CDK12 alone) → `known_allposes.csv` / `decoy_allposes.csv` in `$OUTDIR`.
+1. **Redock retaining all poses** — `sbatch experiments/ablations/pose_selection/submit_pose_ablation.sh`. Embeds the entry-002 known+decoy molecules, docks each into Tier 2 (CDK12+DDB1, autoboxed on crystal CR8, exhaustiveness 16, num_modes 9, seed 42), keeps every pose, and `--score_only`s all poses against Tier 1 (CDK12 alone) → `known_allposes.csv` / `decoy_allposes.csv` in `$OUTDIR`.
 2. **Pose-selection ablation** — `DATA_DIR=$OUTDIR python analyze_pose_selection.py` (run automatically by the submit script): re-pick each molecule's pose by `max cnnsc_t2` vs. `min vina_t2`, compute `ddb1_dvina` per rule, and report discrimination + pose agreement.
 3. **Sanity check** — confirm the CNN-selected arm's AUROC lands near the entry-006 baseline (0.946); large divergence flags a pipeline mismatch, not a real effect.
 
 ## Results
 
-*[TODO — fill after the run. Planned table:]*
+Balam job **69443** (debug_full_node, 4× A100, balam007), 13.9 min wall: phase-1
+embedding 2.8 min (408/409 embedded — 1 molecule failed RDKit embedding), phase-2
+docking 11.0 min across 16 shards. Retained **160 known / 248 decoy** molecules =
+1440 / 2232 per-pose rows (9 poses each).
 
 | selection rule | select by | known median dVina | decoy median dVina | Cohen's d | AUROC | ΔAUROC vs CNN |
 |---|---|---|---|---|---|---|
-| cnn (production) | max(cnnsc_t2) | — | — | — | — | 0.000 |
-| vina (ablation) | min(vina_t2) | — | — | — | — | — |
+| cnn (production) | max(cnnsc_t2) | −2.20 | −0.60 | 2.38 | **0.946** | 0.000 |
+| vina (ablation) | min(vina_t2) | −2.42 | −0.89 | 0.95 | **0.795** | **−0.151** |
 
-Pose agreement (same pose chosen by both rules): known —%, decoy —%.
+(Mann-Whitney U: CNN p = 1.3e−52, Vina p = 4.3e−24 — both arms separate the
+classes, but the CNN arm far more strongly.)
+
+Pose agreement (same pose chosen by both rules): known **40.6%**, decoy **17.7%**.
+
+In-run CNN control vs. entry-006 production baseline (AUROC 0.946): reproduces to
+**0.946**, Δ +0.000 — pipeline faithful, the Vina gap is a real effect.

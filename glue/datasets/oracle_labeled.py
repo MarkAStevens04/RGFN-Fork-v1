@@ -93,8 +93,14 @@ class OracleLabeledDataset:
         return [s for s, _ in items], [y for _, y in items]
 
     def top_k(self, k: int) -> List[Tuple[str, float]]:
-        """Return the Top-K ``(smiles, label)`` by label (the loop's deliverable)."""
-        return sorted(self._data.items(), key=lambda kv: kv[1], reverse=True)[:k]
+        """Return the Top-K ``(smiles, label)`` by label (the loop's deliverable).
+
+        Both oracles label molecules on a *more-negative = better* scale
+        (``GlueOracle.higher_is_better = False``: the 6TD3 ``ddb1_dvina``
+        differential and the sEH Vina binding energy alike). The best molecules
+        are therefore the *smallest* labels, so we sort ascending.
+        """
+        return sorted(self._data.items(), key=lambda kv: kv[1])[:k]
 
     def save_csv(self, path: str) -> None:
         """Dump the full dataset to CSV (provenance / resume)."""

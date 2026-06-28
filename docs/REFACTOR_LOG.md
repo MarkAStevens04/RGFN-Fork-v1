@@ -522,3 +522,23 @@ or `rgfn/` logic changed; this is moves + path-rewiring + docs.
 - The 6TD3 docking-oracle pdbqt receptors live (git-ignored) at the new
   `experiments/oracle_validation/docking_6td3/` path on this login node; confirm
   they're present at that path on Balam compute nodes before the next 6TD3 run.
+
+---
+
+## 2026-06-27 — `top_k` deliverable sort fix (`glue/datasets/oracle_labeled.py`)
+
+`OracleLabeledDataset.top_k()` sorted `reverse=True` (largest label first), but
+oracle labels are *more-negative = better* (`GlueOracle.higher_is_better = False`,
+for both the 6TD3 `ddb1_dvina` differential and the sEH Vina energy), so the
+"Top-K deliverable" returned the **worst** molecules. Found while reviewing the
+first multi-round 6TD3 run (Logs/011, job 69445), whose `top_k.csv` listed +0.68
+at rank 1. Fixed to sort ascending. Scope: deliverable file only — training's
+reward/proxy path is separate and was correctly oriented (the run's generated
+molecules dock *well*). Regenerated `top_k.csv` for that run from
+`dataset_round_003.csv` (best now −4.92).
+
+**Verified:** `py_compile` of the module. **Not verified here:** no unit test
+covers `top_k`, and gin/rdkit/conda aren't on this node, so the loop wasn't
+re-run; the regenerated `top_k.csv` was produced by replicating the (trivial)
+ascending-sort logic inline. A `test_top_k_orientation` unit test would be cheap
+insurance.
