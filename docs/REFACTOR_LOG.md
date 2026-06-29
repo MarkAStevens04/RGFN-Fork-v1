@@ -542,3 +542,29 @@ covers `top_k`, and gin/rdkit/conda aren't on this node, so the loop wasn't
 re-run; the regenerated `top_k.csv` was produced by replicating the (trivial)
 ascending-sort logic inline. A `test_top_k_orientation` unit test would be cheap
 insurance.
+
+---
+
+## 2026-06-28 — docking oracle sub-step timing (`OracleStepTimer`)
+
+Added per-substep wall-clock timing inside the expensive docking oracle so the
+`oracle_score` phase (35% of loop wall-clock, Logs/011) is no longer a black box.
+
+- **New** `glue/oracles/step_timing.py::OracleStepTimer` — disabled-by-default
+  (silent no-op) companion to `glue/active_learning/timing.PhaseTimer`. Appends
+  `(round, step, seconds, n_molecules)` rows on each sub-step's completion
+  (crash-safe), prints a `[dock]` line live.
+- `glue/oracles/docking_6td3_oracle.py` — new `enable_step_timing(csv_path)`;
+  `score()`'s four sub-steps wrapped: `embed` / `tier2_dock` / `pose_select` /
+  `tier1_rescore`. **Docking logic unchanged** (like-for-like with Logs/011).
+- `glue/active_learning/loop.py` — opt-in hook: if the oracle has
+  `enable_step_timing`, the loop points it at
+  `<run>/active_learning/docking_timings.csv`. Loop stays oracle-agnostic; mock /
+  sEH oracles (no hook) are unaffected (`getattr` + `callable` guard).
+
+**Verified:** `py_compile` (3 files); in the `rgfn` env `import glue` resolves the
+oracle, disabled timer is a confirmed no-op, enabled timer writes the expected
+4-column CSV with recoverable s/mol; `bash -n` on the new submit script.
+**Not verified here:** a real multi-round run with the timer live — that is
+**Logs/012** (job 69450, queued this session). The sEH oracle does **not** yet
+implement `enable_step_timing`; add it there when that loop is next run.

@@ -60,6 +60,7 @@ from rdkit import Chem, RDLogger
 from rdkit.Chem import AllChem
 
 from glue.oracles.base import GlueOracle
+from glue.oracles.step_timing import OracleStepTimer
 
 RDLogger.DisableLog("rdApp.*")
 
@@ -118,6 +119,15 @@ class Docking6TD3Oracle(GlueOracle):
         self.n_cpu = n_cpu
         self.seed = seed
         self.work_dir = work_dir
+        # Sub-step timing is opt-in (disabled = silent no-op); the AL loop turns it
+        # on per run via enable_step_timing(). See glue/oracles/step_timing.py.
+        self._timer = OracleStepTimer(None)
+
+    def enable_step_timing(self, csv_path) -> None:
+        """Record per-substep wall-clock (embed / tier2_dock / pose_select /
+        tier1_rescore) to ``csv_path``. Called optionally by ``ActiveLearningLoop``;
+        the oracle works identically (just untimed) if it is never called."""
+        self._timer = OracleStepTimer(csv_path)
 
     # ----------------------------------------------------------------- public API
     def score(self, smiles: List[str]) -> List[float]:
@@ -126,13 +136,15 @@ class Docking6TD3Oracle(GlueOracle):
         results = {i: float("nan") for i in range(len(smiles))}
         work = Path(self.work_dir) if self.work_dir else Path(tempfile.mkdtemp(prefix="dock6td3_"))
         work.mkdir(parents=True, exist_ok=True)
+        self._timer.new_round()
 
         # phase 1: embed (idx -> molblock); idx is the SMILES position in the batch.
         blocks = {}
-        for i, smi in enumerate(smiles):
-            blk = self._embed(i, smi)
-            if blk is not None:
-                blocks[i] = blk
+        with self._timer.step("embed", len(smiles)):
+            for i, smi in enumerate(smiles):
+                blk = self._embed(i, smi)
+                if blk is not None:
+                    blocks[i] = blk
         if not blocks:
             return [results[i] for i in range(len(smiles))]
 
@@ -141,43 +153,46 @@ class Docking6TD3Oracle(GlueOracle):
         with open(batch_sdf, "w") as fh:
             fh.write("".join(blocks[i] + "$$$$\n" for i in sorted(blocks)))
 
-        # phase 2: dock into Tier 2, then score best poses against Tier 1
+        # phase 2: dock into Tier 2 (the exhaustive conformational search -- expected
+        # to dominate; this is the step a GPU docker would replace, see Logs/012).
         docked = work / "batch_docked.sdf"
-        self._run_gnina(
-            [
-                "-r",
-                str(self.tier2_path),
-                "-l",
-                str(batch_sdf),
-                "--autobox_ligand",
-                str(self.crystal_path),
-                "--autobox_add",
-                str(self.autobox_add),
-                "--exhaustiveness",
-                str(self.exhaustiveness),
-                "--num_modes",
-                str(self.num_modes),
-                "--cpu",
-                str(self.n_cpu),
-                "--seed",
-                str(self.seed),
-                "-o",
-                str(docked),
-            ]
-        )
+        with self._timer.step("tier2_dock", len(blocks)):
+            self._run_gnina(
+                [
+                    "-r",
+                    str(self.tier2_path),
+                    "-l",
+                    str(batch_sdf),
+                    "--autobox_ligand",
+                    str(self.crystal_path),
+                    "--autobox_add",
+                    str(self.autobox_add),
+                    "--exhaustiveness",
+                    str(self.exhaustiveness),
+                    "--num_modes",
+                    str(self.num_modes),
+                    "--cpu",
+                    str(self.n_cpu),
+                    "--seed",
+                    str(self.seed),
+                    "-o",
+                    str(docked),
+                ]
+            )
 
-        poses = self._poses(docked)  # idx(str) -> [pose dicts]
-        # Pose selection is by CNNscore (most native-like), exactly as
+        # phase 3: parse poses + pick the most native-like (max CNNscore), exactly as
         # dock_cluster.py; the *scored differential* is Vina, not CNNaffinity.
         order, best_mols, vina_t2 = [], [], {}
-        for i in sorted(blocks):
-            ps = poses.get(str(i))
-            if not ps:
-                continue
-            best = max(ps, key=lambda p: p["cnnsc"])  # most native-like pose
-            order.append(i)
-            best_mols.append(best["mol"])
-            vina_t2[i] = best["vina"]  # Tier-2 Vina affinity of that pose
+        with self._timer.step("pose_select", len(blocks)):
+            poses = self._poses(docked)  # idx(str) -> [pose dicts]
+            for i in sorted(blocks):
+                ps = poses.get(str(i))
+                if not ps:
+                    continue
+                best = max(ps, key=lambda p: p["cnnsc"])  # most native-like pose
+                order.append(i)
+                best_mols.append(best["mol"])
+                vina_t2[i] = best["vina"]  # Tier-2 Vina affinity of that pose
 
         if best_mols:
             best_sdf = work / "batch_best.sdf"
@@ -185,7 +200,9 @@ class Docking6TD3Oracle(GlueOracle):
             for m in best_mols:
                 writer.write(m)
             writer.close()
-            t1 = self._score_only(self.tier1_path, best_sdf)  # ordered [(Affinity, CNNaffinity)]
+            # phase 4: Tier-1 rescore of the chosen pose (--score_only, no search).
+            with self._timer.step("tier1_rescore", len(best_mols)):
+                t1 = self._score_only(self.tier1_path, best_sdf)  # [(Affinity, CNNaffinity)]
             for k, i in enumerate(order):
                 if k < len(t1):
                     vina_t1 = t1[k][0]  # Tier-1 Vina affinity of the same pose

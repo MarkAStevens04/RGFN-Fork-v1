@@ -93,6 +93,13 @@ class ActiveLearningLoop:
         """Run all rounds and return ``TopK(D_N)`` as ``[(smiles, label), ...]``."""
         out_dir = self.run_dir / "active_learning"
         out_dir.mkdir(parents=True, exist_ok=True)
+        # Oracles that can attribute their cost to sub-steps (e.g. Docking6TD3Oracle:
+        # embed / tier2_dock / pose_select / tier1_rescore) write a sibling CSV, so
+        # we can see what dominates the oracle phase. Optional hook -- the loop stays
+        # oracle-agnostic; oracles without it (mock, ...) are unaffected.
+        enable_step_timing = getattr(self.oracle, "enable_step_timing", None)
+        if callable(enable_step_timing):
+            enable_step_timing(out_dir / "docking_timings.csv")
         logger = self.trainer.logger
         # Per-phase wall-clock, reported live and appended to CSV so the record
         # survives a mid-run crash (cf. experiment 009's SIGXCPU at the oracle).
