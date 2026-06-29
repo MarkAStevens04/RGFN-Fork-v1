@@ -86,13 +86,13 @@ Root: `experiments/ablations/pose_selection/` (was `research/preprocessing/pose_
 
 ## Relevant Versions
 
-*[TODO — add commit hash after pushing.]* The run completed (Balam job 69443) and
+Committed in `c447490` ("Refactor & timing"). The run completed (Balam job 69443) and
 results were pulled into the repo with `collect_results.sh 69443` from balam-login01.
-**Uncommitted as of this writing**, all under `experiments/ablations/pose_selection/`:
+All under `experiments/ablations/pose_selection/`:
 the scripts (`dock_allposes.py`, `analyze_pose_selection.py`, `submit_pose_ablation.sh`,
 `collect_results.sh`, `smoke_test.py`, `README.md`), the collected results
 (`known_allposes.csv`, `decoy_allposes.csv`, `pose_selection_stats.csv`,
-`pose_selection_violins.png`), and this log. **Action needed:** commit them together.
+`pose_selection_violins.png`), and this log.
 
 ## Relevant Resources
 

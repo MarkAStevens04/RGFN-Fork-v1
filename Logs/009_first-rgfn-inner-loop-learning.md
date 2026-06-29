@@ -69,7 +69,7 @@ ca6253d [DOCS] Merge redundant README into RESEARCH_CONTEXT.md
 13cf8b6 [CODE] MW Matched Decoys and corrected active learning oracle
 ```
 
-The files this run introduced/changed are **not yet committed**: `glue/metrics/` (new package), `glue/registry.py` (import line), `configs/glue/active_learning_6td3_inner.gin`, `configs/glue/active_learning_6td3_mini.gin`. The receptor `.pdbqt`/`.pdb` under `research/preprocessing/docking_6td3/` are intentionally gitignored. `[TODO — add commit hash after pushing]`
+The files this run introduced/changed were committed in `492b2d1` ("[CODE] Active Learning & prepare cnn re-pose experiment"): `glue/metrics/` (new package), `glue/registry.py` (import line), `configs/glue/active_learning_6td3_inner.gin`, `configs/glue/active_learning_6td3_mini.gin`. The receptor `.pdbqt`/`.pdb` under `research/preprocessing/docking_6td3/` are intentionally gitignored.
 
 ## Relevant Resources
 

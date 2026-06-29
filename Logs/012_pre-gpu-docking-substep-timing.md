@@ -65,7 +65,7 @@ c447490 Refactor & timing
 556a466 prep for validation workflows
 ```
 
-Not yet committed (this entry + the entry-011 fix): `glue/oracles/step_timing.py` (new), `glue/oracles/docking_6td3_oracle.py`, `glue/active_learning/loop.py`, `glue/datasets/oracle_labeled.py` (entry-011 `top_k` fix), `experiments/active_learning/6td3/submit_al_6td3_pregpu.sh`. `[TODO — add commit hash after pushing]`
+Committed in `d1d77f9` ("Active learning & GPU dock"): `glue/oracles/step_timing.py` (new), `glue/oracles/docking_6td3_oracle.py`, `glue/active_learning/loop.py`, `experiments/active_learning/6td3/submit_al_6td3_pregpu.sh`. (The entry-011 `top_k` fix in `glue/datasets/oracle_labeled.py` was committed earlier, in `e07d953`.)
 
 ## Relevant Resources
 
@@ -83,7 +83,7 @@ Not yet committed (this entry + the entry-011 fix): `glue/oracles/step_timing.py
 1. **Instrument** — add `OracleStepTimer` (`glue/oracles/step_timing.py`); wrap the four sub-steps of `Docking6TD3Oracle.score()`; add the loop's opt-in `enable_step_timing` hook.
 2. **Validate locally** — `py_compile` all three files; in the `rgfn` env, `import glue` (gin resolves the oracle), confirm the disabled timer is a no-op and the enabled timer writes the expected CSV; `bash -n` the submit script. `[done this session]`
 3. **Submit** — `sbatch experiments/active_learning/6td3/submit_al_6td3_pregpu.sh` (compute node, no login CPU cap).
-4. **Analyze** `[TODO]` — read `docking_timings.csv`: per-step share of the docking phase, seconds/molecule per step, and the tier2_dock-vs-molecule-size trend across rounds; cross-check the docking-phase total against entry 011's `oracle_score` to confirm the breakdown sums correctly.
+4. **Analyze** — read `docking_timings.csv`: per-step share of the docking phase, seconds/molecule per step, and the tier2_dock-vs-molecule-size trend across rounds; cross-check the docking-phase total against entry 011's `oracle_score` to confirm the breakdown sums correctly.
 
 ## Results
 

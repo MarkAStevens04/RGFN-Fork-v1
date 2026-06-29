@@ -118,12 +118,12 @@ Root: project repository `RGFN-Fork/`.
 
 ### Relevant Versions
 
-Not yet committed. Files to commit: `glue/oracles/docking_seh_oracle.py`,
+Committed in `c447490` ("Refactor & timing"): `glue/oracles/docking_seh_oracle.py`,
 `glue/oracles/__init__.py`, `configs/glue/active_learning_seh.gin`,
 `experiments/active_learning/seh/` (make_seh_seed.py, validate_seh_oracle.py,
 submit_al_seh.sh, README.md),
 `experiments/active_learning/seh/seed_seh.csv`, this log, and the README/context
-updates. `[TODO — add commit hash after pushing]`
+updates.
 
 ### Relevant Resources
 

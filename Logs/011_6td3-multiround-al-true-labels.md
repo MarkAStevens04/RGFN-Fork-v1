@@ -67,9 +67,9 @@ c447490 Refactor & timing
 556a466 prep for validation workflows
 ```
 
-The loop's timing instrumentation (`phase_timings.csv`, the `[AL] timing summary` print) is in `c447490`. The `top_k()` sort fix in `glue/datasets/oracle_labeled.py` is **not yet committed**. The config `configs/glue/active_learning_6td3_mini.gin` was staged in entry 009. Receptor `.pdbqt`/`.pdb` are intentionally gitignored; run outputs live on `$SCRATCH`.
+The loop's timing instrumentation (`phase_timings.csv`, the `[AL] timing summary` print) is in `c447490`. The `top_k()` sort fix in `glue/datasets/oracle_labeled.py` was committed in `e07d953` ("small AL loop logs"). The config `configs/glue/active_learning_6td3_mini.gin` was staged in entry 009. Receptor `.pdbqt`/`.pdb` are intentionally gitignored; run outputs live on `$SCRATCH`.
 
-**Commit needed:** `glue/datasets/oracle_labeled.py` (the `top_k` fix). `[TODO — add commit hash after pushing]`
+**Committed:** the `top_k` fix in `glue/datasets/oracle_labeled.py` landed in `e07d953` ("small AL loop logs").
 
 ## Relevant Resources
 

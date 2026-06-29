@@ -56,7 +56,7 @@ c723fcb [CODE] Little determination of CNN vs Vina scoring on Tier 1 vs Tier 2 v
 f418de8 [CODE] Mock Active Learning Loop (no balam)
 ```
 
-The four scripts and their outputs (`research/preprocessing/full_comparison_mw/`) are **not yet committed**. `[TODO — add commit hash after pushing]`
+The four scripts and their outputs (now under `experiments/ablations/mw/` after the repo restructure) were committed in `13cf8b6` ("[CODE] MW Matched Decoys and corrected active learning oracle").
 
 ## Relevant Resources
 

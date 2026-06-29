@@ -119,7 +119,9 @@
       "Bash(sacct -j 69477 --format=JobID,State,ExitCode,Elapsed)",
       "Bash(awk -F, '{print $4}')",
       "Bash(awk -F, '$2==\"qv2_dock\"{s+=$3;n+=$4} END{printf \"qv2_dock total %.1fs over %d mols = %.2f s/mol\\\\n\",s,n,s/n}' gpu_pose_gen_timing.csv)",
-      "Bash(awk -F, 'NR>1{s[$2]+=$3} END{for\\(k in s\\) printf \" %-14s %.1fs\\\\n\",k,s[k]}' gpu_pose_gen_timing.csv)"
+      "Bash(awk -F, 'NR>1{s[$2]+=$3} END{for\\(k in s\\) printf \" %-14s %.1fs\\\\n\",k,s[k]}' gpu_pose_gen_timing.csv)",
+      "Bash(sed -n '/## Relevant Files/,/## Relevant Versions/p' Logs/012_pre-gpu-docking-substep-timing.md)",
+      "Bash(sed -n '/## Method/,/## Results/p' Logs/012_pre-gpu-docking-substep-timing.md)"
     ]
   }
 }

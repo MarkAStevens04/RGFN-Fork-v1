@@ -61,11 +61,9 @@ Root: `experiments/ablations/gpu_pose_gen/`
 
 ## Relevant Versions
 
-Not yet committed. New/changed files to commit: `glue/oracles/docking_gpu_differential_oracle.py`, `glue/oracles/__init__.py`, and `experiments/ablations/gpu_pose_gen/` (`dock_gpu.py`, `analyze_gpu_pose_gen.py`, `submit_gpu_pose_gen.sh`, `run_login_loop.sh`, `opencl_healthcheck.c`, `README.md`), plus this log and the `docs/RESEARCH_CONTEXT.md` index row.
+Committed in `d1d77f9` ("Active learning & GPU dock"): `glue/oracles/docking_gpu_differential_oracle.py`, `glue/oracles/__init__.py`, and `experiments/ablations/gpu_pose_gen/` (`dock_gpu.py`, `analyze_gpu_pose_gen.py`, `submit_gpu_pose_gen.sh`, `run_login_loop.sh`, `opencl_healthcheck.c`, `balam008_opencl_report.md`, `README.md`), plus this log and the `docs/RESEARCH_CONTEXT.md` index row.
 
-`[TODO — add commit hash after pushing]`
-
-Most recent commit at run time: `e07d953 small AL loop logs`.
+Most recent commit before this run: `e07d953 small AL loop logs`.
 
 ## Relevant Resources
 
