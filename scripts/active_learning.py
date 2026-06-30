@@ -53,7 +53,9 @@ if __name__ == "__main__":
     if config_name.startswith("active_learning_"):
         config_name = "active_learning/" + config_name[len("active_learning_") :]
     run_name = f"{config_name}/{get_time_stamp()}"
-    bindings = [f'run_name="{run_name}"']
+    # Bind the run seed onto the loop so it lands in the suggestion-log manifest
+    # provenance (the loop itself only sees what gin gives it; --seed is a CLI arg).
+    bindings = [f'run_name="{run_name}"', f"ActiveLearningLoop.seed={args.seed}"]
     if args.root_dir is not None:
         bindings.append(f'user_root_dir="{args.root_dir}"')
     gin.parse_config_files_and_bindings([args.cfg], bindings=bindings)

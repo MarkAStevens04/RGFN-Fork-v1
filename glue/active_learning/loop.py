@@ -34,8 +34,10 @@ from typing import List, Optional
 
 import gin
 
+from glue.active_learning.route import extract_route
 from glue.active_learning.timing import PhaseTimer
 from glue.datasets.oracle_labeled import OracleLabeledDataset
+from glue.datasets.suggestion_log import SuggestionLog
 from glue.oracles.base import GlueOracle
 from glue.proxies.learned_proxy import LearnedGlueProxy
 from rgfn.gfns.reaction_gfn.api.reaction_api import ReactionStateTerminal
@@ -57,6 +59,9 @@ class ActiveLearningLoop:
         top_k: int = 100,
         reset_replay_each_round: bool = True,
         run_dir: Optional[str] = None,
+        suggestion_log: Optional[SuggestionLog] = None,
+        system: Optional[str] = None,
+        seed: Optional[int] = None,
     ):
         """
         Args:
@@ -76,6 +81,14 @@ class ActiveLearningLoop:
                 its sampling priorities are not stale w.r.t. the refit proxy.
             run_dir: where to write per-round dataset/Top-K CSVs; defaults to the
                 trainer's run_dir.
+            suggestion_log: optional ``SuggestionLog`` recording, per round, the
+                suggested molecules + their synthesis routes + medchem/diversity
+                metrics. Defaults to a fresh one rooted at ``run_dir``. Pure
+                observation — never feeds training.
+            system: target system tag (e.g. ``"6td3"``) recorded in the suggestion
+                log's manifest provenance. Optional.
+            seed: RNG seed of the run, recorded in the manifest provenance. The
+                driver (``scripts/active_learning.py``) binds this from ``--seed``.
         """
         self.trainer = trainer
         self.proxy = proxy
@@ -87,6 +100,20 @@ class ActiveLearningLoop:
         self.top_k = top_k
         self.reset_replay_each_round = reset_replay_each_round
         self.run_dir = Path(run_dir) if run_dir else Path(trainer.run_dir)
+        self.system = system
+        self.seed = seed
+        self.suggestion_log = (
+            suggestion_log
+            if suggestion_log is not None
+            else SuggestionLog(
+                oracle_name=getattr(oracle, "name", None),
+                oracle_higher_is_better=oracle.higher_is_better,
+                system=system,
+                seed=seed,
+                source=getattr(getattr(trainer, "logger", None), "run_name", None),
+            )
+        )
+        self.suggestion_log.set_run_dir(str(self.run_dir))
 
     # --------------------------------------------------------------------- driver
     def run(self) -> List[tuple]:
@@ -106,6 +133,10 @@ class ActiveLearningLoop:
         timer = PhaseTimer(logger=logger, csv_path=out_dir / "phase_timings.csv")
 
         print(f"[AL] start: {self.n_rounds} rounds, seed |D_0|={len(self.dataset)}", flush=True)
+        # Snapshot the seed SMILES (D_0) up front: the suggestion log measures each
+        # round's novelty against the *original* seed, so we capture it before any
+        # round grows the dataset.
+        seed_smiles, _ = self.dataset.to_lists()
         if len(self.dataset) < 2:
             raise ValueError(
                 "Active learning needs a seed dataset D_0 (>=2 labelled molecules). "
@@ -137,17 +168,41 @@ class ActiveLearningLoop:
             with timer.phase("train_gfn", rnd):
                 self.trainer.train()
 
-            # 3. sample a query batch B ~ pi_theta
+            # 3. sample a query batch B ~ pi_theta (keeping each molecule's route)
             with timer.phase("sample_batch", rnd):
-                batch = self._sample_query_batch()
+                batch, routes = self._sample_query_batch()
             print(f"[AL] round {rnd}: sampled {len(batch)} unique candidates", flush=True)
 
-            # 4. score B with the expensive oracle O
+            # 4. score B with the expensive oracle O. Prefer score_detailed() when
+            #    the oracle exposes it (e.g. the GPU differential oracle) so the
+            #    suggestion log can record the per-pose breakdown; fall back to the
+            #    scalar score() for oracles that don't (mock, ...).
             with timer.phase("oracle_score", rnd):
-                oracle_scores = self.oracle.score(batch) if batch else []
+                oracle_scores, oracle_details = self._score_batch(batch)
 
             # 5. D_i = D̂_i ∪ D_{i-1}
             n_added = self.dataset.add(batch, oracle_scores)
+
+            # Provenance: record the suggested molecules + routes + per-batch
+            # diversity/medchem metrics (does not touch the proxy-fit dataset).
+            # Guarded: a logging bug must never kill a run whose training + docking
+            # have already been paid for. Failures are loud but non-fatal.
+            try:
+                batch_metrics = self.suggestion_log.log_round(
+                    rnd,
+                    smiles=batch,
+                    routes=routes,
+                    labels=oracle_scores,
+                    details=oracle_details,
+                    reference_smiles=seed_smiles,
+                )
+            except Exception as exc:  # noqa: BLE001 - provenance must not crash the loop
+                import traceback
+
+                print(f"[AL] round {rnd}: WARNING suggestion log failed: {exc}", flush=True)
+                traceback.print_exc()
+                batch_metrics = {}
+
             valid_scores = [s for s in oracle_scores if s is not None and s == s]
             round_metrics = {
                 "al_round": rnd,
@@ -159,11 +214,36 @@ class ActiveLearningLoop:
                 else float("nan"),
                 "al_batch_oracle_max": max(valid_scores) if valid_scores else float("nan"),
                 **fit_metrics,
+                **{f"batch_{k}": v for k, v in batch_metrics.items() if k != "al_round"},
             }
             logger.log_metrics(metrics=round_metrics, prefix="active_learning")
             self.dataset.save_csv(str(out_dir / f"dataset_round_{rnd:03d}.csv"))
-            print(f"[AL] round {rnd}: |D|={len(self.dataset)} (+{n_added})", flush=True)
+            print(
+                f"[AL] round {rnd}: |D|={len(self.dataset)} (+{n_added}); "
+                f"batch modes={batch_metrics.get('num_modes')}, "
+                f"MW={batch_metrics.get('mol_weight_mean', float('nan')):.0f}, "
+                f"div={batch_metrics.get('internal_diversity', float('nan')):.2f}",
+                flush=True,
+            )
             timer.report_round(rnd)
+
+            # Fail loudly if the oracle produced no usable label for the *entire*
+            # batch: the dataset can't grow, so the next round would refit M on an
+            # unchanged D and burn another full GFN training run for nothing. This
+            # is the signature of a wholesale oracle-backend failure — e.g. a wedged
+            # GPU/OpenCL node returning all no_pose (Logs/014, job 69481). Abort here
+            # rather than silently grinding through the remaining rounds. The
+            # round's provenance (suggestions/, dataset_round CSV) is already
+            # written above, so the failure is fully inspectable.
+            if batch and not valid_scores:
+                raise RuntimeError(
+                    f"Active-learning round {rnd}: the oracle returned no usable score for "
+                    f"any of the {len(batch)} sampled molecules (all NaN). The dataset cannot "
+                    f"grow, so continuing would retrain the proxy on an unchanged D. This "
+                    f"usually means the oracle backend failed wholesale (e.g. a wedged "
+                    f"GPU/OpenCL node — see Logs/014). Aborting. Inspect "
+                    f"{out_dir / 'suggestions'} and resubmit on a healthy node."
+                )
 
         timer.report_total()
         top = self.dataset.top_k(self.top_k)
@@ -172,14 +252,22 @@ class ActiveLearningLoop:
         return top
 
     # ----------------------------------------------------------------- internals
-    def _sample_query_batch(self) -> List[str]:
-        """Sample from the trained forward policy; return unique valid SMILES."""
+    def _sample_query_batch(self) -> tuple:
+        """Sample from the trained forward policy; return ``(smiles, routes)``.
+
+        Returns parallel lists: the unique valid terminal SMILES and, for each,
+        the structured synthesis route (``extract_route``) reconstructed from that
+        molecule's trajectory. ``trajectories.get_last_states_flat()`` is built as
+        ``[states[-1] for states in _states_list]``, so index ``i`` there indexes
+        the same trajectory in ``_states_list``/``_actions_list`` — that alignment
+        is how we recover each terminal molecule's route."""
         sampler = self.trainer.train_forward_sampler
         n_sample = int(self.query_batch_size * self.sample_oversample)
         batch_size = self.trainer.train_batch_size
-        seen, batch = set(), []
+        seen, batch, routes = set(), [], []
         for trajectories in sampler.get_trajectories_iterator(n_sample, batch_size):
-            for state in trajectories.get_last_states_flat():
+            last_states = trajectories.get_last_states_flat()
+            for i, state in enumerate(last_states):
                 if not isinstance(state, ReactionStateTerminal):
                     continue  # skip early-terminal / invalid molecules
                 smi = state.molecule.smiles
@@ -187,9 +275,27 @@ class ActiveLearningLoop:
                     continue
                 seen.add(smi)
                 batch.append(smi)
+                routes.append(
+                    extract_route(trajectories._states_list[i], trajectories._actions_list[i])
+                )
                 if len(batch) >= self.query_batch_size:
-                    return batch
-        return batch
+                    return batch, routes
+        return batch, routes
+
+    def _score_batch(self, batch: List[str]) -> tuple:
+        """Score the query batch, returning ``(scores, details)``.
+
+        Uses the oracle's ``score_detailed()`` (per-molecule breakdown dicts) when
+        available so the suggestion log can record vina_t2/vina_t1/cnnsc/etc.;
+        otherwise falls back to the scalar ``score()`` and emits no details."""
+        if not batch:
+            return [], None
+        score_detailed = getattr(self.oracle, "score_detailed", None)
+        if callable(score_detailed):
+            details = score_detailed(batch)
+            scores = [d.get("dvina", float("nan")) for d in details]
+            return scores, details
+        return self.oracle.score(batch), None
 
     def _reset_replay_buffer(self) -> None:
         """Best-effort clear of the replay buffer between rounds (priorities go

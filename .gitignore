@@ -5,6 +5,11 @@ configs/grid_search/
 Logs/references/pdfs/*
 !Logs/references/pdfs/.gitkeep
 
+# Cloned upstream baseline code — installed by external/setup_*.sh, NOT vendored
+# (e.g. external/gflownet for FragGFN). Keeps the setup scripts tracked, the heavy
+# upstream trees out. See docs/ARCHITECTURE.md + validation/generators/README.md.
+external/*/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

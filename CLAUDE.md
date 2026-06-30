@@ -99,6 +99,17 @@ on the startup path — fix `glue/registry.py`, not the config.
   Mac laptop and **validate what you can locally** (imports, `py_compile`, gin
   config-include integrity, `bash -n`) — full train/dock validation happens on
   Balam. State clearly in your summary what you did vs. couldn't verify.
+- **Login-node smoke tests (Balam *or* Trillium):** before any interactive smoke
+  test that imports `glue`/`rgfn` (pulls in dgl) or runs the GPU docking oracle,
+  prefix the command with `source ~/bin/rgfn-smoke-env.sh &&`. That one helper
+  activates the `rgfn` env and sets the `LD_LIBRARY_PATH` (torch-bundled CUDA libs
+  for dgl + QuickVina2-GPU boost libs) + `GNINA` — and works **unchanged on both
+  login nodes** (Balam is SciNet-legacy; **Trillium** is an Alliance cluster where
+  `module load cuda/11.8.0` does not exist). Balam and Trillium **share
+  `/scratch` + `/home`**, so the conda envs and `$SCRATCH/vina_gpu`/`gnina` builds
+  are identical from either. **Jobs still submit to Balam compute only** — the
+  `submit_*.sh` headers are Balam-specific (SLURM account/partition/`--exclude`)
+  and the helper does not touch them.
 - **Document as you go:** record structural changes and anything left unverified
   in `docs/REFACTOR_LOG.md` so the next agent can continue or repair the work.
 - **Experiment logs:** use the `experiment-log` skill for any real computational

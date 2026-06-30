@@ -63,6 +63,23 @@ When extending the model, "does this match RGFN?" is answered here.
 
 ---
 
+## Baselines — what we compare against
+
+### `[cretu2024synflownet]` — SynFlowNet: Design of Diverse and Novel Molecules with Synthesis Constraints (2024)
+The **closest published method to RGFN** and our primary synthesis-aware baseline.
+Like RGFN, SynFlowNet is a GFlowNet whose **action space is chemical reactions over
+a library of purchasable building blocks**, so every sampled molecule comes with a
+forward-synthesis route. It differs from RGFN mainly in the action-space encoding
+(reaction templates applied to Enamine reactants) and in its treatment of the
+**backward policy** (the paper's main contribution: strategies for learning `P_B`
+over reaction trajectories). We run it through the *same* active-learning loop, the
+*same* 6TD3 docking oracle, and the *same* per-round / per-oracle-call logging as
+our RGFN entrant, so the comparison isolates the generator. Heavy upstream code is
+installed via `external/setup_synflownet.sh` (not vendored); the thin adapter lives
+in `validation/generators/synflownet/`. &nbsp;`pdfs/cretu2024synflownet.pdf` · arXiv:2405.01155
+
+---
+
 ## Domain — systems, glue design & evaluation
 
 ### `[koziarski2024rgfn]` is method; these explain the *chemistry* we're scoring.

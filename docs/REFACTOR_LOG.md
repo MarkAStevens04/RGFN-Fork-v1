@@ -568,3 +568,79 @@ oracle, disabled timer is a confirmed no-op, enabled timer writes the expected
 **Not verified here:** a real multi-round run with the timer live — that is
 **Logs/012** (job 69450, queued this session). The sEH oracle does **not** yet
 implement `enable_step_timing`; add it there when that loop is next run.
+
+---
+
+## 2026-06-29 — FragGFN baseline (first `validation/` entrant) + the oracle bridge
+
+Implemented the **FragGFN** non-synthesizable baseline (Recursion's `gflownet`
+fragment environment), the foil for RGFN's synthesizability claim (Objective 4/5;
+`Logs/015`). This is the first real code under `validation/`, so it sets the
+pattern for future entrants.
+
+**Key constraint that shaped the design.** Recursion's `gflownet` (pinned
+`da999404`) hard-pins **python 3.10 / torch 2.1.2 / torch-geometric 2.4.0**,
+incompatible with the `rgfn` env (3.11 / torch 2.3 / dgl). So FragGFN runs in its
+**own `fraggfn` conda env**, and — since `glue/__init__` eagerly imports the
+`rgfn`-dependent registry — it **cannot import `glue`/`rgfn` at all**. The shared
+docking oracle is therefore reached **across the env boundary** via a CLI bridge.
+
+**The oracle bridge — `scripts/score_batch.py` (generic, reusable).** Runs in the
+`rgfn` env; scores a SMILES file with a named glue oracle and writes the **standard
+candidate-dataset format** (`glue.datasets.candidates` + `glue.metrics.dataset_metrics`,
+the same code RGFN's `SuggestionLog` uses), `has_route=0` for non-synthesizable
+entrants. Per-round shards + `--finalize` give crash-safety across the per-round
+subprocess calls. This is now the single shared scoring standard every baseline
+will use; it lives in `scripts/` because it's pipeline-wide, not FragGFN-specific.
+
+**Added:**
+- `external/setup_fraggfn.sh` — builds the `fraggfn` env (py3.10), clones gflownet
+  to `external/gflownet/` (git-ignored via the new `external/*/` rule — clones are
+  **not vendored**), installs cu118 torch + pyg wheels + gflownet, pins `numpy<2`.
+- `scripts/score_batch.py` — the oracle bridge (above).
+- `validation/generators/fraggfn/{proxy,task,al_loop,run_fraggfn_al}.py` + README —
+  the thin adapter: `AtomMPNNProxy` (the Bengio-2021 MPNN reused from gflownet's
+  own `bengio2021flow`, same architecture as `LearnedGlueProxy`), `FragGFNTrainer`
+  over `FragMolBuildingEnvContext`, and `FragGFNActiveLearningLoop` mirroring
+  `glue/active_learning/loop.py`. Deliberately does **not** import `glue`/`rgfn`.
+- `validation/{__init__,generators/__init__}.py` — make the subtree importable
+  (the convention noted in `validation/README.md`).
+- `validation/configs/fraggfn_6td3.yaml` (+ `fraggfn_smoke.yaml`) — budget matched
+  field-for-field to `configs/glue/active_learning_6td3_gpu.gin`.
+- `experiments/active_learning/fraggfn_6td3/{README.md,submit_fraggfn_6td3.sh}` —
+  Balam run scaffolding; **reuses** `../6td3/seed_6td3.csv` (identical `D_0`).
+
+**Verified (login node A100, this session):** `fraggfn` env builds + imports
+gflownet; `mol2graph` width 71 / `FRAGMENTS` 72; `py_compile` all new Python in
+both envs; `bash -n` the submit + setup scripts; YAML configs load; the bridge
+mock run produces a conformant standard dataset (`validate_candidate_dataset` →
+no issues, `has_route=0`); and a **full end-to-end CPU dry run** of the loop
+(2 rounds, mock oracle via the bridge) — fit M → train fragment-GFN → sample →
+cross-env score → accumulate → finalize → Top-K.
+**Not verified here:** the real 3-round **GPU docking** run (Balam compute node;
+`sbatch experiments/active_learning/fraggfn_6td3/submit_fraggfn_6td3.sh`) and the
+FragGFN-vs-RGFN comparison numbers — pending, tracked in `Logs/015`.
+
+## Active-learning loop robustness (post job 69481, 2026-06-30)
+
+Two fixes prompted by the entry-014 GPU run, which was killed by a Balam node
+failure (balam009 returned all-`no_pose` in round 1, then died mid-round-2):
+
+- **All-NaN-round abort guard** (`glue/active_learning/loop.py`): if an entire
+  round's oracle batch comes back NaN (no labels), the loop now raises a clear
+  `RuntimeError` instead of silently refitting M on an unchanged D and burning
+  another full GFN training run. The round's provenance (`suggestions/`,
+  `dataset_round_NNN.csv`) is written *before* the abort, so the failure is fully
+  inspectable. Triggers only on a wholesale oracle failure (non-empty batch, zero
+  valid scores) — partial failures pass through as before.
+- **Manifest provenance** (`SuggestionLog` / `CandidateDataset` / loop / driver):
+  `ActiveLearningLoop` gained `system` + `seed` args, forwarded into the candidate
+  manifest (were `null`). `scripts/active_learning.py` binds
+  `ActiveLearningLoop.seed` from `--seed`; `configs/glue/active_learning_6td3_gpu.gin`
+  sets `ActiveLearningLoop.system='6td3'`.
+
+Verified on the Trillium login node (`source ~/bin/rgfn-smoke-env.sh`): `py_compile`;
+`glue` import + `ActiveLearningLoop` signature carries `system`/`seed`; gin parse of
+`active_learning_6td3_gpu.gin` with the `--seed` binding; and a `SuggestionLog`
+round-trip confirming `system`/`seed` land in `manifest.json`. Not verified: a full
+multi-round loop run (needs a GPU compute node; Balam submission unavailable).
