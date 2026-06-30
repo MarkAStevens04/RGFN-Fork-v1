@@ -30,9 +30,14 @@ sits next to RGFN's and the harness reads them uniformly:
   * per round it appends a raw shard ``shards/round_<step>.csv`` (crash-safe
     across subprocess calls) and one ``batch_metrics.csv`` row (same
     ``glue.metrics.dataset_metrics.batch_metrics`` the RGFN ``SuggestionLog`` uses);
+  * a **synthesizable** entrant (e.g. RxnFlow) additionally passes ``--routes`` — a
+    per-round JSONL of ``{"smiles": <canonical>, ...route fields...}`` (the route
+    schema of ``glue.active_learning.route``) — which the bridge stores next to the
+    shard (``shards/round_<step>_routes.jsonl``);
   * ``--finalize`` assembles the shards into the canonical ``candidates.csv`` +
-    ``manifest.json``. Non-synthesizable entrants emit ``has_route=0`` and no
-    ``routes.jsonl`` — the headline differentiator vs. RGFN.
+    ``manifest.json``, joining any stored routes by SMILES so synthesizable entrants
+    emit ``has_route=1`` + ``routes.jsonl`` and non-synthesizable ones (FragGFN)
+    emit ``has_route=0`` and no ``routes.jsonl`` — the headline differentiator.
 
 This module runs ONLY in the ``rgfn`` env (it imports ``glue``); the baseline's
 own env never imports ``glue``/``rgfn``.
@@ -40,6 +45,7 @@ own env never imports ``glue``/``rgfn``.
 
 import argparse
 import csv
+import json
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -177,10 +183,63 @@ def _append_batch_metrics(
     return metrics
 
 
+def _store_routes(sug_dir: Path, step: int, routes_path: str) -> int:
+    """Copy a synthesizable entrant's per-round routes JSONL next to the shard.
+
+    Each input line is ``{"smiles": <canonical>, ...route fields...}`` (the route
+    schema of ``glue.active_learning.route``). We just persist it verbatim so
+    ``--finalize`` can join routes onto candidates by SMILES — crash-safe across the
+    per-round subprocess calls, exactly like the shard CSVs. Returns the line count.
+    """
+    src = Path(routes_path)
+    if not src.exists():
+        print(f"[score_batch] WARNING --routes file not found: {routes_path}", flush=True)
+        return 0
+    shard_dir = sug_dir / SHARD_DIRNAME
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    dst = shard_dir / f"round_{step:03d}_routes.jsonl"
+    lines = [ln for ln in src.read_text().splitlines() if ln.strip()]
+    dst.write_text("\n".join(lines) + ("\n" if lines else ""))
+    return len(lines)
+
+
+def _load_routes(sug_dir: Path) -> Dict[str, Dict]:
+    """Build ``{canonical_smiles: route_dict}`` from all stored per-round route files.
+
+    Empty (FragGFN / no ``--routes`` was ever passed) → ``{}``, so finalize falls
+    back to ``route=None`` and ``has_route=0``. The ``smiles`` key is popped from each
+    record; the remainder is the route dict handed to ``CandidateDataset.add(route=)``.
+    """
+    routes_by_smi: Dict[str, Dict] = {}
+    shard_dir = sug_dir / SHARD_DIRNAME
+    if not shard_dir.exists():
+        return routes_by_smi
+    for rf in sorted(shard_dir.glob("round_*_routes.jsonl")):
+        with open(rf) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                smi = (rec.pop("smiles", "") or "").strip()
+                if smi:
+                    routes_by_smi[smi] = rec
+    return routes_by_smi
+
+
 def _finalize(sug_dir: Path, args, higher_is_better: bool) -> None:
-    """Assemble per-round shards into the canonical standard candidate dataset."""
+    """Assemble per-round shards into the canonical standard candidate dataset.
+
+    Synthesizable entrants (RxnFlow, RGFN) supplied ``--routes`` per round; those are
+    joined onto candidates by SMILES here so ``has_route``/``num_reactions``/
+    ``routes.jsonl`` are populated. Non-synthesizable entrants (FragGFN) supplied no
+    routes → ``route=None`` → ``has_route=0`` (unchanged behaviour)."""
     shard_dir = sug_dir / SHARD_DIRNAME
     shards = sorted(shard_dir.glob("round_*.csv")) if shard_dir.exists() else []
+    routes_by_smi = _load_routes(sug_dir)
     ds = CandidateDataset(
         sug_dir,
         generator=args.generator,
@@ -190,8 +249,8 @@ def _finalize(sug_dir: Path, args, higher_is_better: bool) -> None:
         score_higher_is_better=higher_is_better,
         score_units=args.score_units,
         source=args.source,
-        notes="FragGFN active-learning query batches; non-synthesizable (no route). "
-        "The standard 'step' column is the AL round.",
+        notes=f"{args.generator} active-learning query batches; the standard 'step' column "
+        "is the AL round. Routes recorded for synthesizable entrants (has_route=1).",
     )
     n = 0
     for shard in shards:
@@ -207,13 +266,15 @@ def _finalize(sug_dir: Path, args, higher_is_better: bool) -> None:
                     smiles=smi,
                     score=float(score) if score not in ("", None) else None,
                     step=int(float(step)) if step not in ("", None) else None,
-                    route=None,  # FragGFN is non-synthesizable -> has_route=0
+                    route=routes_by_smi.get(smi),  # None for non-synthesizable entrants
                     extra=extra or None,
                 )
                 n += 1
     ds.write()
+    n_routes = sum(1 for s in routes_by_smi)
     print(
-        f"[score_batch] finalized {n} candidates from {len(shards)} shard(s) -> {sug_dir}",
+        f"[score_batch] finalized {n} candidates from {len(shards)} shard(s) "
+        f"({n_routes} with routes) -> {sug_dir}",
         flush=True,
     )
 
@@ -242,6 +303,12 @@ def main() -> None:
     )
     ap.add_argument(
         "--reference-csv", help="seed D_0 CSV (for the novelty metric); 'smiles' column"
+    )
+    ap.add_argument(
+        "--routes",
+        help="per-round synthesis routes JSONL (synthesizable entrants only): one "
+        "{'smiles': <canonical>, ...route fields...} per line. Stored next to the "
+        "shard and joined onto candidates by SMILES on --finalize.",
     )
     ap.add_argument("--generator", default="fraggfn", help="generator name stamped in the dataset")
     ap.add_argument("--system", default=None, help="target system (e.g. 6td3) for provenance")
@@ -296,6 +363,9 @@ def main() -> None:
         sug_dir = Path(args.suggestions_dir)
         sug_dir.mkdir(parents=True, exist_ok=True)
         _append_shard(sug_dir, args.step, smiles, scores, details)
+        if args.routes:
+            n_r = _store_routes(sug_dir, args.step, args.routes)
+            print(f"[score_batch] round {args.step}: stored {n_r} route(s)", flush=True)
         ref = None
         if args.reference_csv and Path(args.reference_csv).exists():
             ref = _read_smiles(args.reference_csv)

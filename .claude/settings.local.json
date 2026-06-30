@@ -152,7 +152,23 @@
       "Read(//home/markymoo/bin/**)",
       "Bash(nvidia-smi -L)",
       "Bash(awk -F, 'NR>1{print $10\"\\\\t\"$2}' /scratch/markymoo/rgfn_runs/experiments/active_learning/6td3_gpu/2026-06-29_16-31-16/active_learning/suggestions/candidates.csv)",
-      "Bash(python3 *)"
+      "Bash(python3 *)",
+      "WebFetch(domain:github.com)",
+      "Bash(timeout 15 git ls-remote --heads https://github.com/koziarskilab/SCENT.git)",
+      "Bash(bash -n external/setup_rxnflow.sh)",
+      "Bash(bash -n experiments/active_learning/rxnflow_6td3/submit_rxnflow_6td3.sh)",
+      "Bash(ls validation/configs/)",
+      "Bash(cat validation/configs/fraggfn_6td3.yaml)",
+      "Bash(cat experiments/active_learning/fraggfn_6td3/submit_fraggfn_6td3.sh)",
+      "Bash(head -3 experiments/active_learning/6td3/seed_6td3.csv)",
+      "Bash(wc -l experiments/active_learning/6td3/seed_6td3.csv)",
+      "Bash(bash -n external/setup_aizynthfinder.sh)",
+      "Bash(awk '{print $1, $NF}')",
+      "Bash(chmod +x external/setup_aizynthfinder.sh)",
+      "Bash(bash -n external/setup_scent.sh)",
+      "Bash(bash -n experiments/active_learning/scent_6td3/submit_scent_6td3.sh)",
+      "Bash(chmod +x external/setup_scent.sh experiments/active_learning/scent_6td3/submit_scent_6td3.sh)",
+      "Bash(bash -n experiments/active_learning/seh/submit_al_seh.sh)"
     ]
   }
 }

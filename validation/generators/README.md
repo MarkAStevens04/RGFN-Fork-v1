@@ -42,18 +42,23 @@ A `fraggfn`/`vae_bo` entrant simply omits routes (`is_synthesizable = False`);
 | Dir | Generator | Synthesizable? | Install |
 |---|---|---|---|
 | `rgfn/` | **Our pipeline** (thin adapter → `glue/` + `rgfn/`) | ✅ by construction | in-repo |
-| `synflownet/` | SynFlowNet (reaction-based GFlowNet baseline) | ✅ | `external/setup_synflownet.sh` |
+| `rxnflow/` | RxnFlow (reaction-template + building-block GFlowNet) — **implemented** (exp `016`) | ✅ `has_route=1` | `external/setup_rxnflow.sh` |
+| `scent/` | SCENT (cost-aware template GFlowNet, RGFN fork) — **implemented** (exp `017`) | ✅ `has_route=1` | `external/setup_scent.sh` |
 | `fraggfn/` | Fragment-based GFlowNet (Recursion `gflownet`) — **implemented** (exp `015`) | ❌ (fragment assembly, no route) | `external/setup_fraggfn.sh` |
+| `synflownet/` | SynFlowNet (reaction-based GFlowNet baseline) | ✅ | `external/setup_synflownet.sh` |
 | `vae_bo/` | VAE + Bayesian optimization | ❌ | `external/setup_vae_bo.sh` |
 
 The `rgfn/` adapter is deliberately thin — it calls the real production pipeline
 in `glue/` rather than copying it, so a benchmark entrant can never drift from
 what we actually ship.
 
-> Status: `fraggfn/` is implemented (its own `fraggfn` conda env + an active-learning
-> loop driven against the shared oracle via the bridge `scripts/score_batch.py`;
-> see `fraggfn/README.md` and `Logs/015`). `rgfn/`, `synflownet/`, `vae_bo/` are
-> still placeholders. See `external/` for each baseline's install script.
+> Status: `fraggfn/` (non-synthesizable foil), `rxnflow/` (synthesizable peer) and
+> `scent/` (cost-aware peer) are implemented — each in its own conda env, driven
+> through an active-learning loop against the shared oracle via the bridge
+> `scripts/score_batch.py` (route-aware via `--routes` for synthesizable entrants);
+> see their READMEs and `Logs/015`/`Logs/016`/`Logs/017`. `rgfn/`, `synflownet/`,
+> `vae_bo/` are still placeholders. See `external/` for each baseline's install
+> script.
 
 ## Note on FragGFN's interface
 

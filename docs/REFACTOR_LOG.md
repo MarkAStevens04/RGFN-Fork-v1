@@ -644,3 +644,168 @@ Verified on the Trillium login node (`source ~/bin/rgfn-smoke-env.sh`): `py_comp
 `active_learning_6td3_gpu.gin` with the `--seed` binding; and a `SuggestionLog`
 round-trip confirming `system`/`seed` land in `manifest.json`. Not verified: a full
 multi-round loop run (needs a GPU compute node; Balam submission unavailable).
+
+## RxnFlow synthesizable baseline entrant (exp 016, 2026-06-30)
+
+Added a **second** synthesis-aware benchmark entrant — **RxnFlow** (`[seo2024rxnflow]`,
+ICLR 2025; reaction-template + building-block GFlowNet, action-space subsampling) — as
+the *synthesizable peer* to RGFN, opposite the non-synthesizable FragGFN foil. (Briefly
+scoped as SynFlowNet first, then switched to RxnFlow; the SynFlowNet bib/reference/PDF
+work was reverted.) RxnFlow is built on a bundled Recursion `gflownet`, so it drops into
+the FragGFN two-env precedent almost verbatim. New / changed:
+
+- `validation/generators/rxnflow/` — thin adapter mirroring `fraggfn/`:
+  `proxy.py` (re-exports FragGFN's `AtomMPNNProxy` so `M` is identical across entrants),
+  `task.py` (`RxnFlowTask`/`RxnFlowGlueTrainer` over RxnFlow's `BaseTask`/`RxnFlowTrainer`,
+  reward = `M`, constant β, `num_workers=0`), `al_loop.py`
+  (`RxnFlowActiveLearningLoop` = `[bengio2021gflownet]` Alg.1 + the all-NaN guard +
+  `extract_route`), `run_rxnflow_al.py`, `README.md`, `__init__.py`.
+- `scripts/score_batch.py` — generalized the shared oracle bridge to be **route-aware**:
+  new `--routes` (per-round JSONL `{"smiles":…, …route…}`) stored next to the shards and
+  joined onto candidates by SMILES on `--finalize` → synthesizable entrants emit
+  `has_route=1` + `routes.jsonl`. FragGFN's path (no `--routes`) is byte-unchanged; the
+  hardcoded "FragGFN/non-synthesizable" finalize note is now generator-aware.
+- `validation/configs/rxnflow_{6td3,smoke}.yaml` — budget/oracle/proxy matched
+  field-for-field to `configs/glue/active_learning_6td3_gpu.gin`; a `rxnflow:` block
+  carries the generator knobs (`env_dir`, `max_reactions`, `action_sampling_ratio`).
+- `experiments/active_learning/rxnflow_6td3/{README.md,submit_rxnflow_6td3.sh}` — Balam
+  run scaffolding; **reuses** `../6td3/seed_6td3.csv` (identical `D_0`).
+- `external/setup_rxnflow.sh` — `rxnflow` conda env (py3.12, torch 2.5.1+cu121) + clone +
+  `pip install -e` + env-dir prep (public ZINCFrag blocks + `templates/hb_edited.txt`).
+- References: reverted SynFlowNet; added `[seo2024rxnflow]` to `references.bib` +
+  `Logs/references/README.md`; PDF at `pdfs/seo2024rxnflow.pdf`.
+
+**Verified (this session, no heavy stack locally):** `py_compile` all new Python;
+`bash -n` the setup + submit scripts; both YAMLs load and their `loop`/`oracle` blocks
+match `fraggfn_6td3.yaml`; the route-aware bridge round-trips with **and** without
+`--routes` (`validate_candidate_dataset` → no issues; `has_route` flips 1↔0 correctly).
+**Flagged for Balam validation (heavy stack is cluster-only):**
+- the RxnFlow upstream API — `rxnflow.config.Config` schema + `env_dir` field path,
+  `RxnFlowTrainer`/`BaseTask` signatures (`setup_task`, `set_default_hps`), and the
+  per-action attributes `extract_route` reads (block / reaction template / product).
+  These are written best-effort from the RxnFlow docs/examples; confirm against the
+  cloned repo and tighten `extract_route` so routes are chemically faithful.
+- the cu121 (rxnflow) vs cu118 (rgfn bridge) coexistence — separate procs/envs, torch
+  cu121 wheels are RPATH-self-contained; needs a GPU driver ≥525 (CUDA 12.1) on the node.
+- `external/setup_rxnflow.sh` step 4 (env-dir prep) has a `TODO` for the exact RxnFlow
+  building-block preprocessing command (per the cloned repo's `data/README.md`).
+- finish: pin `RXNFLOW_COMMIT`, run the CPU mock smoke, then the 3-round GPU run; the
+  RGFN-vs-RxnFlow-vs-FragGFN comparison numbers — tracked in `Logs/016`.
+
+---
+
+## 2026-06-30 — Synthesizability metric (AiZynthFinder + SA) in the harness
+
+Added the first `validation/harness/` evaluation metric: a post-hoc
+**synthesizability** report over a candidate dataset, the analogue of the `AiZynth`
+column in `[koziarski2024rgfn]`/`[gainski2025scent]` and RxnFlow's "Synthesizability %"
+(`[seo2024rxnflow]`). It runs uniformly on **every** entrant because they all emit the
+one standard candidate-dataset format (`docs/CANDIDATE_DATASET_FORMAT.md`).
+
+Design choices (confirmed with Mark before building):
+- **Stock/templates:** AiZynthFinder's standard **public dataset** (USPTO expansion +
+  ZINC in-stock) — reproducible and directly comparable to the published RGFN/SCENT
+  numbers. Stock/expansion/filter keys are CLI-overridable.
+- **Metrics:** the full paper set — fraction-solved (AiZynth success rate), mean #steps
+  over solved, and the SA-score distribution.
+- **Isolation:** AiZynthFinder in its own `aizynth` conda env
+  (`external/setup_aizynthfinder.sh`), invoked post-hoc as a standalone CLI — same
+  "one env per tool, one on-disk standard" pattern as the fraggfn/rxnflow oracle bridge.
+
+Added:
+- `validation/harness/synthesizability.py` — reads `candidates.csv`/`manifest.json`
+  **directly** (csv/json, no `glue` import, so it runs in the lean `aizynth` env);
+  parallel AiZynth driver (one finder per worker); dedups by canonical SMILES; writes
+  `synthesizability.csv` (per-molecule) + `synthesizability_summary.json` (aggregate,
+  incl. the by-construction self-report cross-check). CLI: `--dataset/--config/--nproc/
+  --top-k/--no-dedup/--time-limit/--iteration-limit`.
+- `validation/harness/__init__.py` (kept import-light on purpose).
+- `validation/harness/test_synthesizability.py` — dependency-free unit tests
+  (monkeypatch RDKit + AiZynth) for dedup / top-k / scatter-back / aggregation.
+- `external/setup_aizynthfinder.sh` — `aizynth` env + `download_public_data` + smoke.
+- References: `[genheden2020aizynth]` + `[ertl2009sascore]` in `references.bib` and the
+  references `README.md` (new "Evaluation — synthesizability metrics" section).
+- `validation/harness/README.md` — documents the landed metric + run command.
+
+**Verified (Mac/login, no heavy stack):** `py_compile` the module/test/init; `bash -n`
+the setup script; `python -m unittest validation.harness.test_synthesizability` (3/3
+pass — dedup denominator is unique-molecule level, top-k picks best-by-score, files
+written).
+**Flagged for `aizynth`-env validation (not runnable without the install):**
+- the AiZynthFinder ≥4 API surface the driver uses — `AiZynthFinder(configfile=…)`,
+  `.stock/.expansion_policy/.filter_policy.select(key)` + `.items`, `target_smiles`,
+  `tree_search()`/`build_routes()`, and the `extract_statistics()` keys (`is_solved`,
+  `number_of_steps`, `number_of_solved_routes`, `top_score`) — written from the docs;
+  confirm against the installed version and adjust key names if the schema differs.
+- `download_public_data` output layout (that it writes `config.yml` with `zinc`/`uspto`
+  keys) — the `--stock/--expansion/--filter` defaults assume this; the driver falls back
+  to the first available key if a name is absent, but verify on a real install.
+- timing/throughput on the cluster (retrosynthesis is seconds–minutes/molecule); decide
+  whether to default to `--top-k 500` like the papers rather than the full set.
+
+## SCENT cost-aware baseline entrant (exp 017, 2026-06-30)
+
+Added the **cost-aware** benchmark entrant — **SCENT** (`[gainski2025scent]`,
+arXiv:2506.19865). SCENT is a **fork of RGFN from the same lab** (its package is named
+`rgfn`, same py3.11/torch2.3/dgl/gin stack, same `rgfn.api`/`Trainer`/reaction env) that
+adds Recursive Cost Guidance + Exploitation Penalty + Dynamic Library. RGFN is one of
+SCENT's *own* baselines, so this is the tightest of the three comparisons.
+
+Design choices (confirmed with Mark before building, via AskUserQuestion):
+- **Variant:** *full* SCENT (all three mechanisms ON) — the paper's headline method.
+- **Library:** SCENT's **SMALL** building-block set, which *ships* the building-block
+  prices (`fragment_to_real_cost.json`) + reaction yields (`templates_yields.csv`) the
+  cost model needs — the only way to run *true* cost-aware SCENT without sourcing Enamine
+  pricing. Reward/oracle/seed/budget/β stay identical to the RGFN run; only the generator
+  + its blocks differ (inherent to a different generator).
+
+Key difference from the FragGFN/RxnFlow precedent — **why the adapter is gin-driven, not
+programmatic:** SCENT is configured entirely through its own gin (cost guidance,
+exploitation penalty, dynamic library, env, policies are all gin-wired singletons), so
+reproducing it programmatically (the `gflownet` `Config` route fraggfn/rxnflow take) is
+infeasible. Instead the runner parses a gin AL config that `include`s SCENT's
+`scent_base.gin` and swaps the sEH proxy for ours — mirroring `scripts/active_learning.py`.
+
+**Namespace hazard (the load-bearing subtlety):** SCENT's package is *named* `rgfn`, so in
+the `scent` env `import rgfn` must hit SCENT's installed package, not our repo-local
+`rgfn/`. The runner therefore (a) never puts the repo root on `sys.path` (uses **sibling**
+imports `import proxy`/`import al_loop`/`import route`, off the runner's own dir), and (b)
+`chdir`s into `external/scent` so SCENT's relative gin includes + `data/small/*` resolve —
+with every *our*-side path (config, seed, run dir, the repo root the bridge runs in) made
+absolute first. This is why the adapter modules use plain (not package-relative) imports
+and are NOT imported by `validation/generators/scent/__init__.py`.
+
+New:
+- `validation/generators/scent/` — `proxy.py` (`LearnedDockingProxy`: line-for-line the
+  same MPNN as `glue.proxies.LearnedGlueProxy`/fraggfn's `AtomMPNNProxy`, here subclassing
+  **SCENT's** `CachedProxyBase` + importing **SCENT's** bundled `MPNNet`/`mol2graph`),
+  `route.py` (self-contained copy of `glue.active_learning.route`), `al_loop.py`
+  (`ScentActiveLearningLoop` = `[bengio2021gflownet]` Alg.1, gin Trainer + bridge scoring
+  + route JSONL + all-NaN abort guard; `LabelStore` = `D`), `run_scent_al.py` (entry
+  point), `README.md`, `__init__.py`.
+- `validation/configs/scent_6td3.gin` (+ `scent_smoke.gin`) — `include`s `scent_base.gin`
+  + `small.gin`; budget/seed/β matched to `configs/glue/active_learning_6td3_gpu.gin`;
+  oracle bridge params (the same `Docking6TD3GpuOracle` knobs) passed to the loop.
+- `external/setup_scent.sh` — clone `koziarskilab/SCENT@af1fee5` + `scent` conda env
+  (py3.11.8/torch2.3/dgl2.2.1, `pip install -e .`) + import smoke test.
+- `experiments/active_learning/scent_6td3/submit_scent_6td3.sh` — Balam submit (OpenCL
+  gate, `--exclude=balam008`, `$SCRATCH` outputs; `scent` env, bridge re-enters `rgfn`).
+- References (`[gainski2025scent]`), generator table, `Logs/017`.
+- The shared **route-aware** bridge (`scripts/score_batch.py`) is reused **unchanged**
+  (the RxnFlow `--routes` extension already covers synthesizable entrants).
+
+**Verified (Trillium login, no heavy stack):** `py_compile` all SCENT Python; `bash -n`
+both shell scripts; static gin-integrity check — every `include` in `scent_{6td3,smoke}.gin`
+resolves into the clone, every symbol the adapter imports exists in SCENT's source, and
+`data/small/{fragments,templates,fragment_to_real_cost,templates_yields}` are present;
+confirmed `CachedProxyBase.compute_proxy_output` wraps a `List[float]` into `ProxyOutput`
+(matches `LearnedDockingProxy`'s return), `Trainer.{train,close,train_forward_sampler,
+train_batch_size}` + the `Trajectories`/`Reaction*` API the loop binds to all exist.
+**Flagged for `scent`-env validation (not runnable without the install):**
+- the `scent` conda env build itself (heavy torch/dgl install) + the runner's end-to-end
+  gin parse with `chdir` into the clone — confirm `import rgfn` resolves to SCENT (not our
+  repo-local `rgfn/`) and that the cost-guided graph constructs from `data/small/*`.
+- multi-line gin dict literal for `ScentActiveLearningLoop.oracle_args` (gin parses
+  balanced brackets; matches `rgfn_base.gin`'s multi-line list — verify on real parse).
+- RGFN-vs-SCENT comparison numbers (incl. SCENT's headline mean-synthesis-cost axis) —
+  tracked in `Logs/017`.

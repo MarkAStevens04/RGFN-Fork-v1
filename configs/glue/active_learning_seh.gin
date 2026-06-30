@@ -34,11 +34,26 @@ LearnedGlueProxy.patience = 10
 LearnedGlueProxy.batch_size = 128
 LearnedGlueProxy.lr = 5e-4
 
+# --- Metrics (mirrors active_learning_6td3_gpu.gin; sEH-appropriate thresholds). -
+# rgfn_base.gin's default @NumScaffoldsFound uses POSITIVE thresholds [5,6,7,8],
+# which assume the upstream SehMoleculeProxy's clipped non-negative reward. OUR
+# proxy M (LearnedGlueProxy) instead predicts the RAW Vina energy (negative; lower
+# is better), so those thresholds are never met and the scaffold metric is inert.
+# Swap in @SafeNumScaffoldsFound with proxy_higher_better=False and Vina-scale
+# cutoffs grounded in the seed D_0 distribution (median -7.0, Q1 -8.4, strong
+# binders <= -10 kcal/mol; see experiments/active_learning/seh/seed_seh.csv).
+SafeNumScaffoldsFound.proxy_value_threshold_list = [-8.0, -9.0, -10.0, -11.0]
+SafeNumScaffoldsFound.proxy_component_name = None
+SafeNumScaffoldsFound.proxy_higher_better = False
+train_metrics = [@StandardGFNMetrics(), @SafeNumScaffoldsFound(), @UniqueMolecules(), @AllMolecules(), @FractionEarlyTerminate(), @QED(), @TanimotoSimilarityModes()]
+Trainer.train_metrics = %train_metrics
+
 # --- Inner GFN budget per round. ----------------------------------------------
 # Paper uses "fewer iterations when fitting the generative model" in the
 # multi-round setting; the neural proxy is cheap so this can be sizeable. Start
 # modest and tune on Balam.
 Trainer.n_iterations = 1000
+Trainer.valid_every_n_iterations = 100000   # skip mid-run validation; the AL loop drives evaluation
 trainer/gin.singleton.constructor = @Trainer
 trainer = @trainer/gin.singleton()
 
@@ -71,3 +86,4 @@ ActiveLearningLoop.dataset = %dataset
 ActiveLearningLoop.n_rounds = 5
 ActiveLearningLoop.query_batch_size = 200
 ActiveLearningLoop.top_k = 100
+ActiveLearningLoop.system = 'seh'   # suggestion-log manifest provenance (seed is bound from --seed)

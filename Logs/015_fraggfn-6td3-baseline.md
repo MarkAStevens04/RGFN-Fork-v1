@@ -70,12 +70,12 @@ Root: `./` (repo root).
 
 ```
 git log --oneline -3
+cdf3f78 GPU loop + FGFN loop
 2bb720b updated logs with correct commit numbers
 d1d77f9 Active learning & GPU dock
-e07d953 small AL loop logs
 ```
 
-New/changed files for this entry are **not yet committed** (the FragGFN adapter `validation/generators/fraggfn/*` incl. the all-NaN abort guard in `al_loop.py` mirrored from `loop.py`; the bridge `scripts/score_batch.py`; `validation/configs/fraggfn_*.yaml`; `validation/{__init__,generators/__init__}.py`; the submit script + experiment README; the `.gitignore` rule for `external/*/`; and this log). `external/gflownet/` is intentionally git-ignored (installed via `external/setup_fraggfn.sh`, not vendored). `[TODO — add commit hash after pushing]` — once the FragGFN files are committed, update this section.
+Committed in **`cdf3f78`** ("GPU loop + FGFN loop"): the FragGFN adapter `validation/generators/fraggfn/*` (incl. the all-NaN abort guard in `al_loop.py` mirrored from `loop.py`); the bridge `scripts/score_batch.py`; `validation/configs/fraggfn_*.yaml`; `validation/{__init__,generators/__init__}.py`; the submit script + experiment README; the `.gitignore` rule for `external/*/`; and this log. `external/gflownet/` is intentionally git-ignored (installed via `external/setup_fraggfn.sh`, not vendored).
 
 ### Relevant Resources
 
