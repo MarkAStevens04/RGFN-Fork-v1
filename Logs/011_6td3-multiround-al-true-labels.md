@@ -4,13 +4,13 @@
 
 ## Question
 
-When we run the full active-learning loop for several rounds on a compute node — fit the fast scorer, train the generator, then actually dock the molecules it invents — do those generated molecules score like real molecular glues, and which parts of the loop eat the wall-clock?
+When we run the full active-learning loop for several rounds on a compute node — fit the fast scorer, train the generator, then actually dock the molecules it invents with the **CPU two-tier gnina oracle** (this is before we built the GPU docker) — do those generated molecules score like real molecular glues, and which parts of the loop eat the wall-clock?
 
 ## Context & Summary
 
 **Context** — Entry 009 was the first time RGFN was wired to our validated 6TD3 oracle and trained, and it showed the generator *learns* (training loss fell ~24×, the bulk of generated molecules shifted toward better predicted scores). But that run had two gaps: it ran only **one** round, and the expensive docking step that would put *true* scores on the generated molecules was killed by the shared login node's CPU-time cap — so we had the proxy's optimistic predictions but no reality check. Entry 009's own takeaway flagged the fix: re-run on a Balam **compute** node (no CPU cap) for **multiple** rounds. This is that run.
 
-**Summary** — We ran the 3-round active-learning loop on a Balam compute node against the validated 6TD3 docking oracle: fit the proxy on everything labelled so far, train RGFN for 300 steps against it, sample 32 fresh molecules, and **actually dock them** with the two-tier gnina oracle to get true glue scores — repeated three times, growing the labelled dataset from 408 to 504 molecules. We then asked two things: (1) are the generated molecules' *true* docking scores any good, and (2) where does the five hours of compute actually go.
+**Summary** — We ran the 3-round active-learning loop on a Balam compute node against the validated 6TD3 docking oracle: fit the proxy on everything labelled so far, train RGFN for 300 steps against it, sample 32 fresh molecules, and **actually dock them** with the two-tier gnina oracle to get true glue scores — repeated three times, growing the labelled dataset from 408 to 504 molecules. We then asked two things: (1) are the generated molecules' *true* docking scores any good, and (2) where does the five hours of compute actually go. This is the **CPU-docking baseline** of the whole pipeline: the docking step here runs gnina's Tier-2 conformational search on the CPU (~58 s/mol), and the ~35%-of-wall-clock cost we measure below is exactly what motivated the GPU-docking arc that follows — entry 012 pins the bottleneck to the Tier-2 search, entry 013 builds a ~50× faster GPU pose-search oracle, and entry 014 re-runs *this same loop* on the GPU oracle. Read 011 → 012 → 013 → 014 as one story.
 
 ## Answer
 

@@ -162,12 +162,19 @@ Root: repository root unless noted.
 
 ## Relevant Versions
 
-Relevant files are not yet committed.
+```
+08da97c Working GPU Oracle RGFN, FGFN, RxnFlow, SCENT, AiZynthFinder
+ded1c0d checkpoint for FGFN, RxnFlow, SCENT, AiZynthFinder, sEH
+cdf3f78 GPU loop + FGFN loop
+```
 
-[TODO — add commit hash after pushing.] Files to commit:
-`validation/generators/rxnflow/*`, `validation/configs/rxnflow_{6td3,smoke}.yaml`,
-`experiments/active_learning/rxnflow_6td3/*`, `external/setup_rxnflow.sh`, the
-route-aware `scripts/score_batch.py`, the reference + doc updates.
+The route-aware `scripts/score_batch.py` (the `--routes` → `has_route=1` + `routes.jsonl`
+extension) landed first in **`ded1c0d`** ("checkpoint …"). The RxnFlow adapter
+(`validation/generators/rxnflow/*`), `external/setup_rxnflow.sh`,
+`validation/configs/rxnflow_{6td3,smoke}.yaml`, `experiments/active_learning/rxnflow_6td3/*`,
+and the reference/doc updates were finalised in **`08da97c`** ("Working GPU Oracle …"), the
+commit that carries the job-69518 run and the matched-oracle RGFN GPU run (job 69517) it is
+compared against.
 
 ## Relevant Resources
 

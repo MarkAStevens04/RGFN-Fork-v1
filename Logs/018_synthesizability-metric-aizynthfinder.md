@@ -1,13 +1,13 @@
 # Synthesizability metric — AiZynthFinder + SA validation on Balam
 **Date:** 2026-06-30, ~7:30pm
 
-### Question
+## Question
 
 Can we measure, for any molecule our generators propose, whether a real
 retrosynthesis tool can find a way to actually make it — and run that check the
 same way on every model we benchmark? (Not actually running on real results yet)
 
-### Context & Summary
+## Context & Summary
 
 Our headline claim is that RGFN proposes **synthesizable** glue candidates, and the
 key comparison reviewers will want (`docs/RESEARCH_CONTEXT.md`, Objective 5) is the
@@ -23,7 +23,7 @@ them. This entry validates the tool actually works on Balam: install the retrosy
 engine, confirm its API behaves as the code assumes, and run the whole thing
 end-to-end on a real set of molecules.
 
-### Answer
+## Answer
 
 The synthesizability metric works end-to-end on Balam. AiZynthFinder (v4.4.1)
 installed cleanly in its own environment, its real API matched every assumption the
@@ -38,7 +38,7 @@ explicitly warn that AiZynthFinder underestimates synthesizability and is noisy.
 molecules, which is the direction we'd expect. The instrument is ready to run on every
 generator's output.
 
-### Relevance to our Publication
+## Relevance to our Publication
 
 This is the measurement instrument behind **Objective 5's headline differentiator**.
 A JCIM/JCIM-tier reviewer will ask "are your molecules actually synthesizable, by an
@@ -47,7 +47,7 @@ that for every entrant at once, and the by-construction-vs-AiZynth cross-check
 (generator claims a route vs. AiZynth independently finds one) is exactly the evidence
 that "synthesizable" is doing real work rather than being assumed.
 
-### Next Experiments
+## Next Experiments
 
 **Refining for publication**
 - Run the metric across **all** entrants' candidate datasets (RGFN, RxnFlow, SCENT,
@@ -64,7 +64,7 @@ that "synthesizable" is doing real work rather than being assumed.
 
 # Re-creation
 
-### Relevant Files
+## Relevant Files
 
 Root: `/home/markymoo/projects/RGFN_Fork/RGFN-Fork`
 
@@ -99,16 +99,20 @@ Root: `/home/markymoo/projects/RGFN_Fork/RGFN-Fork`
   (solved / n_steps / n_solved_routes / top_score / sa_score / search_time); git-ignored.
 - `./Logs/references/` — added `[genheden2020aizynth]`, `[ertl2009sascore]`.
 
-### Relevant Versions
+## Relevant Versions
 
 ```
-[TODO — add commit hash after committing the synthesizability tool + setup script]
+08da97c Working GPU Oracle RGFN, FGFN, RxnFlow, SCENT, AiZynthFinder
+ded1c0d checkpoint for FGFN, RxnFlow, SCENT, AiZynthFinder, sEH
 ```
-Files needing commit: `validation/harness/{synthesizability.py,__init__.py,test_synthesizability.py,README.md}`,
-`external/setup_aizynthfinder.sh`, `Logs/references/{README.md,references.bib}`,
-`docs/REFACTOR_LOG.md`, `.gitignore`, this log.
 
-### Relevant Resources
+The synthesizability tool + setup script (`external/setup_aizynthfinder.sh`,
+`validation/harness/synthesizability.py`, its `__init__`/tests/README, the
+`Logs/references/{README.md,references.bib}` entries for `[genheden2020aizynth]`/`[ertl2009sascore]`,
+`docs/REFACTOR_LOG.md`, `.gitignore`, and this log) landed in **`ded1c0d`** ("checkpoint …")
+and were refined in **`08da97c`** ("Working GPU Oracle …").
+
+## Relevant Resources
 
 **Sources**
 - `[genheden2020aizynth]` AiZynthFinder — retrosynthesis engine (DOI:10.1186/s13321-020-00472-1).
@@ -119,7 +123,7 @@ Files needing commit: `validation/harness/{synthesizability.py,__init__.py,test_
 - `aizynthfinder>=4.3,<5` (env `aizynth`, py3.10) — used by `validation/harness/synthesizability.py`.
 - RDKit contrib `sascorer` (ships with RDKit) — SA score in the same file.
 
-### Method
+## Method
 
 Run on `balam-login01` (CPU only; retrosynthesis is CPU-bound). AiZynthFinder 4.4.1.
 
@@ -138,7 +142,7 @@ Run on `balam-login01` (CPU only; retrosynthesis is CPU-bound). AiZynthFinder 4.
    --dataset data/synthetic/aizynth_smoke/candidates
    --config data/models/aizynthfinder/config.yml --nproc 8`.
 
-### Results
+## Results
 
 End-to-end run: 11 candidates, 11 valid, 11 unique searched, **0 errors**.
 

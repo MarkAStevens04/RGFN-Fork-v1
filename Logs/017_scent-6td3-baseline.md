@@ -45,10 +45,14 @@ best of **−5.81** (the strongest single candidate of any entrant so far), 51% 
 glue-range (≤ −2.0). The most striking difference is a **beneficial side effect of cost
 guidance**: across rounds the mean molecular weight *fell* (694 → 635 → 579) and QED
 *rose* (0.11 → 0.17 → 0.21) — the reverse of the size-bloat/QED-collapse drift seen in the
-RGFN (entry `011`) and FragGFN (entry `015`) runs. Steering toward cheap, high-yield
-routes appears to pull the generator toward smaller, more drug-like molecules "for free."
-(One seed — a trend to confirm with ≥3 seeds, and by pricing the RGFN/FragGFN routes with
-SCENT's own cost model for a like-for-like cost comparison.)
+RGFN (entries `011`/`014`) and FragGFN (entry `015`) runs. Steering toward cheap, high-yield
+routes appears to pull the generator toward smaller, more drug-like molecules "for free" —
+the same drug-like region RxnFlow's block library confines it to (entry `016`, MW 489 /
+QED 0.36), but reached here by cost pressure rather than a constrained action space. So on
+the four-way matched-oracle comparison (below), SCENT and RxnFlow are the two entrants that
+escape the RGFN/FragGFN size drift. (One seed — a trend to confirm with ≥3 seeds, and by
+pricing the RGFN/FragGFN routes with SCENT's own cost model for a like-for-like cost
+comparison.)
 
 ## Relevance to our Publication
 
@@ -68,8 +72,9 @@ adopt as our synthesizability metric (its Table 1, up to ≈0.75), tying the com
 **Refining for publication.**
 - Run ≥3 seeds for RGFN and SCENT (and FragGFN/RxnFlow) so the head-to-head carries error
   bars.
-- A matched-oracle RGFN **GPU** rerun on a healthy node (entry `014`'s GPU run died on a
-  wedged OpenCL node), so all entrants share the identical GPU oracle.
+- **Matched-oracle RGFN GPU anchor — DONE:** entry `014`'s GPU run has since completed on a
+  healthy node (job 69517), so all four entrants now share the identical GPU oracle and the
+  head-to-head below is a clean four-way (no CPU placeholder).
 - Report **average synthesis cost** of the top-k glues (SCENT's headline axis) alongside
   glue score + diversity — the dimension SCENT is built to win.
 - In-codebase ablation: rerun SCENT with cost guidance / exploitation penalty / dynamic
@@ -143,13 +148,20 @@ Root: repository root unless noted.
 
 ## Relevant Versions
 
-Relevant files are not yet committed.
+```
+08da97c Working GPU Oracle RGFN, FGFN, RxnFlow, SCENT, AiZynthFinder
+ded1c0d checkpoint for FGFN, RxnFlow, SCENT, AiZynthFinder, sEH
+cdf3f78 GPU loop + FGFN loop
+```
 
-[TODO — add commit hash after pushing.] Files to commit:
-`validation/generators/scent/*`, `validation/configs/scent_{6td3,smoke}.gin`,
-`experiments/active_learning/scent_6td3/*`, `external/setup_scent.sh`, and the reference
-+ doc updates (`Logs/references/{README.md,references.bib}`,
-`validation/generators/README.md`, `docs/REFACTOR_LOG.md`).
+The SCENT adapter (`validation/generators/scent/*`), `external/setup_scent.sh`, and the
+first `validation/configs/scent_{6td3,smoke}.gin` landed in **`ded1c0d`** ("checkpoint …")
+and were finalised in **`08da97c`** ("Working GPU Oracle …") along with the three bring-up
+fixes (setuptools pin, explicit `Trainer` import, sign-safe `train_metrics`),
+`experiments/active_learning/scent_6td3/*`, and the reference/doc updates
+(`Logs/references/{README.md,references.bib}`, `validation/generators/README.md`,
+`docs/REFACTOR_LOG.md`). `08da97c` is also the commit that carries the RGFN GPU anchor
+(job 69517) this run is compared against.
 
 ## Relevant Resources
 
@@ -169,7 +181,7 @@ Relevant files are not yet committed.
 
 ## Method
 
-> [TODO — confirm exact commands after the Balam run.]
+> Commands below are the ones actually run for job 69513.
 
 1. `bash external/setup_scent.sh` — clone SCENT, build the `scent` env, install it.
 2. CPU smoke: `conda run -n scent python validation/generators/scent/run_scent_al.py
@@ -202,18 +214,35 @@ MW falls / QED rises across rounds — opposite to the RGFN/FragGFN drift.
 best **−5.807**; **51%** ≤ −2.0, 21% ≤ −3.0; `has_route` = **96/96**; `num_reactions`
 mostly 4 (90), with 3 (2) and 1 (4) — tree-structured routes from the dynamic library.
 
-**Head-to-head (same 6TD3 differential; FragGFN + SCENT on the identical GPU oracle):**
+**Head-to-head — clean matched-oracle GPU four-way.** All four entrants share the
+**identical** `Docking6TD3GpuOracle`, seed `D_0` (408 mol), budget (3 rounds × 32), β=8,
+and proxy `M`; only the generator differs. Numbers are **generated-only** (the 96 suggested
+molecules; `top_k.csv` pools the shared seed and is not a generator metric). RGFN = job
+**69517** (entry `014`), FragGFN = job 69482 (entry `015`), RxnFlow = job 69518 (entry `016`),
+SCENT = job **69513** (this run) — all on the GPU oracle on healthy nodes.
 
-| Entrant | Oracle | median dvina | best | frac ≤ −2.0 | synthesizable | log |
-|---|---|---|---|---|---|---|
-| RGFN | CPU (2-tier gnina) | ≈ −2.4 | −4.7 | 0.64 | ✅ `has_route=1` | `011` |
-| FragGFN | GPU (`docking_6td3_gpu`) | −2.06 | −4.86 | 0.54 | ❌ `has_route=0` | `015` |
-| **SCENT** | GPU (`docking_6td3_gpu`) | **−2.12** | **−5.81** | 0.51 | ✅ `has_route=1` (96/96) | `017` |
+| Metric | RGFN (69517) | FragGFN (69482) | RxnFlow (69518) | **SCENT** (69513) |
+|---|---|---|---|---|
+| best `dvina` | −3.90 | −4.86 | −4.22 | **−5.81** |
+| median `dvina` | **−2.14** | −2.06 | −1.19 | −2.12 |
+| mean `dvina` | −2.14 | −1.84 | −1.41 | −2.05 |
+| frac ≤ −2.0 | 42/96 (44%) | **52/96 (54%)** | 30/96 (31%) | 49/96 (51%) |
+| frac ≤ −3.0 | 8/96 (8%) | **20/96 (21%)** | 5/96 (5%) | 20/96 (21%) |
+| int. diversity | 0.85 | 0.87 | **0.89** | 0.87 |
+| synthesizable route | yes (by constr.) | **none** (`has_route=0`) | yes 96/96 (2-step) | yes 96/96 (tree) |
+| mean MW | 665 | ≈720 | **489** | ≈636 (694→579↓) |
+| mean QED | 0.12 | ≈0.15 | **0.36** | ≈0.16 (0.11→0.21↑) |
+| log | `014` | `015` | `016` | `017` |
 
-> Caveat (same as `015`/`016`): the matched RGFN **GPU** run (entry `014`) died on a
-> wedged node, so the RGFN column is its CPU-oracle run (`011`); FragGFN and SCENT share
-> the identical GPU oracle. A clean RGFN GPU rerun is still the missing apples-to-apples
-> anchor.
+**Reading it.** On glue score the four are in the same league (medians −1.2…−2.1), with
+SCENT taking the single strongest hit (−5.81) and matching RGFN's central tendency; RGFN and
+FragGFN reproduce the size-bloat/low-QED drift (MW 665–720, QED 0.12–0.15), while **SCENT and
+RxnFlow are the two entrants that stay drug-like** — RxnFlow by its constrained block library
+(MW 489, QED 0.36), SCENT by cost pressure pulling MW down and QED up *across rounds* toward
+that same region. This matches entry `016`'s finding that RGFN's synthesizability is real but
+does not by itself buy drug-likeness; SCENT shows a second route to it (cost guidance) beyond
+RxnFlow's block constraint. (Caveat carried from `016`: single-seed, small 3×300-step budget —
+deltas need ≥3 seeds before they are load-bearing.)
 
 SCENT's own per-round synthesis-cost diagnostic (`@TrajectoryCost.forward_mean_cost`) is
 logged to the offline wandb history under the run dir (not the summary). A like-for-like

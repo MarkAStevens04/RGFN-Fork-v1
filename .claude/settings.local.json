@@ -209,7 +209,10 @@
       "Bash(command -v pre-commit)",
       "Bash(pre-commit --version)",
       "Bash(echo \"exit: $?\")",
-      "Bash(pre-commit run *)"
+      "Bash(pre-commit run *)",
+      "Bash(sed -i 's/^### /## /' 015_fraggfn-6td3-baseline.md 018_synthesizability-metric-aizynthfinder.md)",
+      "Bash(grep -nE '^#{1,3} ' 015_fraggfn-6td3-baseline.md)",
+      "Bash(grep -nE '^#{1,3} ' 018_synthesizability-metric-aizynthfinder.md)"
     ]
   }
 }

@@ -198,7 +198,21 @@ Jobs (the debugging journey → success):
 
 ## Relevant Versions
 
-[TODO — add commit hash after committing the new/changed files listed above.]
+```
+08da97c Working GPU Oracle RGFN, FGFN, RxnFlow, SCENT, AiZynthFinder
+cdf3f78 GPU loop + FGFN loop
+d1d77f9 Active learning & GPU dock
+```
+
+The suggestion-log + standard candidate-dataset machinery (`glue/active_learning/route.py`,
+`glue/metrics/dataset_metrics.py`, `glue/datasets/candidates.py`, `glue/datasets/suggestion_log.py`,
+`configs/glue/active_learning_6td3_gpu.gin`, `experiments/active_learning/6td3/analyze_suggestions.py`,
+and the first loop wiring) landed in **`cdf3f78`** ("GPU loop + FGFN loop"). The decisive
+`empty_cache()` fix — the headline of this entry — plus the all-NaN abort guard, the
+`system`/`seed` manifest provenance, `experiments/active_learning/6td3/preflight_dock.py`, and the
+final `submit_al_6td3_gpu.sh` landed in **`08da97c`** ("Working GPU Oracle …"). The successful run
+(job 69517) executed on 2026-06-30 with the `empty_cache()` fix already in the working tree; it was
+committed the next morning in `08da97c`.
 
 ## Relevant Resources
 
@@ -241,6 +255,32 @@ molecules dock in **known-glue range** (per-round medians −2.0…−2.4, match
 Objective 2's reward term must still address. **Top-16** (`top_k.csv`) best = −4.92
 (`CC[C@@H](CO)Nc1nc(NC(=O)CCc2ccccc2)c2ncn(C)c2n1`, a purine — the CR8/6TD3 warhead
 chemistry), with several ≤ −3.9.
+
+**Same loop, GPU oracle vs the CPU baseline (entry 011).** This run is a controlled
+CPU→GPU swap of *the same RGFN active-learning loop* (same seed, budget, β, proxy;
+only the oracle's pose source and this run's logging differ), so it reads directly
+against entry 011's CPU run (job 69445). Generated-only, 96 suggested molecules each:
+
+| | entry 011 — CPU oracle (69445) | this run — GPU oracle (69517) |
+|---|---|---|
+| oracle | `Docking6TD3Oracle`, gnina CPU search (AUROC ≈0.95) | `Docking6TD3GpuOracle`, QV2-GPU search (AUROC ≈0.88) |
+| median `dvina` (generated) | ≈ −2.4 | −2.14 |
+| best generated `dvina` | −4.71 | −3.90 |
+| frac ≤ −2.0 | 61/96 (64%) | 42/96 (44%); 42/75 docked (56%) |
+| dock success | 96/96 | **75/96** (~22% `no_pose`, large multi-fragment mols) |
+| docking cost | ~35 min/round, **35% of loop** (entry 011; 58 s/mol Tier-2 search, entry 012) | ~1 min/round, **<2% of loop** (~1.5 s/mol) |
+| MW / QED drift | MW large, QED low (size drift) | MW ~665, QED ~0.12 (same drift) |
+
+**Reading it.** The GPU oracle preserves the science — generated molecules still dock in
+known-glue range (median −2.14 vs ≈−2.4) with the same MW/QED size drift — while collapsing
+docking from a third of the loop to under 2% (see phase timing below). The two visible costs
+of the faster oracle are (1) a slightly lower glue-score yield (44% vs 64% ≤ −2.0), tracking
+the −0.06 AUROC the GPU pose-search trades away (entry 013), and (2) a ~22% dock-failure rate
+on the largest molecules (all 96 CPU-docked in 011; only 75/96 here) — normalising for that,
+the ≤ −2.0 fraction of *docked* molecules is 56%, much closer to the CPU run. Net: the GPU
+oracle collapses the docking phase ~35× (from ~35 min to ~1 min/round, 35% → <2% of the loop;
+per-molecule ~50× per entry 013) while keeping the generator producing the same real-glue
+chemistry — leaving GFN training (now ~98%) as the sole remaining cost centre.
 
 **Phase timing** (`phase_timings.csv`), the headline GPU vs entry-012 CPU result:
 
