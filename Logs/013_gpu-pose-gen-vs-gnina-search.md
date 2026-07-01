@@ -4,7 +4,7 @@
 
 ## Question
 
-Can we generate the docking poses on the GPU instead of the CPU and still tell real molecular glues apart from decoys as well as our current, slower method does?
+Will GPU generated docking poses (faster) still work as a good discriminator instead of CPU generated docking poses (slower but accurate)?
 
 ## Context & Summary
 

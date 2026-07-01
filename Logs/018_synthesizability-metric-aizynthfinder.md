@@ -5,7 +5,7 @@
 
 Can we measure, for any molecule our generators propose, whether a real
 retrosynthesis tool can find a way to actually make it — and run that check the
-same way on every model we benchmark?
+same way on every model we benchmark? (Not actually running on real results yet)
 
 ### Context & Summary
 
