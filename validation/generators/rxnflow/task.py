@@ -92,15 +92,13 @@ class RxnFlowGlueTrainer(RxnFlowTrainerBase):
         self._proxy = proxy
         super().__init__(config, print_config=print_config)
 
-    def set_default_hps(self, cfg) -> None:
-        # Start from RxnFlow's synthesis defaults, then pin the few knobs the AL loop
-        # needs. Keeping super()'s defaults means we inherit RxnFlow's action-space
-        # subsampling + env wiring unchanged.
-        super().set_default_hps(cfg)
-        cfg.num_workers = 0  # single-process: proxy refits are visible to sampling
-        cfg.algo.method = "TB"
-        cfg.algo.train_random_action_prob = 0.0
-        cfg.algo.valid_random_action_prob = 0.0
+    # NB: we deliberately do NOT override ``set_default_hps`` — RxnFlow's own defaults
+    # (``num_workers=0``, ``method="TB"``, ``train_random_action_prob=0.1``) are the
+    # validated-stable regime. Forcing ``train_random_action_prob=0.0`` (as the
+    # RGFN/FragGFN entrants do) makes RxnFlow's TB loss go non-finite on this synthesis
+    # action space — RxnFlow explicitly recommends a positive exploration rate. So we
+    # keep RxnFlow's exploration knob at its native value; the only shared-fairness
+    # levers (proxy ``M``, oracle, seed, budget, constant β) are wired elsewhere.
 
     def setup_task(self) -> None:
         self.task = RxnFlowTask(self.cfg, proxy=self._proxy)

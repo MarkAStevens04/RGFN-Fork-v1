@@ -199,6 +199,14 @@ data/models/**/*.ckpt
 data/models/**/*.pt
 data/models/**/*.pth
 
+# AiZynthFinder public dataset (templates/policy/stock; large, fetched by
+# external/setup_aizynthfinder.sh via download_public_data — never commit)
+data/models/aizynthfinder/
+
+# RxnFlow building-block environment (fingerprints/masks/descriptors + block list;
+# large, generated/fetched by external/setup_rxnflow.sh — never commit)
+data/models/rxnflow_env/
+
 # Generated synthetic datasets (keep the dir + docs, ignore the generated outputs)
 data/synthetic/*
 !data/synthetic/README.md

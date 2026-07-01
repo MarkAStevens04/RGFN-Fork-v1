@@ -3,7 +3,7 @@
 #SBATCH --time=05:00:00                       # GFN training dominates now (docking ~60x faster); headroom over the ~3h expected
 #SBATCH --partition=compute                   # 1-GPU job -> the regular (non full_node) partition
 #SBATCH --gpus-per-node=1
-#SBATCH --exclude=balam008                     # balam008 OpenCL is wedged (Logs/013 job 69468); QV2-GPU yields all-no_pose there
+#SBATCH --exclude=balam008,balam009            # balam008 OpenCL wedged (Logs/013); balam009 degraded post-outage — passes OpenCL probe but QV2-GPU makes 0 poses (Logs/014 jobs 69481/69511)
 # Absolute $SCRATCH log paths: $HOME is read-only on compute nodes, so a relative
 # %x-%j.out fails to open and SLURM kills the job at startup (Logs/012, job 69450).
 #SBATCH --output=/scratch/markymoo/rgfn_runs/%x-%j.out
@@ -66,6 +66,17 @@ if ! grep -q "clCreateContext err=0" <<<"$HC_OUT"; then
     exit 42
 fi
 echo "OpenCL health OK on $(hostname)"
+
+# --- Pre-flight DOCK gate: the OpenCL probe above is necessary but not sufficient
+# (balam009 passes it yet QV2-GPU makes 0 poses — Logs/014). Dock a couple of seed
+# molecules for real and bail in ~2 min if this node can't pose them, rather than
+# discovering it 62 min later at round-1 docking.
+python experiments/active_learning/6td3/preflight_dock.py
+PF=$?
+if [ "$PF" -ne 0 ]; then
+    echo "FATAL: pre-flight docking failed on $(hostname) (exit $PF) -- add it to --exclude and resubmit."
+    exit "$PF"
+fi
 
 python scripts/active_learning.py \
         --cfg configs/glue/active_learning_6td3_gpu.gin \

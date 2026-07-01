@@ -111,10 +111,18 @@ def main() -> None:
     except Exception as exc:  # noqa: BLE001 - non-fatal; gin/seeds still set below
         print(f"[SCENT-AL] WARNING seed_everything unavailable ({exc}); continuing", flush=True)
 
+    # Register SCENT's gin configurables. `import rgfn` runs its package __init__
+    # (registers gfns / proxies / policies / samplers / metrics), but its
+    # trainer/__init__ does NOT import trainer.py, so @Trainer is registered only by
+    # importing it explicitly — exactly what SCENT's own train.py does. Without this,
+    # gin parse fails with "No configurable matching 'Trainer'".
     # Import the adapter modules so their @gin.configurable classes register
     # (LearnedDockingProxy via proxy, ScentActiveLearningLoop in al_loop).
     import al_loop  # noqa: F401  (side effect: gin registration)
     from al_loop import ScentActiveLearningLoop
+
+    import rgfn  # noqa: F401  (side effect: registers most SCENT gin components)
+    from rgfn.trainer.trainer import Trainer  # noqa: F401  (registers @Trainer)
 
     bindings = [
         f'user_root_dir="{root_dir}"',

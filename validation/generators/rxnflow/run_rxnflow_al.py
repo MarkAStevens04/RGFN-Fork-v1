@@ -139,7 +139,8 @@ def main() -> None:
     _set_if(gcfg, "num_training_steps", int(loop_c.get("n_train_steps", 300)))
     _set_if(gcfg, "opt.learning_rate", float(rxn_c.get("learning_rate", 1e-4)))
     _set_if(gcfg, "model.num_emb", int(rxn_c.get("num_emb", 128)))
-    _set_if(gcfg, "model.num_layers", int(rxn_c.get("num_layers", 4)))
+    # RxnFlow's layer count lives under model.graph_transformer (no model.num_layers).
+    _set_if(gcfg, "model.graph_transformer.num_layers", int(rxn_c.get("num_layers", 4)))
     _set_if(gcfg, "algo.sampling_tau", float(rxn_c.get("sampling_tau", 0.9)))
     _set_if(gcfg, "algo.max_len", int(rxn_c.get("max_reactions", 4)))  # synthesis depth
 

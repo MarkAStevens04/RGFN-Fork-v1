@@ -173,6 +173,16 @@ class ActiveLearningLoop:
                 batch, routes = self._sample_query_batch()
             print(f"[AL] round {rnd}: sampled {len(batch)} unique candidates", flush=True)
 
+            # Free torch's cached GPU memory before docking. The GPU docking oracle
+            # runs QuickVina2-GPU in a *subprocess* that needs GPU memory via OpenCL,
+            # but torch's caching allocator holds the device's memory after training
+            # + sampling — starving the subprocess so every dock returns no_pose
+            # (confirmed reproduction, Logs/014: free drops to ~1 GB -> all fail;
+            # empty_cache() returns the reserved-but-unused blocks and docking
+            # recovers; the small live model/optimizer stay resident). No-op for
+            # CPU oracles / CPU-only runs.
+            self._free_torch_gpu_cache(rnd)
+
             # 4. score B with the expensive oracle O. Prefer score_detailed() when
             #    the oracle exposes it (e.g. the GPU differential oracle) so the
             #    suggestion log can record the per-pose breakdown; fall back to the
@@ -281,6 +291,29 @@ class ActiveLearningLoop:
                 if len(batch) >= self.query_batch_size:
                     return batch, routes
         return batch, routes
+
+    @staticmethod
+    def _free_torch_gpu_cache(rnd: int) -> None:
+        """Return torch's reserved-but-unused GPU memory to the driver so the GPU
+        docking subprocess (QuickVina2-GPU / OpenCL) can allocate. Best-effort and
+        guarded: a no-op without torch/CUDA, never fatal. Prints the free VRAM so a
+        run's log shows the docker had room (Logs/014 memory-contention fix)."""
+        try:
+            import gc
+
+            import torch
+
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                free, total = torch.cuda.mem_get_info()
+                print(
+                    f"[AL] round {rnd}: freed torch GPU cache before docking -> "
+                    f"{free // 1024 // 1024} / {total // 1024 // 1024} MiB free",
+                    flush=True,
+                )
+        except Exception as exc:  # noqa: BLE001 - memory hygiene must not crash the loop
+            print(f"[AL] round {rnd}: WARNING could not free torch GPU cache: {exc}", flush=True)
 
     def _score_batch(self, batch: List[str]) -> tuple:
         """Score the query batch, returning ``(scores, details)``.

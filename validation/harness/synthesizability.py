@@ -103,9 +103,23 @@ def read_candidates(dataset_dir: Path) -> Tuple[Dict[str, Any], List[Dict[str, A
 # --- RDKit helpers: canonicalization + SA score --------------------------------------
 
 
+_RDKIT_QUIET = False
+
+
+def _quiet_rdkit() -> None:
+    """Suppress RDKit's per-molecule parse warnings (we handle None mols ourselves)."""
+    global _RDKIT_QUIET
+    if not _RDKIT_QUIET:
+        from rdkit import RDLogger
+
+        RDLogger.DisableLog("rdApp.*")
+        _RDKIT_QUIET = True
+
+
 def _canonical(smiles: str) -> Optional[str]:
     from rdkit import Chem
 
+    _quiet_rdkit()
     if not smiles:
         return None
     mol = Chem.MolFromSmiles(smiles)
@@ -481,12 +495,18 @@ def _write_per_mol(path: Path, per_mol: List[Dict[str, Any]]) -> None:
 
 
 def _aizynth_version() -> Optional[str]:
+    # aizynthfinder exposes no __version__ attribute; read the installed dist version.
     try:
-        import aizynthfinder
+        from importlib.metadata import version
 
-        return getattr(aizynthfinder, "__version__", None)
+        return version("aizynthfinder")
     except Exception:
-        return None
+        try:
+            import aizynthfinder
+
+            return getattr(aizynthfinder, "__version__", None)
+        except Exception:
+            return None
 
 
 # --- CLI ------------------------------------------------------------------------------

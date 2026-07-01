@@ -72,29 +72,38 @@ fi
 # does not try to compile them from source (needs nvcc, slow/fails).
 echo "[setup_rxnflow] installing RxnFlow (editable) + deps"
 conda run -n "${ENV_NAME}" pip install -e "${CLONE_DIR}" --find-links "${PYG_FIND_LINKS}"
+# gdown is imported by rxnflow.utils.misc (data/weights download) but missing from its
+# pyproject deps — install it explicitly so `import rxnflow` works.
+conda run -n "${ENV_NAME}" pip install gdown
 
 # --- 4. Prepare the env directory: building blocks + reaction templates. --------
-# RxnFlow ships its reaction templates (templates/hb_edited.txt = 71 templates) and a
-# data-prep script that builds the env dir from a building-block library. We use the
-# PUBLIC ZINCFrag subset (Enamine REAL is request-only) so the run is reproducible.
-# The exact prep command lives in the RxnFlow repo's data/README.md; wire it here.
-mkdir -p "$(dirname "${ENV_DIR}")"
-if [ ! -d "${ENV_DIR}" ]; then
-    echo "[setup_rxnflow] preparing env dir -> ${ENV_DIR} (ZINCFrag blocks + hb templates)"
-    # TODO(Balam): run RxnFlow's building-block preprocessing into ${ENV_DIR}, e.g.
-    #   conda run -n ${ENV_NAME} python ${CLONE_DIR}/scripts/prepare_env.py \
-    #       --building_blocks <zincfrag.smi> \
-    #       --templates ${CLONE_DIR}/templates/hb_edited.txt \
-    #       --out_dir ${ENV_DIR}
-    # Confirm the script name/flags against the cloned repo's data/README.md.
-    echo "[setup_rxnflow] WARNING env dir prep is a TODO — fill from ${CLONE_DIR}/data/README.md"
+# RxnFlow builds its synthetic action space from a building-block library + a reaction
+# template set via data/scripts/b_create_env.py (see CLONE_DIR/data/README.md). We use
+# the PUBLIC ZINCFrag set (Enamine REAL is request-only) + the paper's 71-template HB
+# set (templates/hb_edited.txt). The clone bundles a 10k debug subset
+# (zincfrag_10k.smi.gz) — enough for a first end-to-end run; swap in the full ZINCFrag
+# (gdown zincfrag.smi.gz, ~200k) for the headline run.
+REPO_ROOT="$PWD"
+ABS_ENV_DIR="${REPO_ROOT}/${ENV_DIR}"
+BLOCKS="${RXNFLOW_BLOCKS:-./building_blocks/zincfrag_10k.smi.gz}"   # repo-data-relative
+# real.txt = RxnFlow's default 109-template Enamine-REAL set. We use it (not the paper's
+# 71-template hb_edited.txt) because hb_edited on the SMALL 10k debug library is too
+# sparse — many (template, reactant) states have no compatible second block, producing
+# all-masked action categories -> NaN logprobs / non-finite TB loss (validated on Balam,
+# Logs/016). real.txt trains stably on the debug library; switch to hb_edited only with
+# the full ~200k ZINCFrag library (RXNFLOW_TEMPLATES=./templates/hb_edited.txt).
+TEMPLATES="${RXNFLOW_TEMPLATES:-./templates/real.txt}"            # 109 templates (Enamine REAL)
+CPU="${RXNFLOW_CPU:-8}"
+mkdir -p "$(dirname "${ABS_ENV_DIR}")"
+if [ ! -d "${ABS_ENV_DIR}" ]; then
+    echo "[setup_rxnflow] building env dir -> ${ENV_DIR} (blocks=${BLOCKS} templates=${TEMPLATES})"
+    ( cd "${CLONE_DIR}/data" && conda run -n "${ENV_NAME}" python scripts/b_create_env.py \
+        -b "${BLOCKS}" -t "${TEMPLATES}" -o "${ABS_ENV_DIR}" --cpu "${CPU}" )
 else
     echo "[setup_rxnflow] ${ENV_DIR} already present — skipping prep"
 fi
-if [ "${SMOKE}" = "1" ] && [ ! -d "${ENV_DIR_SMOKE}" ]; then
-    echo "[setup_rxnflow] preparing SMOKE env dir -> ${ENV_DIR_SMOKE} (tiny block subset)"
-    echo "[setup_rxnflow] WARNING smoke env dir prep is a TODO — use a small block subset"
-fi
+# The smoke config reuses ${ENV_DIR} (its tiny budget comes from the loop knobs, not the
+# block-library size), so no separate smoke env is built.
 
 # --- 5. Import smoke test. -----------------------------------------------------
 echo "[setup_rxnflow] verifying install"

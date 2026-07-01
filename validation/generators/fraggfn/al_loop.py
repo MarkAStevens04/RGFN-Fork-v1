@@ -50,6 +50,25 @@ def _canonical(smiles: str) -> Optional[str]:
     return Chem.MolToSmiles(mol) if mol is not None else None
 
 
+def _free_gpu_cache() -> None:
+    """Return this process's reserved-but-unused GPU memory to the driver before the
+    docking bridge runs. The bridge's QuickVina2-GPU (a subprocess) needs GPU memory,
+    but our torch training holds the card's caching allocator on the same GPU — which
+    starves it (Logs/014: 40 GB → ~1 GB free → every dock ``no_pose``). ``empty_cache()``
+    frees the reserved blocks; the small live model stays resident. Best-effort/no-op
+    without torch/CUDA."""
+    try:
+        import gc
+
+        import torch
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
 class LabelStore:
     """Accumulating ``canonical-SMILES -> label`` store (the dataset ``D``).
 
@@ -320,6 +339,7 @@ class FragGFNActiveLearningLoop:
             cmd += ["--system", self.system]
         if self.seed_csv:
             cmd += ["--reference-csv", str(self.seed_csv)]
+        _free_gpu_cache()  # let the bridge's QuickVina2-GPU allocate (Logs/014)
         print(f"[FGFN-AL] round {rnd}: bridge -> {' '.join(cmd)}", flush=True)
         subprocess.run(cmd, check=True)
         return self._read_labels(lbl_path, batch)

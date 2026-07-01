@@ -61,7 +61,25 @@ sbatch experiments/active_learning/seh/submit_al_seh.sh
 
 ## Status
 
-Oracle created and **validated live** on the balam-login01 A100 (see Logs/010):
-QuickVina2-GPU sEH docking, aspirin −6.3 reproduced, fast. The **full multi-round
-loop has not yet been run end-to-end** — pending a compute node
-(`submit_al_seh.sh` is ready).
+Oracle created and **validated live** — first on the balam-login01 A100 (Logs/010)
+and **re-validated on the Trillium login H100** (2026-06-30): QuickVina2-GPU sEH
+docking reproduces aspirin −6.3 (the known value), ibuprofen −6.9, caffeine −6.5,
+at ~0.9 s/mol; invalid SMILES → `nan`.
+
+The loop config `configs/glue/active_learning_seh.gin` is now at **GPU-pipeline
+parity** with `active_learning_6td3_gpu.gin`: a `system='seh'` provenance tag and a
+corrected `@SafeNumScaffoldsFound` metric block (the inherited `@NumScaffoldsFound`
+used positive thresholds `[5,6,7,8]`, inert against our proxy's negative Vina
+predictions — now `proxy_higher_better=False` with Vina-scale cutoffs grounded in
+the seed `D_0`).
+
+The **validation baselines can now target sEH too**: `validation/configs/{fraggfn,
+rxnflow,scent}_seh.*` point each generator at the shared `docking_seh` oracle via
+the bridge `scripts/score_batch.py`; submit scripts live under
+`experiments/active_learning/{fraggfn,rxnflow,scent}_seh/`. The bridge path was
+validated live (`--oracle docking_seh` scores aspirin −6.3 and writes the standard
+candidate dataset).
+
+The committed `seed_seh.csv` holds **250** sEH Vina labels (range −12.5 to +1.7,
+median −7.0). The **full multi-round RGFN loop has not yet been run end-to-end** —
+pending a Balam compute node (`submit_al_seh.sh` is ready).

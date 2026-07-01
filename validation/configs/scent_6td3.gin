@@ -27,6 +27,20 @@ beta = 8                                    # == beta in active_learning_6td3_gp
 # Headless logging: offline wandb (the submit script also exports WANDB_MODE=offline).
 WandbLogger.mode = 'offline'
 
+# --- Inner-loop diagnostic metrics: sign-convention-safe subset. -----------------
+# SCENT's default train_metrics (ScaffoldCostsList / NumScaffoldsFound /
+# TanimotoSimilarityModes) are tuned for its sEH reward — higher-is-better, NON-negative
+# proxy values with a "good molecule" threshold of 8. Our docking proxy is the opposite
+# (higher_is_better=False, standardised ~0-mean), and assigns invalid/early-terminal
+# states the worst value (+clip=+10). That +10 trips ScaffoldCost's `proxy>8` filter,
+# which then calls `.molecule` on an early-terminal state (it doesn't guard the type) →
+# AttributeError. These metrics are pure wandb diagnostics during inner GFN training —
+# they do NOT affect generation or the AL comparison (which uses our batch_metrics via
+# the bridge) — so we replace them with a safe subset, keeping SCENT's own synthesis-cost
+# diagnostic (@TrajectoryCost, the cost-awareness signal) + standard GFN stats.
+train_metrics = [@StandardGFNMetrics(), @FractionEarlyTerminate(), @TrajectoryCost(), @NumReactions()]
+Trainer.train_metrics = %train_metrics
+
 # --- Proxy M: our refit-able atom-graph MPNN (same arch as the RGFN entrant). ----
 # Replaces SCENT's @SehMoleculeProxy (configs/proxies/target/seh.gin is NOT included).
 proxy/gin.singleton.constructor = @LearnedDockingProxy

@@ -801,11 +801,151 @@ resolves into the clone, every symbol the adapter imports exists in SCENT's sour
 confirmed `CachedProxyBase.compute_proxy_output` wraps a `List[float]` into `ProxyOutput`
 (matches `LearnedDockingProxy`'s return), `Trainer.{train,close,train_forward_sampler,
 train_batch_size}` + the `Trajectories`/`Reaction*` API the loop binds to all exist.
-**Flagged for `scent`-env validation (not runnable without the install):**
-- the `scent` conda env build itself (heavy torch/dgl install) + the runner's end-to-end
-  gin parse with `chdir` into the clone — confirm `import rgfn` resolves to SCENT (not our
-  repo-local `rgfn/`) and that the cost-guided graph constructs from `data/small/*`.
-- multi-line gin dict literal for `ScentActiveLearningLoop.oracle_args` (gin parses
-  balanced brackets; matches `rgfn_base.gin`'s multi-line list — verify on real parse).
-- RGFN-vs-SCENT comparison numbers (incl. SCENT's headline mean-synthesis-cost axis) —
-  tracked in `Logs/017`.
+**Resolved on Balam (job 69513, `COMPLETED` 2 h 03 m) — three bring-up fixes:**
+- `import rgfn` died on `pkg_resources` (wandb dep; py3.11 env had setuptools≥81 which
+  removed it) → pinned `setuptools<81` (now in `setup_scent.sh`).
+- gin "No configurable matching 'Trainer'" → `rgfn/trainer/__init__` doesn't import
+  `trainer.py`; runner now does `from rgfn.trainer.trainer import Trainer` (as SCENT's own
+  `train.py` does).
+- SCENT's sEH-tuned `ScaffoldCost` metric calls `.molecule` on any state with `proxy>8`
+  without a terminal-type guard; our lower-is-better proxy gives invalid states `+clip=+10`
+  → crash. Overrode `train_metrics` to a sign-safe subset (kept `@TrajectoryCost`); these
+  are wandb-only diagnostics, so no effect on generation or the comparison.
+- Confirmed working: runner's `chdir`-into-clone + sys.path handling resolves `import rgfn`
+  to SCENT (not our repo-local `rgfn/`); the multi-line `oracle_args` dict literal parses;
+  the cost-guided graph constructs from `data/small/*`; `has_route=96/96` with tree routes.
+- Result: SCENT matches RGFN/FragGFN on glue quality (median dvina −2.12, best −5.81),
+  fully synthesizable, and its cost-awareness appears to counteract the size drift — full
+  numbers in `Logs/017`.
+
+## sEH benchmark: GPU-pipeline parity + validation-baseline coverage (2026-06-30)
+
+**Why:** sEH is the canonical GFlowNet docking benchmark ([bengio2021gflownet],
+RGFN's `configs/rgfn_seh_docking.gin`); we want it as a *reproduction check* before
+trusting the harness on the novel 6TD3 glue task. The sEH oracle (`DockingSEHOracle`,
+exp 010) and a loop config already existed, but the config lagged the 6TD3 GPU
+pipeline and no validation baseline could target sEH. This entry brings sEH to parity.
+
+**Re-validated live (Trillium login H100):** `DockingSEHOracle` (QuickVina2-GPU sEH
+docking) reproduces aspirin −6.3 (known value), ibuprofen −6.9, anthracene −8.5,
+caffeine −6.5, at ~0.9 s/mol; invalid SMILES → `nan`. The Balam-built QV2-GPU stack
+runs unchanged on Trillium (shared FS) via `~/bin/rgfn-smoke-env.sh`. The full
+bridge path `scripts/score_batch.py --oracle docking_seh` was also exercised
+end-to-end: scores aspirin −6.3 and writes the standard candidate dataset
+(`candidates.csv` + `manifest.json`, `has_route=0`).
+
+Changed:
+- `configs/glue/active_learning_seh.gin` — GPU-pipeline parity with
+  `active_learning_6td3_gpu.gin`: added `ActiveLearningLoop.system='seh'`,
+  `Trainer.valid_every_n_iterations`, and a corrected metric block. The inherited
+  `@NumScaffoldsFound` (from `rgfn_base.gin`) used positive thresholds `[5,6,7,8]`
+  that assume the upstream `SehMoleculeProxy`'s clipped non-negative reward; OUR
+  proxy `M` predicts the RAW Vina energy (negative, lower-is-better), so that metric
+  was silently inert. Swapped in `@SafeNumScaffoldsFound` with
+  `proxy_higher_better=False` and Vina-scale cutoffs `[-8,-9,-10,-11]` grounded in
+  the seed `D_0` distribution (median −7.0, Q1 −8.4, strong binders ≤ −10).
+
+New (validation baselines can now target sEH — all three implemented entrants):
+- `validation/configs/{fraggfn,rxnflow}_seh.yaml`, `validation/configs/scent_seh.gin`
+  — sEH analogues of the `*_6td3` configs, budget/seed/β matched to
+  `active_learning_seh.gin`; oracle switched to `docking_seh` (single-target Vina
+  binding, `higher_is_better=false`; args `exhaustiveness/docking_batch_size/
+  n_conformers/n_gpu`, **no** `num_modes`/dvina), threshold −8.0, seed
+  `experiments/active_learning/seh/seed_seh.csv` (250 labels). `scent_seh.gin` is a
+  surgical mirror of the validated `scent_6td3.gin` (verified by diff).
+- `experiments/active_learning/{fraggfn,rxnflow,scent}_seh/` — submit scripts +
+  READMEs, mirroring the `*_6td3` Balam submit scripts (OpenCL gate, `--exclude=balam008`,
+  `$SCRATCH` outputs; loop in the generator's env, bridge re-enters `rgfn`).
+- Fixed a stale "36-molecule starter" claim in the sEH README + submit script (the
+  committed `seed_seh.csv` actually holds 250 labels).
+
+**Verified (Trillium H100 + static):** live `DockingSEHOracle` smoke + live
+`docking_seh` bridge run (above); `active_learning_seh.gin` re-parses with all
+`@references` resolved (`@SafeNumScaffoldsFound` included); `py_compile` of touched
+Python; `bash -n` on all three new submit scripts; YAML schema parity of
+`{fraggfn,rxnflow}_seh.yaml` vs their `_6td3` siblings; `scent_seh.gin` body diff vs
+`scent_6td3.gin` shows only the intended budget/oracle/threshold/system changes.
+**Flagged for `scent`/`rxnflow`-env validation (not runnable without those installs):**
+the gin/yaml end-to-end parse under each baseline's own env, and the real multi-round
+GPU runs of the RGFN sEH loop + the three baselines on a Balam compute node.
+
+## RxnFlow entrant — Balam validation + first run (exp 016, 2026-06-30, job 69518)
+
+Installed and validated the RxnFlow entrant on Balam (login A100 + compute), resolving
+every API/stability uncertainty flagged above. Adapter fixes made against the real
+cloned repo:
+- **Route extraction rewritten** to consume RxnFlow's real trajectory format
+  (`ctx.read_traj` → `("FirstBlock", block)` / `("UniRxn", template)` /
+  `("BiRxn", template, block)` tuples), not the guessed action-object attributes; and
+  sampling switched to RxnFlow's own `algo.graph_sampler.sample_inference` +
+  `ctx.object_to_log_repr`/`read_traj` (the `RxnFlowSampler` path). Verified: 8/8 samples
+  render faithful multi-step routes.
+- **Config path** `model.num_layers` → `model.graph_transformer.num_layers` (RxnFlow's
+  ModelConfig has no `num_layers`).
+- **`gdown`** added to `setup_rxnflow.sh` (imported by `rxnflow.utils.misc`, missing from
+  RxnFlow's pyproject).
+
+**The load-bearing finding — template set vs. library size.** With `hb_edited.txt` (71
+templates) on the bundled 10k ZINCFrag debug library, training goes **non-finite**
+(NaN policy logprobs): the library is too sparse, so many (template, reactant) states
+have no compatible second block → all-masked action categories → `log(0)`. Confirmed it
+was the env, not our code, by reproducing the NaN with RxnFlow's **own** stock QED task
+(14/25 steps non-finite), and confirmed the fix by rebuilding with the default
+**`real.txt` (109 Enamine-REAL templates)** → QED control **0/25** and our
+constant-β=8 proxy loop **0/25**. So: `setup_rxnflow.sh` now defaults to `real.txt`;
+switch to `hb_edited.txt` only with the full ~200k ZINCFrag library.
+- **RxnFlow defaults are the stable regime**, kept as-is: `action_subsampling.sampling_ratio=0.02`,
+  `train_random_action_prob=0.1`. Removed our `RxnFlowGlueTrainer.set_default_hps`
+  override that forced `train_random_action_prob=0.0` (the RGFN/FragGFN value) — RxnFlow
+  needs positive exploration or its TB loss diverges. Our shared-fairness levers (proxy
+  `M`, oracle, seed, budget, constant β=8) are unchanged; only RxnFlow's native
+  exploration/subsampling knobs differ (per-generator, as intended).
+- **cu121/cu124 vs cu118 coexistence confirmed:** rxnflow torch 2.5.1+cu124 runs GPU fine
+  with the `cuda/11.8.0` module + rgfn env's `LD_LIBRARY_PATH` present (needed for the
+  bridge's dgl). Driver 580 on balam004 covers CUDA 12.
+
+**Validated end-to-end (login A100):** full cross-env mock smoke — 2 rounds, RxnFlow
+train (finite) → sample+routes → bridge (rgfn, mock) → standard dataset. Finalized
+dataset conformant, `has_route=1`, `routes.jsonl` = 12/12 with real building blocks +
+1–2 reaction steps. **Real run submitted: job 69518** (`al_rxnflow_6td3`, balam004,
+3 rounds × 32-mol GPU 6TD3 docking), running alongside the matched RGFN GPU run (69517).
+Results → `Logs/016`.
+
+**COMPLETE (job 69518, 2026-07-01 00:40, 51 min, exit 0:0).** All 3 rounds ran on the
+real GPU docking oracle: 96/96 candidates scored, **all 96 with 2-step synthesis routes**
+(`has_route=1`), conformant standard dataset. Best `dvina` −4.22, median −1.19, 30/96
+(31%) ≤ −2.0, diversity 0.86–0.90. Training stayed finite over all 900 steps (the
+`hb_edited`→`real.txt` fix held). **Matched-oracle RGFN GPU run (69517) also COMPLETE**
+(3h14m; RGFN in-loop GPU training ~1h/round vs the bridge baselines' ~15min), giving a
+clean same-oracle GPU three-way in `Logs/016`. Two findings: (1) on glue score all three
+are same-league (RGFN median/mean −2.14 best, FragGFN best single hit −4.86 & 54% past
+−2.0, RxnFlow behind) — RGFN does not out-dock the non-synth foil; (2) the real split is
+drug-likeness — RGFN & FragGFN both bloated/low-QED (MW 665–720, QED 0.11–0.15, RGFN
+Lipinski 2/96), only RxnFlow is both synthesizable and drug-like (MW 489, QED 0.36).
+Lead: add a QED/property term (or tighter block lib) to RGFN. Full numbers in `Logs/016`.
+
+## GPU-oracle-in-loop fix + pre-flight gate (exp 014, job 69517, 2026-07-01)
+
+The first *complete* GPU-oracle active-learning run (job 69517: 3 rounds, |D|
+408→483) required fixing a real bug that three prior attempts hit — round-1
+docking returning all `no_pose`:
+
+- **Root cause: GPU-memory contention.** QuickVina2-GPU runs in a subprocess and
+  allocates GPU memory via OpenCL; after GFN training, torch's CUDA caching
+  allocator holds the whole A100 (free VRAM 40 GB → 1.1 GB), so docking gets 0
+  poses. Node-independent (failed on balam004 too, which passed the OpenCL probe).
+  Confirmed by a controlled login-A100 reproduction (fresh→docks; torch-holds→0
+  poses; `empty_cache()`→docks).
+- **Fix** (`glue/active_learning/loop.py`): `_free_torch_gpu_cache()` calls
+  `gc.collect()` + `torch.cuda.empty_cache()` after training/sampling and before
+  `oracle.score()` each round (prints free VRAM). Guarded; no-op without CUDA.
+- **Pre-flight dock gate** (`experiments/active_learning/6td3/preflight_dock.py`,
+  wired into `submit_al_6td3_gpu.sh`): docks 2 seed molecules at job startup and
+  exits non-zero if 0 poses — catches a genuinely bad node in ~40 s instead of at
+  round-1 (67 min). The OpenCL context probe alone was insufficient (balam009
+  passed it but couldn't dock). `--exclude` now lists balam008,balam009.
+
+Verified: the completed run freed ~39.7 GB before docking each round and added ~25
+molecules/round; docking fell to ~1 min/round (<2% of the loop) vs entry-012's ~31
+min (33%). See `Logs/014`. All changes are login-node smoke-tested; the full loop is
+now confirmed on a real 3-round Balam run.

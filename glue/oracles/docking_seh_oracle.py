@@ -127,7 +127,32 @@ class DockingSEHOracle(GlueOracle):
         proxy = self._build_proxy()
         out: List[float] = []
         for chunk in _chunks(list(smiles), self.docking_batch_size):
-            scores, _poses = proxy.dock_batch_qv2gpu(list(chunk))
+            chunk = list(chunk)
+            # Upstream ``dock_batch_qv2gpu`` unpacks ``docking_module_gpu(smiles)``
+            # directly, and that call returns a BARE ``None`` (not a 2-tuple) when a
+            # whole chunk fails prep/docking -- e.g. every RGFN-generated molecule in
+            # the chunk fails RDKit/Meeko conformer embedding. That raises
+            # ``TypeError: cannot unpack non-iterable NoneType`` *inside* the upstream
+            # call, before our ``scores is None`` guard runs, and (unguarded) it kills
+            # a multi-hour AL run over one unlucky chunk. Treat any such whole-chunk
+            # failure as nan-for-the-chunk so the loop drops those molecules rather
+            # than crashing; the loop's all-NaN abort guard still catches a wholesale
+            # backend failure (every chunk nan). Mirrors the GPU differential oracle,
+            # which wraps its own dock call the same way.
+            try:
+                result = proxy.dock_batch_qv2gpu(chunk)
+            except Exception as exc:  # noqa: BLE001 - a bad chunk must not kill the run
+                print(
+                    f"[docking_seh] WARNING chunk of {len(chunk)} failed to dock "
+                    f"({type(exc).__name__}: {exc}); scoring it nan.",
+                    flush=True,
+                )
+                result = None
+            if not (isinstance(result, tuple) and len(result) == 2):
+                # Bare None / malformed return -> whole-chunk failure.
+                out.extend([float("nan")] * len(chunk))
+                continue
+            scores, _poses = result
             if scores is None:
                 # Whole-batch docking failure -> nan for every molecule in it.
                 out.extend([float("nan")] * len(chunk))

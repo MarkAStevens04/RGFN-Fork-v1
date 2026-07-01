@@ -78,13 +78,27 @@ def main() -> None:
         help="output seed CSV path (matches OracleLabeledDataset.seed_csv in the config)",
     )
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--root-dir",
+        type=str,
+        default=None,
+        help=(
+            "Override gin's user_root_dir (where the sampler's run dir/logs land). "
+            "Required on a Balam compute node, where $HOME is read-only: the default "
+            "'experiments' is a repo-relative path that only works on the writable "
+            "login node. Mirrors scripts/active_learning.py."
+        ),
+    )
     args = parser.parse_args()
 
     seed_everything(args.seed)
     # run_name is required by the base config's logger/run-dir macros; the trainer
     # is only used here as a *sampler* (no GFN training happens).
     run_name = f"make_seh_seed/{get_time_stamp()}"
-    gin.parse_config_files_and_bindings([args.cfg], bindings=[f'run_name="{run_name}"'])
+    bindings = [f'run_name="{run_name}"']
+    if args.root_dir is not None:
+        bindings.append(f'user_root_dir="{args.root_dir}"')
+    gin.parse_config_files_and_bindings([args.cfg], bindings=bindings)
 
     # Build the same components the loop uses. The policy is freshly initialised
     # (no .train() call), so these are random in-distribution rollouts = D_0.
@@ -97,6 +111,20 @@ def main() -> None:
     )
     smiles = _sample_unique(trainer, args.n, args.oversample)
     print(f"[seed] sampled {len(smiles)} unique candidates; docking against sEH...", flush=True)
+
+    # Free torch's cached GPU memory before docking so the QuickVina2-GPU subprocess
+    # can allocate on the same GPU (Logs/014). Low risk here (this samples from an
+    # untrained policy — no training footprint), but kept consistent with the loop.
+    try:
+        import gc
+
+        import torch
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
 
     t0 = time.time()
     scores = oracle.score(smiles)

@@ -49,14 +49,14 @@ proxy:
 # blocks + reaction templates (external/setup_rxnflow.sh writes it). The RGFN-specific
 # knobs live in the gin base — these are the RxnFlow equivalents.
 rxnflow:
-  env_dir: data/models/rxnflow_env   # prepared blocks + 71 templates (setup_rxnflow.sh)
-  max_reactions: 4                   # synthesis depth (trajectory length)
+  env_dir: data/models/rxnflow_env   # prepared blocks + 109 real.txt templates (setup_rxnflow.sh)
+  max_reactions: 3                   # synthesis depth == RxnFlow default max_len (Logs/016)
   num_emb: 128
   num_layers: 4
   sampling_tau: 0.9
   learning_rate: 1.0e-4
   print_every: 50
-  action_sampling_ratio: 0.01        # action-space subsampling (RxnFlow's key trick)
+  action_sampling_ratio: 0.02        # action-space subsampling (RxnFlow opt_qed/unidock default)
   # device: auto (cuda if available)
 
 # Shared docking oracle, invoked across the env boundary by scripts/score_batch.py

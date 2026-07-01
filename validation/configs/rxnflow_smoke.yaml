@@ -30,13 +30,13 @@ proxy:
   batch_size: 64
 
 rxnflow:
-  env_dir: data/models/rxnflow_env_smoke   # small block subset (setup_rxnflow.sh --smoke)
+  env_dir: data/models/rxnflow_env   # reuse the same env (tiny budget comes from loop knobs)
   max_reactions: 3
   num_emb: 64
   num_layers: 2
   sampling_tau: 0.9
   print_every: 1
-  action_sampling_ratio: 0.1
+  action_sampling_ratio: 0.02        # RxnFlow default; 0.1+ can destabilize on the debug lib
 
 oracle:
   env: rgfn

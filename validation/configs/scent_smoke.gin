@@ -14,6 +14,12 @@ include 'configs/envs/settings/small.gin'
 beta = 8
 WandbLogger.mode = 'offline'
 
+# Sign-convention-safe diagnostic metrics (see scent_6td3.gin for the why): SCENT's
+# sEH-tuned scaffold/threshold metrics crash on our lower-is-better proxy's +clip
+# failed-value, so use a safe subset (keeps @TrajectoryCost, the cost diagnostic).
+train_metrics = [@StandardGFNMetrics(), @FractionEarlyTerminate(), @TrajectoryCost(), @NumReactions()]
+Trainer.train_metrics = %train_metrics
+
 proxy/gin.singleton.constructor = @LearnedDockingProxy
 train_proxy = @proxy/gin.singleton()
 valid_proxy = %train_proxy

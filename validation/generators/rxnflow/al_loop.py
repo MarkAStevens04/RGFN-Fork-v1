@@ -51,6 +51,25 @@ def _canonical(smiles: str) -> Optional[str]:
     return Chem.MolToSmiles(mol) if mol is not None else None
 
 
+def _free_gpu_cache() -> None:
+    """Return this process's reserved-but-unused GPU memory to the driver before the
+    docking bridge runs. The bridge's QuickVina2-GPU (a subprocess) needs GPU memory,
+    but our torch training holds the card's caching allocator on the same GPU — which
+    starves it (Logs/014: 40 GB → ~1 GB free → every dock ``no_pose``). ``empty_cache()``
+    frees the reserved blocks; the small live model stays resident. Best-effort/no-op
+    without torch/CUDA."""
+    try:
+        import gc
+
+        import torch
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
 class LabelStore:
     """Accumulating ``canonical-SMILES -> label`` store (the dataset ``D``).
 
@@ -107,8 +126,8 @@ class LabelStore:
                 w.writerow([s, y])
 
 
-def extract_route(traj: Dict[str, Any], ctx: Any) -> Dict[str, Any]:
-    """Best-effort synthesis route from one RxnFlow trajectory, in the standard schema
+def extract_route(readable_traj: List[tuple], product_smiles: Optional[str]) -> Dict[str, Any]:
+    """Synthesis route from one RxnFlow trajectory, in the standard schema
     (``glue.active_learning.route`` / ``docs/CANDIDATE_DATASET_FORMAT.md``)::
 
         {"product_smiles": ..., "num_reactions": N,
@@ -116,70 +135,55 @@ def extract_route(traj: Dict[str, Any], ctx: Any) -> Dict[str, Any]:
          "steps": [{"step": 1, "reaction_idx": ..., "reaction_smarts": ...,
                     "reactant": ..., "fragments": [...], "product": ...}, ...]}
 
-    RxnFlow's per-action attribute names are not fully documented, so this reads them
-    defensively: it tries the common fields and degrades to a shorter/partial route
-    rather than crashing the loop. **Flagged for Balam validation** — confirm the
-    action/state attributes against the cloned repo and tighten the field mapping so
-    routes are chemically faithful (``docs/REFACTOR_LOG.md``).
+    Consumes the output of ``SynthesisEnvContext.read_traj`` (validated against the
+    cloned RxnFlow repo, ``src/rxnflow/envs/env_context.py``), which renders a
+    trajectory as an ordered list of ``(state_smiles, action_repr)`` where
+    ``action_repr`` is one of::
+
+        ("FirstBlock", block_smiles)            # the seed building block
+        ("UniRxn", reaction_template)           # unimolecular reaction
+        ("BiRxn", reaction_template, block)     # bimolecular reaction (+ added block)
+        ("Stop",)
+
+    ``state_smiles`` is the molecule *before* each action, so the product of step ``i``
+    is the state recorded at ``i+1`` (and the final reaction's product is the terminal
+    ``product_smiles``). The ``FirstBlock`` seed becomes ``building_block``; each
+    ``UniRxn``/``BiRxn`` becomes a committed reaction step. ``reaction_idx`` is left
+    ``None`` (read_traj exposes the SMARTS template string, not its library index).
 
     Args:
-        traj: one trajectory dict from ``algo.create_training_data_from_own_samples``;
-            expected to hold the final object under ``"result"`` and the (state, action)
-            sequence under ``"traj"``.
-        ctx: the trainer env context (for turning states/actions into SMILES).
+        readable_traj: ``ctx.read_traj(sample["traj"])`` — list of
+            ``(state_smiles, action_repr)`` tuples.
+        product_smiles: the terminal molecule SMILES (``ctx.object_to_log_repr(result)``).
     """
-
-    def _smiles_of(obj: Any) -> Optional[str]:
-        if obj is None:
-            return None
-        if isinstance(obj, str):
-            return obj
-        for attr in ("smiles", "smi"):
-            val = getattr(obj, attr, None)
-            if isinstance(val, str):
-                return val
-        try:  # obj may be an RDKit Mol or a ctx graph
-            return Chem.MolToSmiles(obj if isinstance(obj, Chem.Mol) else ctx.graph_to_obj(obj))
-        except Exception:
-            return None
-
+    states = [obj for obj, _ in readable_traj]
     building_block: Optional[Dict[str, Any]] = None
     steps: List[Dict[str, Any]] = []
-    seq = traj.get("traj") if isinstance(traj, dict) else None
-    if seq:
-        for state, action in seq:
-            if action is None:
-                continue
-            # First building-block pick -> the route seed; subsequent actions that
-            # carry a reaction/template -> committed reaction steps.
-            block = getattr(action, "block", None) or getattr(action, "building_block", None)
-            rxn = (
-                getattr(action, "reaction", None)
-                or getattr(action, "template", None)
-                or getattr(action, "reaction_smarts", None)
-            )
-            if building_block is None and block is not None and rxn is None:
-                building_block = {
-                    "smiles": _smiles_of(block),
-                    "idx": getattr(action, "block_idx", None) or getattr(action, "idx", None),
+    for i, (state_smi, action_repr) in enumerate(readable_traj):
+        if not action_repr:
+            continue
+        kind = action_repr[0]
+        # product after this action = next state's SMILES, or the terminal product.
+        product = states[i + 1] if i + 1 < len(states) else product_smiles
+        if kind == "FirstBlock":
+            building_block = {
+                "smiles": action_repr[1] if len(action_repr) > 1 else None,
+                "idx": None,
+            }
+        elif kind in ("UniRxn", "BiRxn"):
+            steps.append(
+                {
+                    "step": len(steps) + 1,
+                    "reaction_idx": None,  # read_traj gives the SMARTS, not a library index
+                    "reaction_smarts": action_repr[1] if len(action_repr) > 1 else None,
+                    "reactant": state_smi,
+                    "fragments": [action_repr[2]]
+                    if kind == "BiRxn" and len(action_repr) > 2
+                    else [],
+                    "product": product,
                 }
-                continue
-            if rxn is not None:
-                steps.append(
-                    {
-                        "step": len(steps) + 1,
-                        "reaction_idx": getattr(action, "reaction_idx", None)
-                        or getattr(action, "template_idx", None),
-                        "reaction_smarts": rxn
-                        if isinstance(rxn, str)
-                        else getattr(rxn, "smarts", None),
-                        "reactant": _smiles_of(state),
-                        "fragments": [s for s in [_smiles_of(block)] if s],
-                        "product": _smiles_of(getattr(action, "product", None)),
-                    }
-                )
-
-    product_smiles = _smiles_of(traj.get("result")) if isinstance(traj, dict) else None
+            )
+        # "Stop" (and anything else) carries no route content.
     return {
         "product_smiles": product_smiles,
         "num_reactions": len(steps),
@@ -340,44 +344,54 @@ class RxnFlowActiveLearningLoop:
     def _sample_query_batch(self) -> Tuple[List[str], List[Dict[str, Any]]]:
         """Sample unique valid terminal SMILES from the trained policy, with routes.
 
-        Returns parallel lists ``(smiles, routes)``: each route is the synthesis
-        pathway reconstructed from that molecule's trajectory (:func:`extract_route`)."""
+        Uses RxnFlow's own inference sampler (``algo.graph_sampler.sample_inference``),
+        the same call ``RxnFlowSampler`` uses, then renders each trajectory with
+        ``ctx.read_traj`` + ``ctx.object_to_log_repr`` and maps it into the standard
+        route schema via :func:`extract_route`. Sampled in chunks of
+        ``algo.num_from_policy`` (mirrors the generator's ``iter``). Returns parallel
+        lists ``(smiles, routes)``."""
         tr = self.trainer
         n_sample = int(self.query_batch_size * self.sample_oversample)
         tr.model.to(tr.device)
         tr.model.eval()
-        cond_info = tr.task.sample_conditional_information(n_sample, self._it)
-        trajs = tr.algo.create_training_data_from_own_samples(
-            tr.model, n_sample, cond_info["encoding"].to(tr.device), random_action_prob=0.0
-        )
+        chunk = max(1, int(getattr(tr.cfg.algo, "num_from_policy", 64)))
         seen: set = set()
         batch: List[str] = []
         routes: List[Dict[str, Any]] = []
-        for t in trajs:
-            if not t.get("is_valid", True):
-                continue
-            try:
-                smi = Chem.MolToSmiles(tr.ctx.graph_to_obj(t["result"]))
-            except Exception:
-                continue
-            canon = _canonical(smi)
-            if canon is None or canon in seen:
-                continue
-            seen.add(canon)
-            batch.append(canon)
-            try:
-                routes.append(extract_route(t, tr.ctx))
-            except Exception:  # route is provenance — never let it abort sampling
-                routes.append(
-                    {
-                        "product_smiles": canon,
-                        "num_reactions": 0,
-                        "building_block": None,
-                        "steps": [],
-                    }
-                )
-            if len(batch) >= self.query_batch_size:
-                break
+        produced = 0
+        while produced < n_sample and len(batch) < self.query_batch_size:
+            this = min(chunk, n_sample - produced)
+            cond_info = tr.task.sample_conditional_information(this, self._it)
+            samples = tr.algo.graph_sampler.sample_inference(
+                tr.model, this, cond_info["encoding"].to(tr.device)
+            )
+            produced += this
+            for s in samples:
+                if not s.get("is_valid", True):
+                    continue
+                try:
+                    smi = tr.ctx.object_to_log_repr(s["result"])
+                except Exception:
+                    continue
+                canon = _canonical(smi)
+                if canon is None or canon in seen:
+                    continue
+                seen.add(canon)
+                batch.append(canon)
+                try:
+                    readable = tr.ctx.read_traj(s["traj"])
+                    routes.append(extract_route(readable, canon))
+                except Exception:  # route is provenance — never let it abort sampling
+                    routes.append(
+                        {
+                            "product_smiles": canon,
+                            "num_reactions": 0,
+                            "building_block": None,
+                            "steps": [],
+                        }
+                    )
+                if len(batch) >= self.query_batch_size:
+                    break
         return batch, routes
 
     def _write_routes_jsonl(
@@ -423,6 +437,7 @@ class RxnFlowActiveLearningLoop:
             cmd += ["--system", self.system]
         if self.seed_csv:
             cmd += ["--reference-csv", str(self.seed_csv)]
+        _free_gpu_cache()  # let the bridge's QuickVina2-GPU allocate (Logs/014)
         print(f"[RXN-AL] round {rnd}: bridge -> {' '.join(cmd)}", flush=True)
         subprocess.run(cmd, check=True)
         return self._read_labels(lbl_path, batch)

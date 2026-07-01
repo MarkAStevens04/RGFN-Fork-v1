@@ -56,7 +56,10 @@ what we actually ship.
 > `scent/` (cost-aware peer) are implemented — each in its own conda env, driven
 > through an active-learning loop against the shared oracle via the bridge
 > `scripts/score_batch.py` (route-aware via `--routes` for synthesizable entrants);
-> see their READMEs and `Logs/015`/`Logs/016`/`Logs/017`. `rgfn/`, `synflownet/`,
+> see their READMEs and `Logs/015`/`Logs/016`/`Logs/017`. All three can target
+> **either** benchmark: the 6TD3 glue `dvina` differential (`docking_6td3_gpu`) or
+> the classic **sEH** single-target binding reproduction check (`docking_seh`) —
+> pick the `validation/configs/<gen>_{6td3,seh}.*` spec. `rgfn/`, `synflownet/`,
 > `vae_bo/` are still placeholders. See `external/` for each baseline's install
 > script.
 

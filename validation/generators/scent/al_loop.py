@@ -65,6 +65,26 @@ def _canonical(smiles: str) -> Optional[str]:
     return Chem.MolToSmiles(mol) if mol is not None else None
 
 
+def _free_gpu_cache() -> None:
+    """Return this process's reserved-but-unused GPU memory to the driver before the
+    docking bridge runs. The bridge's QuickVina2-GPU (a subprocess) needs GPU memory,
+    but our torch training holds the card's caching allocator on the same GPU — which
+    can starve it (Logs/014: 40 GB → ~1 GB free → every dock ``no_pose``). SCENT's
+    footprint left room in job 69513, but this makes it robust regardless.
+    ``empty_cache()`` frees the reserved blocks; the small live model stays resident.
+    Best-effort/no-op without torch/CUDA."""
+    try:
+        import gc
+
+        import torch
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
 class LabelStore:
     """Accumulating ``canonical-SMILES -> label`` store (the dataset ``D``).
 
@@ -364,6 +384,7 @@ class ScentActiveLearningLoop:
             cmd += ["--system", self.system]
         if self.seed_csv:
             cmd += ["--reference-csv", str(self.seed_csv)]
+        _free_gpu_cache()  # let the bridge's QuickVina2-GPU allocate (Logs/014)
         print(
             f"[SCENT-AL] round {rnd}: bridge (cwd={self.repo_root}) -> {' '.join(cmd)}", flush=True
         )

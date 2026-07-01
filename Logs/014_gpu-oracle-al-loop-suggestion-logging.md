@@ -40,23 +40,30 @@ query batch, β=8, top-16), so this run is a clean diff against entry 012 (job
 
 ## Answer
 
-**The instrumentation and the GPU oracle both work; the run itself was killed by a
-Balam node failure, so the headline cross-round result is pending a resubmit.** The
-standard candidate logging wrote all four artifacts correctly *even through a total
-docking failure* (every row recorded with `score=nan`, `status=no_pose`) — the
-robustness we built it for. But on the compute node (balam009) every one of round
-1's 32 molecules came back `no_pose` (zero poses, the wedged-OpenCL signature),
-and the node then died outright ~1 h later, killing the job mid-round-2. A
-login-node smoke test on a healthy Trillium H100 settles the cause: the *same*
-oracle docks all of those molecules — the drug-sized seed controls (reproducing
-job-006: dvina −2.82 / −1.60 vs ref −2.20 / −1.26) **and** the largest generated
-molecule (MW 801, `n_poses=9`, dvina −1.49). So the failure was the node, not our
-oracle or the molecules' size; no code change was needed to fix it, only a healthy
-node. What the round-1 batch metrics *did* capture is a sharp, quantified picture
-of the size drift entry 011 flagged: mean MW **649** (max 801), QED **0.13**,
-cLogP 5.75, only **6%** Lipinski-passing, yet highly diverse (internal diversity
-0.86, 32/32 modes, novelty 1.0 vs seed). Two robustness gaps the failure exposed
-were then fixed (see below).
+**The GPU-oracle active-learning loop now runs end to end, and it exposed — then
+fixed — a real bug about running a GPU docker inside a GPU training loop.** The
+completed 3-round run (job 69517) grew the labelled set 408 → 483 and the molecules
+RGFN generated dock as **genuine glue candidates**: per-round median differential
+−2.14 / −1.99 / −2.42 (squarely in known-glue territory, matching entry 011's CPU
+median ≈ −2.4), best −4.92, with round 3 scoring 16/26 docked molecules at ≤ −2.0.
+Every round the batch was maximally diverse (32/32 unique, 32 modes, 32 scaffolds,
+novelty 1.0 vs seed), and — as entry 011 warned — heavy and non-drug-like (mean MW
+~630–690, QED ~0.10–0.13), the size drift the reward still needs to counter
+(Objective 2). Each molecule's **synthesis route** was captured (96/96), e.g. a
+β-alanine building block elaborated over 4 reactions.
+
+Getting here took four attempts and surfaced the real lesson. The first three runs
+all failed at round-1 docking with every molecule `no_pose` — first blamed on a
+node (balam009), but it recurred on balam004, which had *passed* a startup dock.
+A controlled login-node reproduction pinned it: **GPU-memory contention**. The GPU
+docker runs QuickVina2-GPU in a *subprocess* that needs GPU memory via OpenCL, but
+after ~1 h of GFN training torch's caching allocator holds the whole A100 (free
+VRAM 40 GB → **1.1 GB**), so every dock fails; `torch.cuda.empty_cache()` before
+docking returns the memory (→ 39.7 GB free) and docking recovers. This is a general
+gotcha for any GPU oracle driven inside a torch training loop, invisible to the
+oracle in isolation (which is why entry 013's standalone test and the Trillium
+smoke test always worked). Three robustness fixes came out of it (below); the
+standard candidate logging, meanwhile, wrote correctly through every failure.
 
 ## Relevance to our Publication
 
@@ -115,10 +122,13 @@ New / changed code (this entry):
   molecule's route (was discarding trajectories); `_score_batch` prefers the
   oracle's `score_detailed()` (GPU oracle's per-pose breakdown) over scalar
   `score()`; `run()` snapshots the seed D_0 for novelty, calls `SuggestionLog`, and
-  forwards batch metrics to the trainer logger. **Robustness fixes (post job 69481):**
-  (a) aborts the loop with a clear error if a whole round's oracle batch is all-NaN
-  (the silent-no-op that wasted round-2 training here); (b) new `system`/`seed`
-  constructor args threaded into the manifest provenance.
+  forwards batch metrics to the trainer logger. **Three robustness fixes from the
+  failed attempts:** (a) `_free_torch_gpu_cache()` — calls `torch.cuda.empty_cache()`
+  after training/sampling and before docking, the actual fix for the GPU-memory
+  contention (prints free VRAM as a diagnostic); (b) aborts the loop with a clear
+  error if a whole round's oracle batch is all-NaN (the silent no-op that wasted
+  round-2 training on the first attempts); (c) new `system`/`seed` constructor args
+  threaded into the manifest provenance.
 - `./glue/datasets/candidates.py` (+ `suggestion_log.py`) — `SuggestionLog` now
   takes/records `system` + `seed` in the manifest (were `null` in this run).
 - `./glue/datasets/__init__.py` — export `SuggestionLog` + the candidate-format API
@@ -127,7 +137,13 @@ New / changed code (this entry):
 Scripts / entry points:
 - `./experiments/active_learning/6td3/submit_al_6td3_gpu.sh` — **this run.** Same
   loop as `submit_al_6td3_pregpu.sh` (entry 012) but GPU oracle; QV2-GPU env
-  (boost libs, `$GNINA`), `--exclude balam008`, OpenCL health gate (entry 013).
+  (boost libs, `$GNINA`), `--exclude=balam008,balam009`, OpenCL health gate (entry
+  013), **plus a pre-flight dock gate** (below).
+- `./experiments/active_learning/6td3/preflight_dock.py` — **new.** Docks 2 seed
+  molecules at job startup and exits non-zero if the node makes 0 poses — catches a
+  node that passes the OpenCL probe but can't actually dock, in ~40 s instead of at
+  round-1 (67 min). (Note: the *main* failure turned out to be GPU-memory contention,
+  fixed in the loop; this gate still guards against genuinely bad nodes.)
 - `./experiments/active_learning/6td3/analyze_suggestions.py` — **new.** Retroactive
   per-round batch metrics from a saved standard `candidates.csv` (re-runs the metric
   functions without re-docking; works on any generator's standard dataset).
@@ -152,23 +168,33 @@ Results (gitignored, on `$SCRATCH`):
   (standard candidate dataset + per-round metrics sidecar), `dataset_round_00{1,2,3}.csv`,
   `top_k.csv`, `phase_timings.csv`, `docking_timings.csv`.
 
-Diagnostic smoke test (login node, no SLURM):
-- `scratchpad/smoke_dock.py` — docked 2 drug-sized seed controls + the smallest
-  (MW 460) and largest (MW 801) round-1 molecules through `Docking6TD3GpuOracle`
-  on a **Trillium H100** (`source ~/bin/rgfn-smoke-env.sh`). All `status=ok,
-  n_poses=9` → the balam009 all-`no_pose` was the node, not the oracle/molecules.
+Diagnostic smoke tests (login node, no SLURM):
+- `scratchpad/smoke_dock.py` — docked seed controls + round-1 molecules (incl. MW
+  801) through `Docking6TD3GpuOracle` on a **Trillium H100**; all `status=ok`,
+  ruling out the oracle/molecule-size as the cause.
+- `scratchpad/mem_contention_test.py` — **the decisive test.** Docks 2 large
+  generated molecules under three GPU states on the login A100: fresh (40 GB free →
+  docks), torch caching-allocator holding memory (1.1 GB free → **0 poses, exact
+  loop signature**), and after `empty_cache()` (40 GB free → recovers). Nails
+  GPU-memory contention as the root cause and `empty_cache()` as the fix.
 
 Job Logs:
-- `/scratch/markymoo/rgfn_runs/al_6td3_gpu-69481.out` / `.err`.
+- `/scratch/markymoo/rgfn_runs/al_6td3_gpu-{69481,69511,69515,69517}.out` / `.err`.
 
-Job: **SLURM job 69481** — balam009, started 2026-06-29 16:31; run dir
-`…/6td3_gpu/2026-06-29_16-31-16/`. Completed round 1 (proxy fit + 62-min GFN train
-+ sample), then **all 32 round-1 docks returned `no_pose`** (`oracle_score` 4.5 min
-of failed retries) → dataset `+0`; killed mid-round-2 GFN training by the Balam
-compute-node outage (~18:40). **Outcome: incomplete — resubmit on a healthy node**
-(no config/code change needed; the post-mortem robustness fixes above just make the
-next failure fail fast and louder). Predecessors job 69479/69480 were cancelled
-during round-1 training to roll in the suggestion-log + standardization changes.
+Jobs (the debugging journey → success):
+- **69479 / 69480** — cancelled during round-1 training to roll in the
+  suggestion-log + candidate-format standardization.
+- **69481** (balam009) — round 1 all `no_pose`; killed mid-round-2 by the Balam
+  node outage (~18:40 2026-06-29). First blamed on the node.
+- **69511** (balam009) — after Balam recovered: round 1 all `no_pose` **again**;
+  the new abort guard fired cleanly (FAILED at 1h05m, no wasted round 2/3). Node
+  passed the startup OpenCL probe, so "bad node" no longer fit.
+- **69515** (balam004) — pre-flight dock gate **passed** at startup, yet round 1
+  still all `no_pose`. This within-node contradiction (docks at startup, fails
+  post-training) is what pointed at GPU-memory contention rather than node health.
+- **69517** (balam004) — **SUCCESS.** With the `empty_cache()` fix: run dir
+  `…/6td3_gpu/2026-06-30_23-43-24/`, 3 rounds, ~3h 16m, `[AL] done`, Top-16 written.
+  Each round freed ~39.7 GB before docking and added ~25 molecules.
 
 ## Relevant Versions
 
@@ -196,35 +222,47 @@ during round-1 training to roll in the suggestion-log + standardization changes.
 
 ## Results
 
-Partial — round 1 only (job 69481 killed by the node outage before round 2 finished).
-The cross-round trend + Top-K await a resubmit on a healthy node.
+Complete 3-round run (job 69517, balam004, run dir `…/2026-06-30_23-43-24/`).
 
-**Round-1 phase timing** (`phase_timings.csv`): fit_proxy 6.2 s · train_gfn **62.0 min**
-· sample_batch 12.8 s · oracle_score 4.5 min (failed docking + 10 retries). Even the
-*failed* docking round was 4.5 min vs entry-012's ~31 min/round CPU docking — once it
-runs on a healthy node the docking phase should collapse as predicted.
+**Per-round trajectory** (`suggestions/batch_metrics.csv` + `candidates.csv`; query
+batch = 32/round, oracle differential lower = better):
 
-**Round-1 docking:** 32/32 molecules `status=no_pose`, `n_poses=0`, `score=nan` →
-dataset `+0` (408→408). All-uniform failure across the MW range = node, not size.
+| round | \|D\| (Δ) | docked | ≤ −2.0 | ≤ −3.0 | median | best | modes | int.div | novelty | MW mean | QED |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 433 (+25) | 25/32 | 14 | 3 | −2.14 | −3.90 | 32 | 0.84 | 1.0 | 675 | 0.12 |
+| 2 | 457 (+24) | 24/32 | 12 | 0 | −1.99 | −2.94 | 32 | 0.87 | 1.0 | 634 | 0.13 |
+| 3 | 483 (+26) | 26/32 | 16 | 5 | −2.42 | −3.86 | 32 | 0.85 | 1.0 | 686 | 0.10 |
 
-**Round-1 batch metrics** (`batch_metrics.csv`; logged despite the docking failure):
+Dataset grew 408 → 483 (+75; 75/96 = 78% dock success — the ~22% failures are large
+multi-fragment molecules, e.g. boronic acids, not a systematic wipeout). Generated
+molecules dock in **known-glue range** (per-round medians −2.0…−2.4, matching entry
+011's CPU ≈ −2.4), maximally diverse (32/32 modes + scaffolds every round, novelty
+1.0), and heavy / non-drug-like (MW ~630–690, QED ~0.10–0.13) — the size drift
+Objective 2's reward term must still address. **Top-16** (`top_k.csv`) best = −4.92
+(`CC[C@@H](CO)Nc1nc(NC(=O)CCc2ccccc2)c2ncn(C)c2n1`, a purine — the CR8/6TD3 warhead
+chemistry), with several ≤ −3.9.
 
-| metric | value | | metric | value |
-|---|---|---|---|---|
-| n_suggested / valid / unique | 32 / 32 / 32 | | mol_weight_mean / max | **649 / 801** |
-| num_modes (Tanimoto<0.7) | 32 | | qed_mean | **0.13** |
-| num_scaffolds | 32 | | clogp_mean | 5.75 |
-| internal_diversity | 0.86 | | rotatable_bonds_mean | 11.8 |
-| novelty_vs_seed | 1.0 | | frac_lipinski_pass | **0.0625** |
+**Phase timing** (`phase_timings.csv`), the headline GPU vs entry-012 CPU result:
 
-Diverse but far from drug-like — the size drift of entry 011 / RGFN §5, now quantified.
+| phase | per round | share |
+|---|---|---|
+| fit_proxy | 3–10 s | <0.3% |
+| train_gfn | **62–64 min** | ~98% |
+| sample_batch | 13–14 s | ~0.3% |
+| oracle_score (GPU dock, 32 mol) | **57–63 s** | **~1.5%** |
 
-**Smoke test on a healthy GPU** (Trillium H100, `scratchpad/smoke_dock.py`), proving
-the oracle and molecules are fine — the run-time failure was balam009:
+Total ~3h 16m. Docking collapsed from entry-012's ~31 min/round (33% of the loop) to
+~1 min/round (**<2%**) — the GPU oracle removes docking as a cost centre; GFN training
+is now ~98% of wall-clock. `[AL] round N: freed torch GPU cache before docking ->
+~39,700 / 40,440 MiB free` each round (the fix; without it, free was 1.1 GB → 0 poses).
 
-| molecule | MW | status | n_poses | vina_t2 | dvina |
-|---|---|---|---|---|---|
-| seed known (ref dvina −2.20) | ~320 | ok | 9 | −10.13 | **−2.82** |
-| seed known (ref dvina −1.26) | ~380 | ok | 9 | −8.51 | **−1.60** |
-| round-1 generated (small) | 460 | ok | 9 | −7.44 | −0.35 |
-| round-1 generated (largest) | 801 | ok | 9 | −9.47 | **−1.49** |
+**Synthesis routes** — 96/96 captured (`routes.jsonl`). Example (`rgfn-000048`, 4
+reactions): building block `NCCC(=O)O` (β-alanine, F55) →[rxn 68 + `O=Cc1ccccc1B(O)O`]
+→ … →[rxn 128 ×3, reductive-amination-type couplings] → the terminal molecule. Every
+step carries its reaction SMARTS index + reactants + product, so a chemist can check
+the route without rerunning anything.
+
+**Root-cause reproduction** (`scratchpad/mem_contention_test.py`, login A100): fresh
+GPU 40 GB free → docks; torch caching-allocator holding memory 1.1 GB free → **0/2
+docked, "Docking attempt #1–10 failed on GPU 0"** (exact loop signature); after
+`torch.cuda.empty_cache()` 40 GB free → docks again. Confirms the diagnosis + fix.

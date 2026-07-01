@@ -70,6 +70,12 @@ conda run -n "${ENV_NAME}" pip install "dgl==${DGL_VER}" -f "${DGL_FIND}"
 echo "[setup_scent] installing SCENT (editable)"
 conda run -n "${ENV_NAME}" pip install -e "${CLONE_DIR}"
 
+# SCENT's logger imports wandb, which still imports `pkg_resources` (setuptools).
+# Python 3.11 + recent pip ship venvs WITHOUT setuptools, and setuptools>=81 removed
+# pkg_resources -> `import rgfn` fails with ModuleNotFoundError. Pin setuptools<81.
+echo "[setup_scent] installing setuptools<81 (wandb needs pkg_resources)"
+conda run -n "${ENV_NAME}" pip install "setuptools<81"
+
 # Some systems need libxrender for RDKit drawing (per SCENT README). Harmless if
 # already present; only attempt via conda when the package manager is available.
 echo "[setup_scent] ensuring xorg-libxrender (RDKit dep, per SCENT README)"

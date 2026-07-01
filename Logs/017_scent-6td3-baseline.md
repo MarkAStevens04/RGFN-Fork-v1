@@ -37,10 +37,18 @@ alongside RGFN's.
 
 ## Answer
 
-[TODO — after the Balam run: state whether RGFN matches/beats SCENT on glue score
-(docking differential), how their diversity compares, and — the point of SCENT — how the
-average synthesis **cost** of the good glues differs, and what that says about whether
-cost-awareness helps or hurts glue quality at equal oracle budget.]
+SCENT's cost-aware generator produces 6TD3 glue candidates on par with our RGFN run and
+the FragGFN baseline, while keeping every molecule synthesizable — so cost-awareness does
+**not** cost glue quality here. Over 3 rounds it generated 96 molecules (all with a
+synthesis route, `has_route=96/96`) with a median docking differential of **−2.12** and a
+best of **−5.81** (the strongest single candidate of any entrant so far), 51% in the
+glue-range (≤ −2.0). The most striking difference is a **beneficial side effect of cost
+guidance**: across rounds the mean molecular weight *fell* (694 → 635 → 579) and QED
+*rose* (0.11 → 0.17 → 0.21) — the reverse of the size-bloat/QED-collapse drift seen in the
+RGFN (entry `011`) and FragGFN (entry `015`) runs. Steering toward cheap, high-yield
+routes appears to pull the generator toward smaller, more drug-like molecules "for free."
+(One seed — a trend to confirm with ≥3 seeds, and by pricing the RGFN/FragGFN routes with
+SCENT's own cost model for a like-for-like cost comparison.)
 
 ## Relevance to our Publication
 
@@ -77,12 +85,9 @@ adopt as our synthesizability metric (its Table 1, up to ≈0.75), tying the com
 
 # Re-creation
 
-> **STATUS: STUB (START mode).** Code is implemented and locally validated by
-> `py_compile` + `bash -n` + a static check that every gin `include` resolves into the
-> SCENT clone, every symbol the adapter imports exists in SCENT's source, and the SMALL
-> library's cost+yield data is present. The `scent` conda env build and GPU docking run
-> on Balam/Trillium. Fill in Results + Answer after the run. Open items in
-> `docs/REFACTOR_LOG.md`.
+> **STATUS: COMPLETE.** Ran end-to-end on Balam (job 69513, balam009, 2 h 03 m,
+> `COMPLETED`). Three fixes were needed during bring-up (setuptools pin, explicit
+> `Trainer` import, sign-safe `train_metrics`) — see "Balam bring-up" below.
 
 ## Relevant Files
 
@@ -132,8 +137,9 @@ Root: repository root unless noted.
 **Results** (git-ignored, on `$SCRATCH`):
 - `/scratch/markymoo/rgfn_runs/experiments/active_learning/scent_6td3/<timestamp>/` —
   per-round `dataset_round_NNN.csv`, `top_k.csv`, and `suggestions/` (standard
-  `candidates.csv` + `manifest.json` + `routes.jsonl`, `batch_metrics.csv`). [TODO — add
-  the concrete run dir + SLURM job id after the run.]
+  `candidates.csv` + `manifest.json` + `routes.jsonl`, `batch_metrics.csv`). Concrete run
+  (job 69513): `…/scent_6td3/2026-06-30_19-46-47/`. SLURM logs:
+  `/scratch/markymoo/rgfn_runs/al_scent_6td3-69513.{out,err}`.
 
 ## Relevant Versions
 
@@ -176,12 +182,70 @@ Relevant files are not yet committed.
 
 ## Results
 
-[TODO — after the run: per-round oracle mean / best / median `dvina`, fraction ≤ −2.0,
-internal diversity, mean synthesis length (`num_reactions`), **mean synthesis cost** of
-the top-k routes, and the side-by-side vs. the RGFN (entry `014`), FragGFN (`015`), and
-RxnFlow (`016`) runs.]
+**Job 69513** (balam009, `COMPLETED`, 2 h 03 m). 3 rounds × 32 query/batch, 300 SCENT
+steps/round, seed `D_0`=408, β=8. Docking succeeded on 90/96 sampled molecules (2 dock
+failures/round — normal). Wall-clock per round: proxy fit 10–17 s, SCENT GFN train
+36–41 min, sample 8–9 s, GPU docking 69–80 s. (SCENT's cost-guidance makes its GFN step
+~7× slower than plain RGFN's ~5 min/round — the dominant cost, as for every entrant.)
 
-### Local validation done this session (no heavy stack)
+**Per-round trend (standard `batch_metrics.csv`):**
+
+| Round | \|D\| | oracle mean (dvina) | best | internal diversity | mean MW | mean QED |
+|---|---|---|---|---|---|---|
+| 1 | 438 (+30) | −2.19 | −5.81 | 0.86 | 694 | 0.11 |
+| 2 | 468 (+30) | −1.94 | −3.65 | 0.88 | 635 | 0.17 |
+| 3 | 498 (+30) | −2.01 | −4.86 | 0.87 | 579 | 0.21 |
+
+MW falls / QED rises across rounds — opposite to the RGFN/FragGFN drift.
+
+**Full 96-candidate set (`candidates.csv`):** median dvina **−2.117**, mean **−2.049**,
+best **−5.807**; **51%** ≤ −2.0, 21% ≤ −3.0; `has_route` = **96/96**; `num_reactions`
+mostly 4 (90), with 3 (2) and 1 (4) — tree-structured routes from the dynamic library.
+
+**Head-to-head (same 6TD3 differential; FragGFN + SCENT on the identical GPU oracle):**
+
+| Entrant | Oracle | median dvina | best | frac ≤ −2.0 | synthesizable | log |
+|---|---|---|---|---|---|---|
+| RGFN | CPU (2-tier gnina) | ≈ −2.4 | −4.7 | 0.64 | ✅ `has_route=1` | `011` |
+| FragGFN | GPU (`docking_6td3_gpu`) | −2.06 | −4.86 | 0.54 | ❌ `has_route=0` | `015` |
+| **SCENT** | GPU (`docking_6td3_gpu`) | **−2.12** | **−5.81** | 0.51 | ✅ `has_route=1` (96/96) | `017` |
+
+> Caveat (same as `015`/`016`): the matched RGFN **GPU** run (entry `014`) died on a
+> wedged node, so the RGFN column is its CPU-oracle run (`011`); FragGFN and SCENT share
+> the identical GPU oracle. A clean RGFN GPU rerun is still the missing apples-to-apples
+> anchor.
+
+SCENT's own per-round synthesis-cost diagnostic (`@TrajectoryCost.forward_mean_cost`) is
+logged to the offline wandb history under the run dir (not the summary). A like-for-like
+"average synthesis cost of the good glues" comparison needs SCENT's cost model applied to
+the RGFN/FragGFN routes too — deferred (Next Experiments).
+
+### Balam bring-up (2026-06-30) — three fixes found running it for real
+Building/validating in the `scent` env surfaced three issues, all fixed:
+1. **`wandb` needs `pkg_resources`** — the py3.11 env shipped `setuptools>=81` (which
+   removed `pkg_resources`), so `import rgfn` (→ its wandb logger) died with
+   `ModuleNotFoundError: pkg_resources`. Fix: pin `setuptools<81` (added to
+   `external/setup_scent.sh`).
+2. **`@Trainer` not registered at gin-parse** — `import rgfn` runs `rgfn/trainer/__init__`
+   which imports `artifacts/logger/metrics/optimizers` but NOT `trainer.py`, so gin saw
+   "No configurable matching 'Trainer'". Fix: the runner now does an explicit
+   `from rgfn.trainer.trainer import Trainer` (exactly what SCENT's own `train.py` does).
+3. **SCENT's sEH-tuned metrics crash on our proxy's sign** — `ScaffoldCost` (via
+   `ScaffoldCostsList`) records any state with `proxy > threshold(=8)` and calls
+   `.molecule` on it *without* a terminal-type guard. Our docking proxy is
+   `higher_is_better=False` and assigns invalid/early-terminal states the worst value
+   `+clip=+10`, which trips `10>8` → `AttributeError` on a `ReactionStateEarlyTerminal`.
+   These are wandb-only diagnostics (not used by the AL comparison, which reads our
+   `batch_metrics` via the bridge), so the configs override `train_metrics` to a
+   sign-safe subset — keeping SCENT's own synthesis-cost diagnostic `@TrajectoryCost`.
+
+**Smoke (mock oracle, `scent_smoke.gin`, login A100) — PASSED end-to-end:** gin parse →
+cost-guided Trainer build → proxy fit (val MSE 0.78 on 408) → GFN train → 4 candidates
+sampled *with routes* → bridge scored 4/4 under the `rgfn` env → standard dataset
+finalized with `has_route=1`, `num_reactions`∈{1,3,4} (tree-structured), `routes.jsonl` +
+medchem descriptors. **Real GPU run: job 69513** on balam009 (3 rounds, `docking_6td3_gpu`).
+
+### Local static validation (pre-Balam)
 - `py_compile` of all new SCENT Python — passed.
 - `bash -n` of `setup_scent.sh` + `submit_scent_6td3.sh` — passed.
 - Static gin-integrity check: every `include` in `scent_{6td3,smoke}.gin` resolves into
