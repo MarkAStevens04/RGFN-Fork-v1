@@ -8,6 +8,7 @@
     4.5,
     5.0,
     5.5,
+    5.68,
     6.0,
     6.5,
     7.0,
@@ -33,13 +34,13 @@
   "child_policy": "reward",
   "prebuild_k": 0,
   "rank_by": null,
-  "wall_s": 104.1,
+  "wall_s": 100.7,
   "summary": {
     "budget_reactions": 100,
-    "n_grid_cells": 117,
-    "n_comparable_cells": 78,
+    "n_grid_cells": 130,
+    "n_comparable_cells": 91,
     "n_pool_limited_cells": 39,
-    "hub_wins_cells": 78,
+    "hub_wins_cells": 91,
     "ratio_min": {
       "tau": 6.5,
       "similarity": 0.3,
@@ -50,7 +51,7 @@
       "best_modes": 25
     },
     "ratio_max": {
-      "tau": 5.5,
+      "tau": 5.68,
       "similarity": 0.9,
       "hub": 1.0309,
       "best": 3.96,
