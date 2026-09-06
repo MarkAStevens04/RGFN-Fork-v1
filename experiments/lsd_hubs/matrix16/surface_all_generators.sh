@@ -21,6 +21,9 @@
 #
 # Usage:  bash experiments/lsd_hubs/matrix16/surface_all_generators.sh [target] [gen ...]
 #         TAUS=4:8:0.5 SIMS=0.3:0.9:0.05 BUDGET=300 bash .../surface_all_generators.sh seh
+#         BUDGET=100 OUTROOT=$M/results/surface_r100 bash .../surface_all_generators.sh seh
+#         (OUTROOT is overridable BECAUSE a re-run at another budget would otherwise clobber
+#          the committed surfaces in place -- same directory, silently different measurement.)
 # Output: results/surface/<cell>/{surface.csv,surface.json,surface.png,surface.pdf}
 set -uo pipefail
 
@@ -37,7 +40,7 @@ GENS=("$@"); [ ${#GENS[@]} -eq 0 ] && GENS=(rgfn scent rxnflow fraggfn)
 TAUS=${TAUS:-4:8:0.5}
 SIMS=${SIMS:-0.3:0.9:0.05}
 BUDGET=${BUDGET:-300}
-OUTROOT=$M/results/surface
+OUTROOT=${OUTROOT:-$M/results/surface}
 
 for gen in "${GENS[@]}"; do
     eval "$(python "$M/manifest.py" --emit "$gen" "$TARGET")" || { echo "skip $gen (manifest)"; continue; }

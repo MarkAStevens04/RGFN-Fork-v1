@@ -1,0 +1,71 @@
+{
+  "tag": "fraggfn_seh",
+  "analysis_dir": "/scratch/markymoo/rgfn_runs/lsdflow/matrix16/fraggfn_seh/sample",
+  "enum_children": "/scratch/markymoo/rgfn_runs/lsdflow/matrix16/fraggfn_seh/enum/enum_children.json",
+  "snapshot": "",
+  "taus": [
+    4.0,
+    4.5,
+    5.0,
+    5.5,
+    6.0,
+    6.5,
+    7.0,
+    7.5,
+    8.0
+  ],
+  "similarities": [
+    0.3,
+    0.35,
+    0.4,
+    0.45,
+    0.5,
+    0.55,
+    0.6,
+    0.65,
+    0.7,
+    0.75,
+    0.8,
+    0.85,
+    0.9
+  ],
+  "budget_reactions": 100,
+  "child_policy": "reward",
+  "prebuild_k": 0,
+  "rank_by": null,
+  "wall_s": 286.6,
+  "summary": {
+    "budget_reactions": 100,
+    "n_grid_cells": 117,
+    "n_comparable_cells": 117,
+    "n_pool_limited_cells": 0,
+    "hub_wins_cells": 115,
+    "ratio_min": {
+      "tau": 8.0,
+      "similarity": 0.3,
+      "hub": 5.0,
+      "best": 5.0,
+      "ratio": 1.0,
+      "hub_modes": 20,
+      "best_modes": 20
+    },
+    "ratio_max": {
+      "tau": 7.0,
+      "similarity": 0.9,
+      "hub": 1.0417,
+      "best": 5.0,
+      "ratio": 4.7998,
+      "hub_modes": 96,
+      "best_modes": 20
+    },
+    "at_operating_point": {
+      "tau": 7.0,
+      "similarity": 0.5,
+      "hub": 1.3158,
+      "best": 5.0,
+      "ratio": 3.8,
+      "hub_modes": 76,
+      "best_modes": 20
+    }
+  }
+}
