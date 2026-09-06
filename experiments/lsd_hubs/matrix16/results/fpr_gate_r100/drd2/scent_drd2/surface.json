@@ -1,0 +1,43 @@
+{
+  "tag": "scent_drd2",
+  "analysis_dir": "/scratch/markymoo/rgfn_runs/lsdflow/matrix16/scent_drd2/sample",
+  "enum_children": "/scratch/markymoo/rgfn_runs/lsdflow/matrix16/scent_drd2/enum/enum_children.json",
+  "snapshot": "/scratch/markymoo/rgfn_runs/experiments/fixed_reward/scent_drd2_5k/seed42/additional_fragments/fragments_4000.json",
+  "taus": [
+    0.345
+  ],
+  "similarities": [
+    0.5
+  ],
+  "budget_reactions": 100,
+  "child_policy": "free_frag",
+  "prebuild_k": 20,
+  "rank_by": "build_score",
+  "wall_s": 14.3,
+  "summary": {
+    "budget_reactions": 100,
+    "n_grid_cells": 1,
+    "n_comparable_cells": 1,
+    "n_pool_limited_cells": 0,
+    "hub_wins_cells": 1,
+    "ratio_min": {
+      "tau": 0.345,
+      "similarity": 0.5,
+      "hub": 1.2821,
+      "best": 3.8077,
+      "ratio": 2.9699,
+      "hub_modes": 78,
+      "best_modes": 26
+    },
+    "ratio_max": {
+      "tau": 0.345,
+      "similarity": 0.5,
+      "hub": 1.2821,
+      "best": 3.8077,
+      "ratio": 2.9699,
+      "hub_modes": 78,
+      "best_modes": 26
+    },
+    "at_operating_point": null
+  }
+}
