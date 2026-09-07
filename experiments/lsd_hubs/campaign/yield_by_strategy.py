@@ -184,7 +184,7 @@ def main():
             mean_route_yield=round(sum(ry) / n, 4),
             median_route_yield=round(sorted(ry)[n // 2], 4),
             mean_step_yield=round(sum(Y[i] for i in allsteps) / len(allsteps), 4),
-            mean_route_len=round(len(allsteps) / n, 2),
+            mean_route_len=round(len(allsteps) / n, 4),
             pct_steps_direct=round(100 * sum(1 for i in allsteps if i in DIRECT) / len(allsteps), 2),
             expected_molecules=round(exp_indep, 2),
             sd_if_independent=round(var_indep ** 0.5, 2),
