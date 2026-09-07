@@ -52,6 +52,9 @@ from validation.lsdflow.metrics.cost.dynamic_amortization import (  # noqa: E402
     load_cost_table_from_snapshot,
 )
 
+# Default only. --out-dir overrides it, because writing into the committed results dir is
+# how a re-run at a different gate silently replaces the numbers a published figure was
+# built from -- and those numbers are the only record of what that figure showed.
 OUT = Path("experiments/lsd_hubs/campaign/results/yield_preference")
 TID = re.compile(r",\s*\d+,\s*(\d+)\)\s*$")
 
@@ -83,20 +86,30 @@ def main():
     ap.add_argument("--similarity", type=float, default=0.5)
     ap.add_argument("--child-policy", default="free_frag", choices=["reward", "free_frag"])
     ap.add_argument("--tag", required=True)
+    ap.add_argument("--out-dir", default=None,
+                    help="where to write; default is the committed results dir. Pass this "
+                         "for any re-run you do not intend to replace published numbers.")
+    # The enumeration lived beside records.csv in the original run layout; the t45 runs
+    # keep it one level up in enum/. Making it an argument means a re-run does not depend
+    # on which layout the cell happens to have.
+    ap.add_argument("--enum-children", default=None,
+                    help="enum_children.json (default: <adir>/enum_children.json)")
     a = ap.parse_args()
 
     adir = Path(a.adir)
+    enum_path = Path(a.enum_children) if a.enum_children else adir / "enum_children.json"
+    out_dir = Path(a.out_dir) if a.out_dir else OUT
     idmap, line_ids, _tx = load_library()
     Y = {i: idmap[i][2] for i in idmap}
     DIRECT = ids_for(line_ids, DIRECT_LINES)
 
     routes = json.loads((adir / "routes.json").read_text())
     cands, comps = _load_candidates(adir, True)
-    enum = _load_enumerated_hubs(adir / "enum_children.json", comps)
+    enum = _load_enumerated_hubs(enum_path, comps)
     cost_table = load_cost_table_from_snapshot(json.loads(Path(a.snapshot).read_text()))
 
     # (hub_key, child_smiles) -> final-step template ids, straight from the enumeration
-    raw = json.loads((adir / "enum_children.json").read_text())
+    raw = json.loads(enum_path.read_text())
     final = {}
     for h in raw["hubs"]:
         for c in h["children"]:
@@ -191,13 +204,13 @@ def main():
                                n_direct_acid_steps=r["n_direct"],
                                reactions="|".join(named_reaction(f"R'(x, 0, {i})") for i in r["ids"])))
 
-    OUT.mkdir(parents=True, exist_ok=True)
-    sf = OUT / f"strategy_yield_{a.tag}.csv"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    sf = out_dir / f"strategy_yield_{a.tag}.csv"
     with sf.open("w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=list(rows[0]))
         w.writeheader()
         w.writerows(rows)
-    df = OUT / f"strategy_yield_detail_{a.tag}.csv"
+    df = out_dir / f"strategy_yield_detail_{a.tag}.csv"
     with df.open("w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=list(detail[0]))
         w.writeheader()
