@@ -125,14 +125,26 @@ def main() -> None:
         )
     elif reward_type == "docking":
         # Per-step GPU docking across the env boundary (score_batch.py under rgfn).
+        # ORIENTATION MUST BE PLUMBED. DockingBridgeReward defaults to lower-is-better
+        # (it negates the raw score), which is right for dvina/Vina and silently fatal for
+        # 6TD3-B: cnn_vs is higher-is-better in roughly [0, 9], so `max(-raw/norm, 0)` maps
+        # every molecule to exactly 0.0 -- a flat reward, no exception, no nan, nothing in
+        # the logs. The LSD-Flow sampling worker already resolves this from targets.py; this
+        # TRAINING path did not, so the flag has to travel from the config.
         reward = DockingBridgeReward(
             oracle=reward_c.get("oracle", "docking_seh"),
             repo_root=str(_REPO_ROOT),
             norm=float(reward_c.get("norm", 1.0)),
             failed_score=float(reward_c.get("failed_score", 0.0)),
             clip=float(reward_c.get("clip", 10.0)),
+            higher_is_better=bool(reward_c.get("higher_is_better", False)),
             oracle_args=dict(reward_c.get("oracle_args", {})),
             workdir=str(run_dir / "reward_bridge"),
+        )
+        print(
+            f"[RXN-FR] docking oracle={reward.oracle} "
+            f"higher_is_better={reward.sign > 0} (sign={reward.sign:+.0f})",
+            flush=True,
         )
     else:
         reward = SEHFrozenReward(
