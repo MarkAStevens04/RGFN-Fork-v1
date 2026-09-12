@@ -35,11 +35,49 @@ esac
 export WANDB_PROJECT=rgfn WANDB_MODE=offline
 export WANDB_CACHE_DIR=$SCRATCH/.cache/wandb WANDB_DIR=$SCRATCH/wandb
 export HF_HOME=$SCRATCH/.cache/huggingface TORCH_HOME=$SCRATCH/.cache/torch PIP_CACHE_DIR=$SCRATCH/.cache/pip
-FR_ROOT_DIR=$SCRATCH/rgfn_runs/experiments
+# ⛔ THIS SCRIPT USED TO BE UNREDIRECTABLE, AND THAT MADE IT A LOADED GUN AIMED AT v1.
+# `FR_ROOT_DIR` was hardcoded and `RUN_NAME` had no override, so every one of the eight other
+# generators honoured OUT_ROOT (submit_baseline.sh) and RGFN alone ignored it. Pointed at seh/42
+# for the v2 campaign it resolved to the LIVE v1 cell, found `train/checkpoints/last_gfn.pt`, and
+# RESUMED from the 5,000-iteration checkpoint -- writing its cleaned `*.resumeclean.pt` into the v1
+# checkpoint directory on the way. Two artifacts destroyed at once: the v1 cell, which a re-run
+# cannot recreate, and the v2 cell, which would silently carry a 5,000-iteration warm start instead
+# of the fresh 10,000-call run arm A declares.
+#
+# Same class as the smoke that wiped a finished cell, and as the resume path that ate
+# s3gfn_seh/seed43's trace. Both were silent and both exited 0.
+FR_ROOT_DIR=${OUT_ROOT:-$SCRATCH/rgfn_runs/experiments}
+
+# THE GUARD MATTERS MORE THAN THE REDIRECT, because a redirect that silently fails to redirect is
+# the whole failure mode above. It fires only when OUT_ROOT was EXPLICITLY set: leaving it unset is
+# legitimate v1 chain usage and still defaults to the v1 tree, but asking for a different tree and
+# naming one inside v1 is always a mistake, so it is refused rather than warned about.
+if [ -n "${OUT_ROOT:-}" ]; then
+  V1_ROOT="$SCRATCH/rgfn_runs/experiments"
+  case "$(readlink -m "$OUT_ROOT")" in
+    "$(readlink -m "$V1_ROOT")"|"$(readlink -m "$V1_ROOT")"/*)
+      echo "FATAL: OUT_ROOT '$OUT_ROOT' is inside the v1 experiments tree ($V1_ROOT)." >&2
+      echo "       Refusing: this would resume from and overwrite a v1 cell." >&2
+      exit 2 ;;
+  esac
+fi
 mkdir -p "$WANDB_CACHE_DIR" "$WANDB_DIR" "$HF_HOME" "$TORCH_HOME" "$PIP_CACHE_DIR" "$FR_ROOT_DIR"
 
-RUN_NAME="fixed_reward/rgfn_${SYSTEM}_5k/seed${SEED}"
+# `_5k` names the ORIGINAL campaign's 5,000-step budget. An arm-A cell is a 10,000-CALL run and is
+# not that, so the v2 driver passes its own RUN_NAME (the pilot uses `_armA`) and the suffix stays
+# only for legacy v1 chains. A v2 artifact sitting under a `_5k` path would be misread by the next
+# reader, which is the same confusion `_armA` was introduced to prevent.
+RUN_NAME=${RUN_NAME:-"fixed_reward/rgfn_${SYSTEM}_5k/seed${SEED}"}
 RUN_DIR="$FR_ROOT_DIR/$RUN_NAME"
+# Say which tree this resolved to, in the log's first lines. The failure this guard exists to stop
+# was invisible precisely because nothing ever printed where the run was writing.
+if [ -n "${OUT_ROOT:-}" ]; then
+  TREE_NOTE="OUT_ROOT set -- redirected"
+else
+  TREE_NOTE="OUT_ROOT unset -- v1 default tree"
+fi
+echo "[tree] FR_ROOT_DIR=$FR_ROOT_DIR  ($TREE_NOTE)"
+echo "[tree] RUN_DIR=$RUN_DIR"
 COMPLETE="$RUN_DIR/fixed_reward/candidates/candidates.csv"
 mkdir -p "$RUN_DIR"
 

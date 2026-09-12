@@ -52,6 +52,7 @@ import argparse
 import csv
 import datetime as _dt
 import json
+import os
 import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -149,8 +150,18 @@ def verify_train(cell: Cell, arm: str) -> Result:
     meta_p = d / "arm_meta.json"
     meta = None
     if not meta_p.is_file():
+        # NAME THE FIX, BECAUSE THIS CONTRACT HAD NO IMPLEMENTER ON THE TRAINING PATH. Until
+        # 2026-09-12 `copy_forward.py` wrote this file for COPIED cells and nothing wrote it for
+        # GENERATED ones, so all 54 `train_plan=generate` cells would have failed here -- on a
+        # missing file, before any substantive check -- and an unverifiable cell is unfreezable and
+        # therefore unacceptable.
+        # A requirement stated only in a docstring is how that happened; pointing at the tool is
+        # what stops it happening again.
         r.add("arm_meta.json", False, "missing -- the runner must record which call count this "
-                                     "checkpoint sits at (see module docstring)")
+                                     "checkpoint sits at. Generated cells: call "
+                                     "tools/write_arm_meta.py from INSIDE the training job "
+                                     '(--pythonhashseed "${PYTHONHASHSEED-}"). Copied cells: '
+                                     "copy_forward.py writes it.")
     else:
         try:
             meta = json.loads(meta_p.read_text())
@@ -421,9 +432,25 @@ def verify_campaign(cell: Cell, arm: str) -> Result:
     return r
 
 
-def _write_marker(cell: Cell, arm: str, stage: str, res: Result) -> Path:
+def _write_marker(cell: Cell, arm: str, stage: str, res: Result):
+    """Stamp the result beside the artifacts. Returns the path, or None if the cell is FROZEN.
+
+    FREEZE BREAKS ITS OWN VERIFIER, AND THIS IS THE THIRD TIME THE PATTERN HAS BITTEN. `chmod -R a-w`
+    is what protects a cell from a stray runner -- and it equally stops THIS function writing
+    `.verified.json` into that same directory. So re-verifying a frozen cell (the thing you most want
+    to do: confirm a finished cell is still good) died with a PermissionError traceback, and every
+    caller read that as "verification FAILED" when in fact every check had passed.
+
+    Same shape as `rsync -a` implying `-p`, which made the first backup of a frozen cell land
+    read-only and broke the SECOND sync: the guard protects the tree and disables the tooling that
+    operates on it, invisibly, one step later.
+
+    A frozen cell that cannot take a fresh marker is NOT a failure -- it was verified and then
+    deliberately sealed, and it necessarily already carries a marker because freeze_cell.sh refuses to
+    freeze a cell without one. So the write is skipped and reported. A write that fails while the
+    directory is still WRITABLE is a different thing and still raises, because that one is real.
+    """
     p = cell.verified_marker(arm) if stage == "train" else cell.enum_dir(arm) / ".verified.json"
-    p.parent.mkdir(parents=True, exist_ok=True)
     prev = {}
     if p.is_file():
         try:
@@ -434,7 +461,13 @@ def _write_marker(cell: Cell, arm: str, stage: str, res: Result) -> Path:
         "verified_at": _dt.datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
         "checks": [{"name": n, "ok": ok, "detail": d} for n, ok, d in res.checks],
     }
-    p.write_text(json.dumps(prev, indent=2, sort_keys=True))
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(prev, indent=2, sort_keys=True))
+    except PermissionError:
+        if not os.access(p.parent, os.W_OK):
+            return None          # frozen: expected, and the existing marker still stands
+        raise                    # writable but unwritable -> genuinely broken, do not swallow
     return p
 
 
@@ -474,7 +507,11 @@ def main() -> int:
             if res.ok:
                 if not a.no_marker:
                     p = _write_marker(cell, a.arm, stage, res)
-                    print(f"  -> ACCEPTED, marker at {p}")
+                    if p is None:
+                        print("  -> ACCEPTED (cell is FROZEN, so its existing marker was "
+                              "not refreshed -- checks all passed)")
+                    else:
+                        print(f"  -> ACCEPTED, marker at {p}")
                 else:
                     print("  -> would be ACCEPTED (marker suppressed)")
             else:

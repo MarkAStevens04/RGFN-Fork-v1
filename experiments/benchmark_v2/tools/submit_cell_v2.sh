@@ -80,9 +80,20 @@ if ! python "$TOOLS/verify_cell.py" --cell "$GEN/$TGT/$SEED" --arm "$ARM" --stag
     python "$TOOLS/verify_cell.py" --cell "$GEN/$TGT/$SEED" --arm "$ARM" --stage train --no-marker 2>&1 | sed -n '/FAIL/p'
     exit 1
 fi
+# NOT FROZEN IS A REFUSAL, NOT A WARNING. This warned and proceeded, one block below a verification
+# check that exits 1 -- so verification was a gate and freezing was advice. Two things follow, and
+# both are the failure this campaign exists to prevent: a run could build on a checkpoint another
+# process can still overwrite mid-run, and an unfrozen cell is by construction one that has not been
+# backed up, since accept_cell.sh is the only thing that freezes and it backs the cell up first. So
+# proceeding on a warning meant building on an artifact whose only copy sits on a purge-eligible
+# filesystem. A warning is exactly the guard shape that has already failed this project twice.
 if [ "$FROZEN" != true ]; then
-    echo "WARNING: $TRAIN_DIR is not frozen. Another process can still overwrite this checkpoint"
-    echo "         and its trace mid-run. Freeze it: $TOOLS/freeze_cell.sh $GEN/$TGT/$SEED --arm $ARM"
+    echo "ERROR: $TRAIN_DIR is not frozen; refusing to build on it."
+    echo "  An unfrozen cell can be overwritten mid-run, and has not been backed up -- freezing"
+    echo "  happens only at the end of accept_cell.sh, after the backup is content-verified."
+    echo "  Accept it first (LOGIN NODE -- /project is not mounted on compute):"
+    echo "    $TOOLS/accept_cell.sh $GEN/$TGT/$SEED --arm $ARM"
+    exit 1
 fi
 
 # Resolve the checkpoint and the config the run actually used, from the cell's own artifacts rather

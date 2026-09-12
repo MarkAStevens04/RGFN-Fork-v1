@@ -450,8 +450,24 @@ def _print_table(cells: List[Cell], arm: str) -> None:
             f"{c.train_plan:<9}{(rows if rows is not None else '-'):>9}  {c.status(arm)}"
         )
     n = len(cells)
-    done = sum(1 for c in cells if c.status(arm) in ("verified", "frozen"))
-    print(f"\n{done}/{n} accepted (verified or frozen) on arm {arm}")
+    # ACCEPTED MEANS FROZEN, AND `verified` IS NOT ACCEPTED. A cell whose checks pass but which has
+    # not been backed up and frozen was being counted in a headline that prints the word "accepted"
+    # -- so the one number an operator reads asserted a cell was safe while its only copy sat on a
+    # purge-eligible filesystem. Acceptance now has exactly one writer, accept_cell.sh, which backs
+    # the cell up, content-verifies the backup, records it and only then freezes; so `frozen` is the
+    # only status that can mean "done", and counting `verified` alongside it would re-open the hole
+    # one layer above the gate that closes it.
+    #
+    # Keeping the two distinct also keeps two different operator actions distinct: `verified` means
+    # "checks pass, awaiting a login-node backup sweep" -- mechanical -- while `unverified` /
+    # `no-trace` / `short-trace` mean "investigate". Collapsing them would make a sweep look like a
+    # diagnosis.
+    done = sum(1 for c in cells if c.status(arm) == "frozen")
+    awaiting = sum(1 for c in cells if c.status(arm) == "verified")
+    print(f"\n{done}/{n} ACCEPTED (backed up, verified and frozen) on arm {arm}")
+    if awaiting:
+        print(f"{awaiting} verified but NOT accepted -- checks pass, awaiting backup + freeze. "
+              f"Run: experiments/benchmark_v2/tools/accept_cell.sh --all --arm {arm}  (login node)")
 
 
 def main() -> int:

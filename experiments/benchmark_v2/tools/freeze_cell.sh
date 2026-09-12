@@ -14,6 +14,25 @@
 # runner gets EACCES and dies instead of quietly rewriting six months of compute. This matters most
 # right when the copy-forward step is staging ~40 cells that would otherwise be destroyable.
 #
+# ⛔ FREEZING BREAKS TOOLS THAT NEED TO WRITE, AND THAT IS A DESIGN PROPERTY OF THIS GUARD, NOT BAD
+# LUCK. Three instances in one week, all with the same signature -- the guard works, and disables
+# something one step later, invisibly, so the first run looks fine and the SECOND is broken:
+#
+#   rsync -a implies -p, so the first backup of a frozen cell landed read-only in /project and the
+#       NEXT incremental sync could not write into its own destination. Fixed with --chmod=Du+w,Fu+w.
+#   verify_cell._write_marker could not write .verified.json into the directory this script had just
+#       made read-only, so RE-VERIFYING a frozen cell -- the thing you most want to do to a finished
+#       cell -- died with a PermissionError that every caller read as "verification FAILED", when in
+#       fact every check had passed.
+#   accept_cell.sh had to be ordered backup-before-freeze for the same reason: after the chmod there
+#       is nowhere left to record that the backup happened, which is why that record lives in the
+#       ledger rather than beside the artifacts.
+#
+# SO, BEFORE ADDING ANYTHING THAT FREEZE PROTECTS: ask whether a later tool also needs to WRITE it.
+# If it does, either move that write ahead of the freeze (accept_cell's ordering) or move the record
+# outside the frozen directory (the ledger). A read-only tree is only half a decision; the other half
+# is every tool that touches it afterwards.
+#
 # WHAT IT REFUSES TO DO. Freeze an unverified cell. A read-only wrapper around a broken artifact is
 # worse than no wrapper, because it looks finished. Verification runs first, every time, and a
 # failure aborts before anything is chmod'ed.
