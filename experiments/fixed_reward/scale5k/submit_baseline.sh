@@ -124,6 +124,16 @@ fi
 module load cuda/11.8.0
 source /home/markymoo/miniconda3/etc/profile.d/conda.sh
 export PYTHONUNBUFFERED=1
+# PYTHONHASHSEED IS LOAD-BEARING, AND ITS ABSENCE HAS ALREADY COST A CLEAN GPU RUN. `--seed` alone
+# does not pin a sample -- 377 vs 387 routes at the same seed, 730/730 byte-identical with this set.
+# This launcher never exported it, and job 76229 (s3gfn/seh/43, 2026-09-12) is what that costs: a
+# textbook run -- 10,048 train rows, train_s 632 s, 10 of 11 verification checks green -- rejected
+# on this one field, because for a GENERATED cell verify_cell requires the value and an absent one
+# is a launcher defect rather than the unrecoverable-by-construction case it exempts for COPIED v1
+# cells. Adding it changes nothing retroactively (those cells stay exempt, their value was never
+# recordable) and closes the hole for every future run through this script -- which is 8 of the 9
+# generators.
+export PYTHONHASHSEED=0
 echo "host=$(hostname) gen=$GEN system=$SYSTEM seed=$SEED docking=$DOCKING cfg=$CFG"; nvidia-smi -L || true
 
 # --- docking cells: OpenCL gate + launch the persistent docking server (rgfn env) ----------

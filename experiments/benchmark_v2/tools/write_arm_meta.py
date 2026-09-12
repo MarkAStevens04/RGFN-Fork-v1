@@ -24,13 +24,18 @@ a launcher defect that a re-run repairs in minutes. So this tool records null + 
 verification FAIL, because passing it would assert reproducibility the run does not have. A gate
 you can satisfy by writing "0" is worse than one that fails honestly.
 
-``n_scored_at_checkpoint`` COUNTS phase=="train" ROWS, and never ``max(n_scored)``. ``n_scored`` is
-one cumulative counter shared across phases, and S3-GFN INTERLEAVES its evaluation sample with
-training. Measured end-to-end on job 76229 (s3gfn/seh/43): the finished trace holds 12,048 rows --
-10,048 train + 2,000 eval -- so the overall ``max(n_scored)`` reads 12,048, and even
+``n_train_scored_at_checkpoint`` COUNTS phase=="train" ROWS, and never ``max(n_scored)``.
+``n_scored`` is one cumulative counter shared across phases, and S3-GFN INTERLEAVES its evaluation
+sample with training. Measured end-to-end on job 76229 (s3gfn/seh/43): the finished trace holds
+12,048 rows -- 10,048 train + 2,000 eval -- so the overall ``max(n_scored)`` reads 12,048, and even
 ``max(n_scored)`` restricted to train rows reads 11,048, because 1,000 eval rows land before the
-last train row. The true training budget is the train ROW COUNT, 10,048. Reading either counter
-would overstate every S3-GFN cell's budget and quietly break the arm-A comparison.
+last train row. The true training budget is the train ROW COUNT, 10,048.
+
+THE NAME CARRIES THE UNIT BECAUSE THE OLD ONE DID NOT (renamed from ``n_scored_at_checkpoint``,
+2026-09-12, agreed with the trainer's author). One file, three defensible readings, and a bare
+``n_scored_at_checkpoint`` picks none of them -- which had already caused one bug in the budget
+checkpointer and nearly a second here. ``n_total_scored_at_checkpoint`` retains the cumulative
+figure as a diagnostic so the gap between the two stays visible rather than being thrown away.
 
 Usage (from inside the job, after the run completes):
     python experiments/benchmark_v2/tools/write_arm_meta.py \
@@ -50,26 +55,44 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from copy_forward import _final_checkpoint  # noqa: E402  the naming heuristic, not a second guess
+from copy_forward import (  # noqa: E402  the naming heuristic, not a second guess
+    _final_checkpoint,
+)
 from inventory_v1_cells import CKPT_GLOBS, best_trace  # noqa: E402
 
 
-def build(run_dir: Path, gen: str, target: str, seed: int, arm: str, budget: int,
-          hashseed: str | None, job_id: str | None, launcher: str | None) -> dict:
+def build(
+    run_dir: Path,
+    gen: str,
+    target: str,
+    seed: int,
+    arm: str,
+    budget: int,
+    hashseed: str | None,
+    job_id: str | None,
+    launcher: str | None,
+) -> dict:
     t = best_trace(run_dir) or {}
     # DEDUPLICATED: the per-generator glob lists OVERLAP by design. S3-GFN's are
     # ["*/model_state*.pt", "*/*.pt", ...], so any file matching the first also matches the second
     # and a naive `+=` would report n_checkpoints twice its true value -- a count that later reads
     # as "this cell checkpointed more often than it did".
-    rels = sorted({str(p.relative_to(run_dir))
-                   for g in CKPT_GLOBS.get(gen, [])
-                   for p in run_dir.glob(g) if p.is_file()})
+    rels = sorted(
+        {
+            str(p.relative_to(run_dir))
+            for g in CKPT_GLOBS.get(gen, [])
+            for p in run_dir.glob(g)
+            if p.is_file()
+        }
+    )
 
     meta = {
         "arm": arm,
         "budget_calls": budget,
         # train ROWS -- see the module docstring. Never max(n_scored).
-        "n_scored_at_checkpoint": t.get("train_rows") or t.get("n_scored"),
+        "n_train_scored_at_checkpoint": t.get("train_rows") or t.get("n_scored"),
+        # the cumulative counter, kept as a DIAGNOSTIC so the gap between them stays visible.
+        "n_total_scored_at_checkpoint": t.get("n_scored"),
         "checkpoint": _final_checkpoint(rels),
         "n_checkpoints": len(rels),
         "generator": gen,
@@ -98,20 +121,27 @@ def build(run_dir: Path, gen: str, target: str, seed: int, arm: str, budget: int
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("--run-dir", required=True, type=Path)
     ap.add_argument("--generator", required=True)
     ap.add_argument("--target", required=True)
     ap.add_argument("--seed", required=True, type=int)
     ap.add_argument("--arm", default="a")
     ap.add_argument("--budget", type=int, default=10_000)
-    ap.add_argument("--pythonhashseed", default=None,
-                    help='pass "${PYTHONHASHSEED-}" from the LIVE job env; empty is honest')
+    ap.add_argument(
+        "--pythonhashseed",
+        default=None,
+        help='pass "${PYTHONHASHSEED-}" from the LIVE job env; empty is honest',
+    )
     ap.add_argument("--job-id", default=None)
     ap.add_argument("--launcher", default=None)
-    ap.add_argument("--force", action="store_true",
-                    help="overwrite an existing arm_meta.json that this tool did not write")
+    ap.add_argument(
+        "--force",
+        action="store_true",
+        help="overwrite an existing arm_meta.json that this tool did not write",
+    )
     a = ap.parse_args()
 
     run_dir: Path = a.run_dir
@@ -128,24 +158,46 @@ def main() -> int:
         # Never quietly relabel a COPIED cell as generated: that would erase the one field saying
         # the artifact was not produced here.
         if prev.get("origin") and prev["origin"] != "generated":
-            print(f"REFUSED: {out} already records origin={prev['origin']!r}; "
-                  f"re-run with --force only if you mean to relabel it", file=sys.stderr)
+            print(
+                f"REFUSED: {out} already records origin={prev['origin']!r}; "
+                f"re-run with --force only if you mean to relabel it",
+                file=sys.stderr,
+            )
             return 1
 
-    meta = build(run_dir, a.generator, a.target, a.seed, a.arm, a.budget,
-                 a.pythonhashseed, a.job_id, a.launcher)
-    if not meta["n_scored_at_checkpoint"]:
-        print(f"REFUSED: no trace rows under {run_dir} -- refusing to declare a budget of 0",
-              file=sys.stderr)
+    meta = build(
+        run_dir,
+        a.generator,
+        a.target,
+        a.seed,
+        a.arm,
+        a.budget,
+        a.pythonhashseed,
+        a.job_id,
+        a.launcher,
+    )
+    if not meta["n_train_scored_at_checkpoint"]:
+        print(
+            f"REFUSED: no trace rows under {run_dir} -- refusing to declare a budget of 0",
+            file=sys.stderr,
+        )
         return 1
 
     out.write_text(json.dumps(meta, indent=2))
     print(f"wrote {out}")
-    print(f"  n_scored_at_checkpoint = {meta['n_scored_at_checkpoint']} (train rows)")
+    print(
+        f"  n_train_scored_at_checkpoint = {meta['n_train_scored_at_checkpoint']} (train rows; "
+        f"counter reads {meta['n_total_scored_at_checkpoint']})"
+    )
     print(f"  checkpoint             = {meta['checkpoint']}  ({meta['n_checkpoints']} found)")
-    print(f"  pythonhashseed         = {meta['pythonhashseed']!r}"
-          + ("  <- VERIFICATION WILL FAIL until re-trained with it set"
-             if meta["pythonhashseed"] is None else ""))
+    print(
+        f"  pythonhashseed         = {meta['pythonhashseed']!r}"
+        + (
+            "  <- VERIFICATION WILL FAIL until re-trained with it set"
+            if meta["pythonhashseed"] is None
+            else ""
+        )
+    )
     return 0
 
 
