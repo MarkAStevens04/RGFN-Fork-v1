@@ -801,6 +801,8 @@ project at least once:
 | `total_modes` | a total | capped at the 500-molecule prefix |
 | `sample_s` / any timing component | 0.0 when absent | **absent ≠ zero** — a missing component must be omitted from the total, never written as 0.0, or an untimed stage becomes a free one |
 | durations in prose | `20:10` = 20 min 10 s | on this cluster it is as likely **20 h 10 min**. Always write `19.30 h` |
+| a complete-looking `candidates.csv` | the budget was spent | the file is written at full size regardless. `synformer_drd2/43` scored **6,950 of 10,000** — its search exhausted before its budget did — and passed every downstream check as a complete cell. The **trace row count is the only witness**; label the cell, do not average it in |
+| a `oom-kill` block in a job's `.out` | this job was OOM-killed | node-level dmesg spills into NEIGHBOURING jobs' logs. `ch_sf_drd2_43-74719.out` carries one naming `oom_memcg=.../job_74716`, a different cell. **Check the job id inside the block before believing it** — this produced a confident wrong diagnosis once already |
 
 **The rule:** read the field's writer before quoting its reader. The names lie by omission, and a
 plausible reading of a plausible number is exactly what no re-run will catch.
@@ -838,7 +840,7 @@ verified 2026-09-12:
 
 | generator | what a weight-glob finds | what the artifact actually is |
 |---|---|---|
-| **SynFormer** | **nothing** — zero `.pt` and zero `.ckpt` anywhere under `synformer/` | it is a genetic algorithm; its arm-A artifact is a **population**, `population_checkpoints/pop_10000.csv` (ten `pop_*.csv` per cell). A driver globbing for weights reads a healthy cell as a failed one. It is also exempt from Stage 2 — a population cannot be upsampled |
+| **SynFormer** | **nothing** — zero `.pt` and zero `.ckpt` anywhere under `synformer/` | it is a genetic algorithm; its arm-A artifact is a **population**, `population_checkpoints/pop_10000.csv` (ten `pop_*.csv` per cell, 100 rows each). **The directory sits at the CELL ROOT** — `seed<N>/population_checkpoints/`, NOT under `fixed_reward/`; a check one level deeper reports absence, which has already happened once. A driver globbing for weights reads a healthy cell as a failed one. It is also exempt from Stage 2 — a population cannot be upsampled |
 | **S3-GFN** | three targets' models at the **same path tail** | it hardcodes its run name, so every target writes `<cell>/seed<N>/s3gfn_seh/s3gfn_seh-seed<N>_model.pt`. Only the outermost cell directory carries the truth; keying on basename or immediate parent silently collides three different models, each of which loads fine and produces plausible numbers for the wrong target |
 
 Related but distinct from §8.2: there the field name lies about its *contents*; here the convention
