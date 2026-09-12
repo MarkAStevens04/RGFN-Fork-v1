@@ -120,6 +120,32 @@ rsync -a --info=stats2 $DRY \
     --exclude='core.*' \
     "$SRC/lsdflow/" "$DEST/lsdflow/" || echo "WARNING: tier-2 rsync returned $?"
 
+# --- TIER 3: the competitor matrix -----------------------------------------------------------
+# ADDED 2026-09-12 after finding it had NEVER been backed up. This script's header describes its
+# scope as "the LSD-Flow artifacts", and `lsdflow/` above reads as though it covers them — but the
+# competitor matrix lives in a DIFFERENT tree, `lsdflow_sparrow/`, which no rsync here named. All
+# 106 cells of it existed only on purge-eligible scratch.
+#
+# What is at stake, measured:
+#   multiaiz_pools/  958 M — pools AND the cached MultiAiZ routes, at 4.9-10.3 h of GPU discovery
+#                    PER CELL (173 route files). Losing this means re-running all of Stage 3 to
+#                    recover numbers that already exist.
+#   results/         1.4 G — every greedy_frontier.csv (185) and select_frontier.csv (295), the
+#                    saturation pre-flights, UNCERTIFIED_R100_BOUNDS.json, and the pre-re-price
+#                    greedy tarball. These ARE the published numbers.
+#   stage2/          43 M  — upsample_log.json per cell; the source of every oracle-call figure.
+#
+# NO NAME FILTER, deliberately. 2.4 G against ~895 G free does not justify a clever rule, and a
+# clever rule is what made the tier-1 include list silently omit trace.csv, routes.jsonl and
+# timing.json — the independent witnesses for those same numbers. A filter that matches nothing
+# still exits 0.
+for T in lsdflow_sparrow stage2; do
+    [ -d "$SRC/$T" ] || { echo "note: $SRC/$T absent, skipping"; continue; }
+    rsync -a --info=stats2 $DRY \
+        --exclude='core.*' \
+        "$SRC/$T/" "$DEST/$T/" || echo "WARNING: tier-3 rsync ($T) returned $?"
+done
+
 echo
 echo "=== done ==="
 du -sh "$DEST" 2>/dev/null
