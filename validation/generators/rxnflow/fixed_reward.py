@@ -157,6 +157,18 @@ class DockingBridgeReward:
     the task → ``exp(value·β)``), frees torch's GPU cache before each dock (Logs/014), and
     caches results per canonical SMILES. See the FragGFN twin for the full rationale."""
 
+    # ONE NAME, TWO MEANINGS -- THE SHADOWING BELOW IS AVOIDED DELIBERATELY.
+    # This attribute describes the OUTPUT: the recorded value is clip(sign*raw/norm), which is
+    # higher-is-better for every target, always True. The __init__ argument of the SAME NAME
+    # describes the RAW INPUT, and is False for dvina/Vina. They are not the same fact and they
+    # disagree on every existing docking config.
+    #
+    # So the constructor argument is stored as `self.sign`, NOT as `self.higher_is_better`. The
+    # obvious tidy-up -- assigning it to the matching name -- would overwrite this attribute with
+    # the raw orientation. ScentFixedRewardRun.run reads it
+    # (validation/generators/scent/fixed_reward.py:103) and sorts top-k with
+    # `reverse=higher_is_better` at line 188, so the flip would make every lower-is-better cell
+    # select the WORST 100 molecules instead of the best, silently. Do not "fix" the naming.
     higher_is_better = True  # the recorded VALUE (clip(-raw/norm)) is higher-is-better
 
     def __init__(
