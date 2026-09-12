@@ -60,6 +60,13 @@ class RGFNAdapter(GFNAdapter):
         # emits {"value", "raw_score"} exactly like SCENT's DockingBridgeProxy, so one component name
         # serves both. Surrogate targets leave this None and the proxy value is the gate value.
         # See validation/lsdflow/adapters/workers/_docking for the two-column contract.
+        # 6TD3-B is DELIBERATELY NOT in this tuple, and the omission is load-bearing rather than an
+        # oversight. This asks "does the GATE read a different column than the training reward?" --
+        # true for 6TD3/ClpP, whose reward is clip(-vina) while the bar is on raw Vina. 6TD3-B's
+        # reward IS cnn_vs and its gate is cnn_vs at 6.718, so the gated column is the proxy value
+        # itself and this must stay None. (The separate "is it a docking target" question DOES
+        # include 6td3b -- see _DOCKING_REWARDS in workers/scent_worker.py. One literal used to
+        # answer both, which is how a new target lands right on one and wrong on the other.)
         self.gate_component = "raw_score" if reward_name in ("6td3", "clpp") else None
         self.device = _resolve_device(device)
 

@@ -96,7 +96,10 @@ def _build_reward(reward_name, reward_c, device, work_dir=None):
         return DRD2FrozenReward(
             model_path=reward_c["model_path"], clip=float(reward_c.get("clip", 10.0))
         )
-    if reward_name in ("6td3", "clpp"):
+    # 6td3b included: it IS a docking target and reaches gnina through the same cross-env bridge.
+    # Its reward is cnn_vs (CNNscore x CNNaffinity), gate 6.718, HIGHER-is-better -- which is why it
+    # belongs here but NOT in the separate "gate reads a different column than the reward" set.
+    if reward_name in ("6td3", "6td3b", "clpp"):
         # Docking: reach the oracle across the env boundary with the SAME bridge this generator
         # trained against, so the recovered flow terms stay comparable to the sampled DAG. The
         # bridge talks to the persistent docking server over RGFN_DOCK_SOCKET; _docking.require_socket
