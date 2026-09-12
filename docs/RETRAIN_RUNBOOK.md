@@ -625,6 +625,30 @@ check to pass on bad data — and check *that* instead.
 
 ---
 
+
+### 6.10 A check that cannot fail is not evidence — ask what it would look like if the thing were broken
+
+Three assertions were made and withdrawn on 2026-09-12, all by careful people, all on checks that
+**had no failing branch**:
+
+| the check | why it could not have failed |
+|---|---|
+| "`unaccounted_s` is 0.0 and `phases` sums exactly to `total_s`, so these cells are trustworthy" | `phases` held exactly ONE key. A single-phase file's residual is 0.0 **by construction** and its sum matches **by construction**. Both statements true, neither evidence |
+| "no `population_checkpoints/` directory exists" | the glob looked one level too deep. A glob under the wrong parent cannot find the directory whether or not it is there |
+| "the Stage-2 surcharge is 3.4x" | `asked` is cumulative, so summing it as if incremental **cannot come out small** |
+
+The common shape is not carelessness about the measurement. It is that nobody asked *what this check
+would print if the thing it tests were broken.* When the answer is "the same thing", the check is
+decoration.
+
+**Before recording any verification as passed, state its failing case.** If you cannot name an input
+that makes it fail, it is not a check — find one that distinguishes, or say plainly that the property
+is unverified. A negative result is worth stating only when a positive one was possible.
+
+Corollary, learned the same day: **`unaccounted_s` is a detector only where `phases` has more than one
+entry to sum.** Same field, same value, opposite meanings depending on how many phases exist
+(SynFormer 0.0 = nothing separated; FragGFN 19.1 = an honest 10% residual).
+
 ## 7. Build items — before any cell launches
 
 ### 7.1 6TD3-B: reward and gate are both `cnn_vs` at 6.718 (settled 2026-08-28)
@@ -835,6 +859,7 @@ project at least once:
 | `train_s: 0.0` (`timing.json`) | training was free / instant | **the resume path ran and no training happened.** `run_s3gfn_fixed.py:344` writes `train_s = 0.0` when it finds a checkpoint and skips straight to sampling. **9 of the 54 copied v2 cells record it** — 8 of the 9 S3-GFN cells plus `saturn_clpp_s43`. Only `s3gfn_seh_s44` carries a real S3-GFN training cost (598.959 s) |
 | `phases` keys across generators | one schema | **four, and only 21 of the 54 copied cells carry a directly readable training cost.** Counted 2026-09-12 — **21** `train_s` real (reinvent/s3gfn/saturn/tango); **9** `train`/`sample`, no suffix (FragGFN) — recoverable by a mapper; **9** whose only phase key is `total_run_s` (SynFormer) — a total with **no train/sample split**, so a mapper does NOT recover a training cost (and note the two names: the top-level field is `total_s`, `total_run_s` is a key *inside* `phases`; citing the wrong one has already propagated two hops); **9** `train_s: 0.0` (see the row above); **6** with **no `timing.json` at all** (Saturn seh + drd2 — its clpp cells have one, unexplained). Keep MISSING and MISMATCHED apart: one is a parsing problem, the other a measurement never taken, and no re-run recovers the second |
 | SynFormer's `unaccounted_s: 0.0` | the breakdown is complete | everything is in **one bucket**. `phases` holds only `total_run_s`, so nothing is unaccounted because nothing was separated |
+| `total_s` | what the cell cost to produce | **setup is outside the bracket.** `run_s3gfn_fixed.py:330-331` constructs `SynthSmilesTrainer(...)` and only THEN sets `run_t0`, so loading the 200k-block `zincfrag_hb105` env is untimed — job 76229 spent **6+ minutes** in setup against a recorded `total_s` of 618 s for the whole cell. `run_reinvent_fixed.py:316` has the same shape. This applies to **all 21 otherwise-good cells**, and because `run_t0` is the TOTAL timer it is not only `train_s` that excludes it. "S3-GFN trains in ten minutes" and "an S3-GFN cell takes ten minutes" are different claims and the file supports only the first. Not uniform across runners — check where `run_t0` sits before quoting any cell cost |
 | `total_s` vs its own `phases` | the phases sum to the total | not necessarily. `saturn_clpp_s43` reads `total_s` 10,264 s against phases summing to **47 s** — `unaccounted_s` 10,217, i.e. **99.5% of the run is outside the accounting**. Check `unaccounted_s` before quoting any per-phase cost |
 
 **The rule:** read the field's writer before quoting its reader. The names lie by omission, and a
