@@ -768,6 +768,35 @@ none.
 
 ---
 
+### 7.7 There is no v2 TRAINING driver — this is what actually gates the launch
+
+`submit_cell_v2.sh` begins by *verifying* that a cell's `train/` already exists; it runs
+sample → enumerate → campaign. **Nothing in `benchmark_v2/` trains a production cell.** Cells still
+train in the v1 layout and reach v2 through `copy_forward`. Verified 2026-09-12:
+
+| generator | launcher | can it write into a v2 tree? |
+|---|---|---|
+| fraggfn, rxnflow, scent, reinvent, saturn, tango, synformer, s3gfn (**8 of 9**) | `scale5k/submit_baseline.sh` | **yes** — line 101 is `FR_ROOT_DIR=${OUT_ROOT:-$SCRATCH/rgfn_runs/experiments}` |
+| **RGFN** | `scale5k/submit_rgfn.sh` | **no** — line 38 hardcodes `FR_ROOT_DIR=$SCRATCH/rgfn_runs/experiments` and line 41 derives `RUN_NAME` from (system, seed) with no override. Pointed at seh/42 it resolves to the **live v1 cell** and resumes from its 5,000-iteration checkpoint |
+
+**The pilot trainer is not the answer and says so itself.** `benchmark_v2/pilot/submit_pilot_train.sh`
+covers `scent|rgfn` only, `seh|drd2` only for RGFN, and requires a hand-computed `N_ITERS`; its own
+header states that approximate placement "is NOT adequate for the production campaign, which must
+checkpoint on the trace counter." That prerequisite is now met — `_trace.py` is wired into all three
+reaction-GFNs (§7.2) — so the trainer can be promoted rather than replaced.
+
+**Three things to build, in order:**
+1. Give `submit_rgfn.sh` the `OUT_ROOT` + run-name override the other eight already have, plus the
+   pilot's refuse-if-inside-v1 guard. One generator, and it is the one whose v1 cells a mistake
+   would overwrite.
+2. Promote the pilot trainer to production: all nine generators, all four targets, budget placed by
+   the trace counter rather than by a hand-set `N_ITERS`.
+3. A driver that walks `grid.csv` and submits cells — none exists; `manifest.py --list` already emits
+   the cell list it should consume.
+
+Until (1) and (2) exist, **no phase-1 cell can be trained into `benchmark_v2` at all.** This is a
+larger gap than the 6TD3-B configs, which only block phase 2.
+
 ## 8. Hazards
 
 ### 8.1 Re-invoking a generator runner OVERWRITES that cell's outputs
