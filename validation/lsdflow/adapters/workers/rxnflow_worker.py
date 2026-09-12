@@ -66,6 +66,24 @@ _RXN = (RxnActionType.UniRxn, RxnActionType.BiRxn)
 ILLEGAL = -75.0
 
 
+def _target_higher_is_better(reward_name: str) -> bool:
+    """Reward orientation, from the ONE source of truth rather than a second copy.
+
+    ``matrix16/targets.py`` already declares this per target and is stdlib-only, so it imports
+    cleanly from the rxnflow env. Resolving it here means the reward's orientation and the gate's
+    can never disagree -- which matters because disagreeing is SILENT: a higher-is-better raw score
+    run through the default negation clamps every molecule to 0.0 and the run trains against a
+    constant with nothing raised.
+    """
+    import sys as _sys
+    _mtx = str(REPO_ROOT / "experiments" / "lsd_hubs" / "matrix16")
+    if _mtx not in _sys.path:
+        _sys.path.insert(0, _mtx)
+    from targets import get_target  # raises on an unknown target, deliberately
+
+    return bool(get_target(reward_name).higher_is_better)
+
+
 def _set_if(cfg, dotted, value):
     if value is None:
         return
@@ -115,6 +133,10 @@ def _build_reward(reward_name, reward_c, device, work_dir=None):
             workdir=str(work_dir) if work_dir else None,
             norm=float(reward_c.get("norm", 1.0)),
             clip=float(reward_c.get("clip", 10.0)),
+            # Resolved from targets.py, NOT from the config, so the reward's orientation cannot
+            # disagree with the gate's. Getting this wrong is silent: a higher-is-better raw score
+            # under the default negation maps every molecule to 0.0 and trains against a constant.
+            higher_is_better=_target_higher_is_better(reward_name),
             oracle_args=dict(reward_c.get("oracle_args", {}) or {}),
         )
     raise SystemExit(f"[rxnflow_worker] reward '{reward_name}' not wired.")
