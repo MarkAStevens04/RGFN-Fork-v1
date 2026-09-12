@@ -53,6 +53,7 @@ import glue  # noqa: F401  (side effect: registers our gin components / oracles)
 from glue.datasets.candidates import CandidateDataset
 from glue.metrics.dataset_metrics import batch_metrics
 from glue.oracles import (
+    Docking6TD3BGpuOracle,
     Docking6TD3GpuOracle,
     Docking6TD3Oracle,
     DockingClpPOracle,
@@ -64,6 +65,10 @@ from glue.oracles import (
 # where practical so logs/provenance line up across the pipeline.
 ORACLES = {
     "docking_6td3_gpu": Docking6TD3GpuOracle,
+    # 6TD3-B: same docking + poses as docking_6td3_gpu, reward is gnina cnn_vs
+    # (CNNaffinity x CNNscore), HIGHER is better. The cross-env bridges reach the
+    # oracle only through this table, so an absent entry is an argparse rejection.
+    "docking_6td3b_gpu": Docking6TD3BGpuOracle,
     "docking_6td3": Docking6TD3Oracle,
     "docking_seh": DockingSEHOracle,
     "docking_clpp": DockingClpPOracle,

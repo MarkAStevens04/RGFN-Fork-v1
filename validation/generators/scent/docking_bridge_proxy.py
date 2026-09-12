@@ -62,6 +62,7 @@ class DockingBridgeProxy(CachedProxyBase[ReactionState]):
         repo_root: str,
         norm: float = 1.0,
         failed_score: float = 0.0,
+        higher_is_better: bool = False,
         conda_env: str = "rgfn",
         oracle_args: Optional[Dict] = None,
         workdir: Optional[str] = None,
@@ -71,6 +72,13 @@ class DockingBridgeProxy(CachedProxyBase[ReactionState]):
         self.repo_root = Path(repo_root)
         self.norm = float(norm)
         self.failed_score = float(failed_score)
+        # RAW ORIENTATION -- see the twin in validation/generators/rxnflow/fixed_reward.py. The
+        # transform below negates the raw score, which is right for dvina and Vina and catastrophic
+        # for 6TD3-B: its reward is gnina's cnn_vs, HIGHER is better, roughly [0, 9], so an
+        # unconditional `max(-raw/norm, 0)` maps every molecule to exactly 0.0 and trains the policy
+        # against a flat reward without raising anything. Default False keeps every existing config
+        # bit-identical; a higher-is-better target must SAY so.
+        self.sign = 1.0 if higher_is_better else -1.0
         self.conda_env = conda_env
         self.oracle_args = dict(oracle_args or {})
         self.workdir = Path(workdir) if workdir else (self.repo_root / "reward_bridge_scent")
@@ -130,7 +138,8 @@ class DockingBridgeProxy(CachedProxyBase[ReactionState]):
             if raw != raw:  # nan
                 out.append({"value": self.failed_score, "raw_score": float("nan")})
             else:
-                out.append({"value": max(-float(raw) / self.norm, 0.0), "raw_score": float(raw)})
+                out.append({"value": max(self.sign * float(raw) / self.norm, 0.0),
+                            "raw_score": float(raw)})
         return out
 
     def _dock(self, smiles: List[str]) -> List[float]:

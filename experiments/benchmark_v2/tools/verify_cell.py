@@ -343,6 +343,42 @@ def verify_campaign(cell: Cell, arm: str) -> Result:
               f"{n_rxn:,}/{n_child:,} = {frac:.4f} over {n_hubs:,} hubs"
               + ("" if frac >= 1.0 else "  <- a partial artifact prices SOME children at their hub"))
 
+    # The walked hubs' depth distribution and the depth-0 mode share are a REQUIRED per-cell output
+    # (benchmark_v2 README), because `--pool all` raises depth-0 exposure and depth-0 catalogue
+    # picking is the metric's named degenerate optimum. A cell without them cannot answer "was this
+    # library diversified off built intermediates or off bought blocks?".
+    #
+    # This is the hard gate the campaign deliberately does NOT apply: by the time run_campaign knows,
+    # it has already done hours of work, and a validator that kills a good job gets switched off.
+    # Here re-running costs nothing, so here it is fatal. run_campaign records `depth_provenance`
+    # precisely so this check reads a marker rather than inferring from nulls -- an absent field and
+    # a legitimately-null one are different facts.
+    summ = cell.results_dir(arm) / "summary.json"
+    if not summ.is_file():
+        r.add("depth provenance", False, f"no summary.json at {summ}")
+    else:
+        try:
+            s = json.loads(summ.read_text())
+        except Exception as e:  # noqa: BLE001
+            s = {}
+            r.add("depth provenance", False, f"summary.json unreadable: {e}")
+        if s:
+            prov = s.get("depth_provenance")
+            dm = (s.get("depth_mix") or {}).get("hub_batching") or {}
+            if prov is None:
+                r.add("depth provenance", False,
+                      "summary.json predates the depth_provenance marker -- re-run the campaign "
+                      "stage so the required depth output is evidenced rather than assumed")
+            elif prov != "ok":
+                r.add("depth provenance", False, prov)
+            elif s.get("walked_depth_hist") is None:
+                r.add("depth provenance", False,
+                      "depth_provenance says ok but walked_depth_hist is null -- contradictory")
+            else:
+                r.add("depth provenance", True,
+                      f"walked {s['walked_depth_hist']}, "
+                      f"depth-0 modes {dm.get('depth0_mode_frac')}")
+
     # §6.3 recipes exist AND belong to this run.
     #
     # THREE STATES, NOT TWO -- and the third is the one that matters. "This run promoted nothing, so

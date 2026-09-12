@@ -166,6 +166,7 @@ class DockingBridgeReward:
         norm: float = 1.0,
         failed_score: float = 0.0,
         clip: float = 10.0,
+        higher_is_better: bool = False,
         conda_env: str = "rgfn",
         oracle_args: Optional[Dict] = None,
         workdir: Optional[str] = None,
@@ -175,6 +176,15 @@ class DockingBridgeReward:
         self.norm = float(norm)
         self.failed_score = float(failed_score)
         self.clip = float(clip)
+        # RAW ORIENTATION. The value transform NEGATES the raw score, because both docking targets
+        # this bridge was written for are lower-is-better (dvina, Vina). 6TD3-B is not: its reward is
+        # gnina's cnn_vs (CNNscore x CNNaffinity, gate 6.718), HIGHER is better, in roughly [0, 9].
+        # Left unconditional, `max(-raw/norm, 0)` maps EVERY 6TD3-B molecule to exactly 0.0 -- a
+        # perfectly flat reward, no error raised, and a GFlowNet that trains for 320,000 oracle calls
+        # against a constant. Default stays False so every existing config behaves bit-identically;
+        # a higher-is-better target must SAY so. RGFN's OracleRewardProxy already generalised this
+        # ("sign = +1 if higher_is_better else -1"); these two bridges never did.
+        self.sign = 1.0 if higher_is_better else -1.0
         self.conda_env = conda_env
         self.oracle_args = dict(oracle_args or {})
         self.workdir = Path(workdir) if workdir else (self.repo_root / "reward_bridge")
@@ -220,7 +230,7 @@ class DockingBridgeReward:
     def _value(self, raw: float) -> float:
         if raw is None or raw != raw:
             return self.failed_score
-        return max(-float(raw) / self.norm, 0.0)
+        return max(self.sign * float(raw) / self.norm, 0.0)
 
     def _dock(self, smiles: List[str]) -> List[float]:
         canons = [self._canonical(s) for s in smiles]

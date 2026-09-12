@@ -40,7 +40,12 @@ from validation.lsdflow.adapters.base import FlowSample, GFNAdapter
 REPO_ROOT = Path(__file__).resolve().parents[3]
 WORKER = REPO_ROOT / "validation" / "lsdflow" / "adapters" / "workers" / "scent_worker.py"
 
-_HIGHER_IS_BETTER_BY_REWARD = {"seh": True, "drd2": True, "clpp": False, "6td3": False}
+_HIGHER_IS_BETTER_BY_REWARD = {
+    "seh": True, "drd2": True, "clpp": False, "6td3": False,
+    # 6TD3-B is gnina's CNN_VS (CNNscore x CNNaffinity), gate 6.718 -- HIGHER is better, unlike both
+    # other docking targets. Explicit rather than left to a default that happens to agree.
+    "6td3b": True,
+}
 
 
 class SCENTAdapter(GFNAdapter):

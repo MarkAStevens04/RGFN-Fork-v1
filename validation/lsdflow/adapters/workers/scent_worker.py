@@ -64,7 +64,26 @@ GEN_DIR = REPO_ROOT / "validation" / "generators" / "scent"
 
 # Reward orientation fallback by target when the proxy doesn't advertise it (surrogates are
 # higher-is-better; docking ΔVina is lower-is-better). The proxy's own flag wins when present.
-_HIGHER_IS_BETTER_BY_REWARD = {"seh": True, "drd2": True, "clpp": False, "6td3": False}
+_HIGHER_IS_BETTER_BY_REWARD = {
+    "seh": True, "drd2": True, "clpp": False, "6td3": False,
+    # 6TD3-B is gnina's CNN_VS (CNNscore x CNNaffinity) at gate 6.718 -- HIGHER is better, unlike
+    # both other docking targets. Listed explicitly rather than left to the `.get(name, True)`
+    # default below, which would have produced the right answer for the wrong reason.
+    "6td3b": True,
+}
+
+# TWO DIFFERENT QUESTIONS THAT USED TO SHARE ONE LITERAL, `("6td3", "clpp")`. They are not the same
+# set, and conflating them is how a new target lands correctly on one and incorrectly on the other
+# purely by coincidence.
+#
+#   _DOCKING_REWARDS  -- "is the reward produced by the cross-env docking bridge?"  6TD3-B IS one.
+#   _GATE_ON_RAW      -- "does the GATE read a different column than the training reward?"
+#                        For 6TD3/ClpP the reward is clip(-vina) (positive, higher-better) while the
+#                        bar is on raw Vina (lower-better), so the gate must read `raw_score`.
+#                        6TD3-B is DELIBERATELY ABSENT: its reward IS cnn_vs and its gate is cnn_vs
+#                        at 6.718, so the gated column is the proxy value itself.
+_DOCKING_REWARDS = ("6td3", "6td3b", "clpp")
+_GATE_ON_RAW = ("6td3", "clpp")
 
 _REC_COLS = [
     "hub_key",
@@ -693,7 +712,7 @@ def main():
         f'ScentFixedRewardRun.repo_root="{REPO_ROOT}"',
         f"ScentFixedRewardRun.seed={args.seed}",
     ]
-    if args.reward_name in ("6td3", "clpp"):
+    if args.reward_name in _DOCKING_REWARDS:
         # DockingBridgeProxy defaults its workdir to <repo>/reward_bridge_scent and mkdir()s it in
         # __init__ -- and $HOME is READ-ONLY on compute nodes (Logs/012), so construction dies with
         # PermissionError before we could mutate the attribute. It must therefore be a gin BINDING,
@@ -790,7 +809,7 @@ def main():
     )
 
     # Docking targets gate on the RAW energy; surrogates gate on the proxy value itself.
-    _gate_component = "raw_score" if args.reward_name in ("6td3", "clpp") else None
+    _gate_component = "raw_score" if args.reward_name in _GATE_ON_RAW else None
 
     def _extract(obj, traj, routes_out=None):
         return extract_flow_records(

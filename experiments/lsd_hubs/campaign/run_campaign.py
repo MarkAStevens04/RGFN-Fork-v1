@@ -61,10 +61,27 @@ def load_enum_timings(enum_children_path, explicit=None):
     return _EnumTimings.load(p) if p.exists() else None
 
 
+def resolve_hub_pick_timing(enum_children_path, explicit=None) -> Path:
+    """THE one place that says where ``pick_hubs_timing.json`` is. Do not inline this rule again.
+
+    It exists because it was inlined twice. ``load_hub_pick_s`` honoured the ``--hub-pick-timing``
+    override while the depth-provenance block fifteen lines away re-derived the path from
+    ``--enum-children`` and ignored the flag, so a caller that passed it got compute-time from one
+    file and depth fields from a path that did not exist. B's pilot then ran a campaign against an
+    enumeration produced elsewhere -- `hubs_head.csv` at the cell root, no sidecar beside
+    `enum/enum_children.json` -- and every depth field came back null while the run reported success.
+
+    That is the same shape as locating a checkpoint by naming convention instead of reading the
+    manifest: the artifact is found by DESCRIBING where it should be rather than being told where it
+    is, and the miss is silent.
+    """
+    return Path(explicit) if explicit else Path(enum_children_path).parent / "pick_hubs_timing.json"
+
+
 def load_hub_pick_s(enum_children_path, explicit=None):
     """Stage-2 hub-pick wall-clock from ``pick_hubs_timing.json`` beside ``enum_children.json``
     (0.0 if absent). Charged to hub-batching only (best-candidate never picks hubs)."""
-    p = Path(explicit) if explicit else Path(enum_children_path).parent / "pick_hubs_timing.json"
+    p = resolve_hub_pick_timing(enum_children_path, explicit)
     if not p.exists():
         return 0.0
     try:
@@ -758,12 +775,38 @@ def main() -> None:
     # written rather than the run dying at the last step.
     _hub_depth = {h.hub_key: h.depth for h in enum_hubs}
     _hub_pick_meta: dict = {}
-    for _cand in (Path(a.enum_children).parent / "pick_hubs_timing.json",):
-        if _cand.is_file():
-            try:
-                _hub_pick_meta = json.loads(_cand.read_text())
-            except Exception:
-                pass
+    # ONE resolver, shared with the compute-time section -- see resolve_hub_pick_timing.
+    _hp_path = resolve_hub_pick_timing(a.enum_children, a.hub_pick_timing)
+    _depth_provenance = "ok"
+    if _hp_path.is_file():
+        try:
+            _hub_pick_meta = json.loads(_hp_path.read_text())
+        except Exception as _e:  # noqa: BLE001
+            _depth_provenance = f"UNREADABLE: {_hp_path} ({_e})"
+    else:
+        _depth_provenance = f"MISSING: {_hp_path}"
+
+    # SAY SO, LOUDLY. benchmark_v2's README lists the walked hubs' depth distribution and the
+    # depth-0 mode share as a REQUIRED per-cell output, so a cell that finishes without them has not
+    # finished. Silent nulls made a run that was missing a deliverable look identical to one that
+    # was not -- which is how this survived its first real execution.
+    #
+    # It WARNS rather than aborting: by this point the campaign has already done all its work, and a
+    # validator that kills a good multi-hour job gets switched off within a week (the rule _routes.py
+    # states). The hard gate belongs in verify_cell, where re-running costs nothing. The marker below
+    # is what that gate reads, so the failure is machine-detectable rather than a log line.
+    if _depth_provenance != "ok":
+        print(
+            "\n[campaign] *** DEPTH PROVENANCE MISSING ***\n"
+            f"[campaign]   looked for: {_hp_path}\n"
+            "[campaign]   hub_pool / min_hub_depth / max_hub_depth / walked_depth_hist will be NULL.\n"
+            "[campaign]   benchmark_v2 requires the walked-hub depth distribution per cell, so this\n"
+            "[campaign]   cell is INCOMPLETE even though the campaign itself succeeded.\n"
+            "[campaign]   Fix: pass --hub-pick-timing <path>, or run pick_hubs so its sidecar lands\n"
+            "[campaign]   beside enum_children.json. summary.json records depth_provenance for the\n"
+            "[campaign]   verifier.\n",
+            flush=True,
+        )
 
     out = Path(a.out_dir) if a.out_dir else HERE / "results" / a.tag  # dir carries the tag
     out.mkdir(parents=True, exist_ok=True)
@@ -782,6 +825,10 @@ def main() -> None:
         # directory name. A depth-filtered sensitivity arm and the default arm were otherwise
         # indistinguishable once their paths were lost.
         "min_synth_depth": a.min_synth_depth,
+        # "ok" | "MISSING: <path>" | "UNREADABLE: <path> (...)". Machine-readable so verify_cell can
+        # reject a cell whose required depth output is absent, instead of the nulls below reading as
+        # a legitimately empty answer.
+        "depth_provenance": _depth_provenance,
         "hub_pool": _hub_pick_meta.get("pool"),
         "min_hub_depth": _hub_pick_meta.get("min_hub_depth"),
         "max_hub_depth": _hub_pick_meta.get("max_hub_depth"),

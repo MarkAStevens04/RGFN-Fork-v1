@@ -417,6 +417,8 @@ class Docking6TD3GpuOracle(GpuDifferentialDockingOracle):
         )
 
 
+@gin.configurable()  # NOT inherited from the parent -- without this, gin raises
+# "No configurable matching @Docking6TD3BGpuOracle()" and the 6TD3-B config cannot load.
 class Docking6TD3BGpuOracle(Docking6TD3GpuOracle):
     """**6TD3-B** — same docking, different reward: gnina's ``CNN_VS`` = CNNaffinity x CNNscore.
 
