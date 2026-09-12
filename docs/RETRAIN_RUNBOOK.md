@@ -34,7 +34,7 @@ and together they are why this is a re-run rather than a repair.
 | 3 | **Hit gates re-derived** on one rule: the score at which **5% of that target's property-matched decoys pass** | 2026-08-21 | sEH 7.0→**5.68**, DRD2 0.5→**0.345**, ClpP −8.0→**−9.10**, 6TD3-B **6.718**. Free for our side (gate is applied post-hoc, on CPU); **not** free for competitors — it changes pool composition, and therefore retrosynthesis and selection |
 | 4 | **A fourth competitor stage: upsample-and-filter** (`upsample_to_modes.py`, `dd8f1a9`) | 2026-08-28 | A competitor "pool" is no longer a slice of a fixed 2,000-molecule sample. `pool-limited` used to conflate *the generator cannot* with *we did not ask for enough* |
 | 5 | **Route contract enforced at write time**; RGFN/RxnFlow route emission implemented | 2026-08-24 | A fresh sample now produces `routes.json`. The route dataset can go from **5 cell-seeds to matrix-wide** as a by-product of re-running — see §6 |
-| 6 | **6TD3-B** replaces the exploitable Tier2−Tier1 differential as the CDK12–DDB1 reward — reward *and* gate are `cnn_vs` (CNNscore × CNNaffinity) at **6.718** | 2026-08-21, settled 08-28 | Every 6TD3 cell of every generator is superseded: the old libraries do not survive re-gating. Oracle wiring in progress; see §7.1 for the threshold and the evidence |
+| 6 | **6TD3-B** replaces the exploitable Tier2−Tier1 differential as the CDK12–DDB1 reward — reward *and* gate are `cnn_vs` (CNNscore × CNNaffinity) at **6.718** | 2026-08-21, settled 08-28 | Every 6TD3 cell of every generator is **INVALIDATED, not superseded** — the distinction is load-bearing. Row 2 supersedes: the same quantity, re-measured under a new budget, so a newer number will exist. Row 6 REDEFINES the quantity: 6TD3-B numbers are not a better measurement of old 6TD3, they measure something else, so **no newer measurement of the old quantity exists or ever will**. Calling it superseded implies a replacement number is out there and sends a reader looking for one. The old libraries do not survive re-gating. Oracle wiring in progress; see §7.1 for the threshold and the evidence |
 
 ### The one thing that survives unchanged
 
@@ -641,6 +641,8 @@ The common shape is not carelessness about the measurement. It is that nobody as
 would print if the thing it tests were broken.* When the answer is "the same thing", the check is
 decoration.
 
+**A check that cries wolf is discarded, which costs the same in the end.** An orphan-detector that fires on a `README.md` teaches its reader to skip the output, and a check nobody reads has the same value as one that cannot fail. Exclude the meta-cases explicitly, with a comment saying why.
+
 **Before recording any verification as passed, state its failing case.** If you cannot name an input
 that makes it fail, it is not a check — find one that distinguishes, or say plainly that the property
 is unverified. A negative result is worth stating only when a positive one was possible.
@@ -1005,8 +1007,9 @@ quoted from a mixed vintage.
 `AC-MedChem-SDL/RGFN-LSD` reads this tree through `tools/harvest/*.py`, already parameterised by
 `--matrix-root` / `--campaign-root` / `--research-root`, so retargeting is a flag change. Each exhibit
 must record, in `benchmark_v2/results/<exhibit>/PROVENANCE.md`: the script that produced it, the
-artifact path it lands in, and the `reproduce/` script that consumes it. Note
-`artifacts/reaction_budget/seed42/*_6td3/` in the publication repo is invalidated by the 6TD3-B swap.
+artifact path it lands in, and the `reproduce/` script that consumes it. Note that **every** 6TD3 artifact in the publication repo is invalidated by the 6TD3-B swap — not only
+`artifacts/reaction_budget/seed42/*_6td3/`. Per 0 row 6 it is every 6TD3 cell of every generator, so seed
+is irrelevant and `seed43/` and `mechanism/greedy_ceiling/` are included: 27 files across three locations.
 
 Figures are build products and are never committed. Run `tools/check_identity.py --all` before
 committing there — the default scans only *tracked* files, so a new file is invisible to it.
