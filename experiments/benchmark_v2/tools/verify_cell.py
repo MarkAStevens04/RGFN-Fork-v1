@@ -150,8 +150,17 @@ def verify_train(cell: Cell, arm: str) -> Result:
     meta_p = d / "arm_meta.json"
     meta = None
     if not meta_p.is_file():
+        # NAME THE FIX, BECAUSE THIS CONTRACT HAD NO IMPLEMENTER ON THE TRAINING PATH. Until
+        # 2026-09-12 `copy_forward.py` wrote this file for COPIED cells and nothing wrote it for
+        # GENERATED ones, so every trained cell failed here -- on a missing file, before any
+        # substantive check -- and an unverifiable cell is unfreezable and therefore unacceptable.
+        # A requirement stated only in a docstring is how that happened; pointing at the tool is
+        # what stops it happening again.
         r.add("arm_meta.json", False, "missing -- the runner must record which call count this "
-                                     "checkpoint sits at (see module docstring)")
+                                     "checkpoint sits at. Generated cells: call "
+                                     "tools/write_arm_meta.py from INSIDE the training job "
+                                     '(--pythonhashseed "${PYTHONHASHSEED-}"). Copied cells: '
+                                     "copy_forward.py writes it.")
     else:
         try:
             meta = json.loads(meta_p.read_text())
