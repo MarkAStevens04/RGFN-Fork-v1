@@ -89,6 +89,40 @@ and the arm-A checkpoint sitting at the row where `n_scored` first crosses 10,00
 
 ---
 
+## Arm A is a budget, not a checkpoint mechanism
+
+Only the three reaction-GFNs have `BudgetCheckpointer` wired in, and that is **correct by
+construction**, not a gap. Verified on disk from the traces themselves (2026-09-12), not from configs:
+
+| generator | training calls | vs the 10,000 budget | how arm A is obtained |
+|---|---|---|---|
+| RGFN / RxnFlow / SCENT | 320,000 (arm B) | 32× over | **checkpoint pulled out mid-run** by `BudgetCheckpointer` |
+| FragGFN | 10,048 | 100.5% | the whole run **is** arm A |
+| SynFormer | 10,000 | 100.0% | ″ |
+| REINVENT | 10,048 | 100.5% | ″ |
+| Saturn | 10,020 | 100.2% | ″ |
+| TANGO | 10,036 | 100.4% | ″ |
+| S3-GFN | 10,048 *(one cell; see below)* | 100.5% | ″ |
+
+The competitors train to their papers' own PMO budget, so there is no mid-training checkpoint to
+extract — their final model already sits at arm A. **The overshoot is 0.0–0.5%, i.e. under one
+batch**, which is the same tolerance `BudgetCheckpointer` accepts on our side (it fires at the first
+iteration boundary at or after the budget, bounded by one batch). So the two sides reach the same
+budget to within the same error, and the comparison is like-for-like.
+
+**Two things a driver will otherwise trip on:**
+
+* **SynFormer saves no `.pt`/`.ckpt`.** It is a genetic algorithm, so its artifact is a *population*:
+  `population_checkpoints/pop_10000.csv` is its arm-A state. It is also exempt from stage 2 — a GA
+  cannot be upsampled, which is a finding about the method, not a gap.
+* **⚠ S3-GFN's traces are empty on 8 of 9 cells** (only `s3gfn_seh/seed44` has rows, at 10,048).
+  This is NOT an arm-A wiring gap — the budget is set in its config and the one populated cell
+  confirms it — but it has two real consequences: the other eight cells cannot *demonstrate* they hit
+  their budget from their own record, and stage 2 loses its free-pool harvest for them. Regenerating
+  those traces is copy-forward work, not arm-A work.
+
+---
+
 ## Per-cell backup
 
 As soon as a stage passes verification, back that stage up to
@@ -104,7 +138,7 @@ compute nodes.
 | | |
 |---|---|
 | seeds | 42, 43, 44 — always with `PYTHONHASHSEED=0` exported |
-| arm A (headline) | 10,000 oracle calls, all 9 generators |
+| arm A (headline) | **10,000 training oracle calls.** A BUDGET, not a wiring requirement — how a generator reaches it differs by side (see below) |
 | arm B (secondary) | 320,000 oracle calls, the 3 reaction-GFNs only; downstream paused |
 | batch size | each paper's own — RGFN 100, SCENT 64, RxnFlow 64 (**not** 128) |
 | gates | resolve by importing `matrix16/targets.py`; never hardcode, never default |
