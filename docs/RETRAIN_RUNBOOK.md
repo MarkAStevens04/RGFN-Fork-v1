@@ -1033,6 +1033,21 @@ downstream happened to publish would couple the producer to the consumer in the 
 a fourth hand-maintained inventory beside `grid.csv`, `PROVENANCE.csv` and `manifest.py` is exactly
 the document that goes stale and misleads.
 
+**At the FIRST re-harvest, add the single-generation assertion — the trigger is ours.** Nothing today
+prevents a figure drawing on artifacts from two generations. The publication repo's CI gates a stale
+manifest, a broken figure script, the test suite, T0 end-to-end, and notebook/toy-dataset staleness —
+but the `generation` column is **data, not an assertion**: nothing reads it and refuses. Re-harvest
+three artifact groups, leave a fourth at v1, and every check stays green while the figure is silently
+mixed. The protection is a human reading the column before writing a caption, which is a real
+improvement on it being unrecorded and a lower bar than "fails loudly".
+
+The fix is a reproduce-time check that every artifact a script reads shares one generation. It is
+deliberately NOT written yet, and the reason is §6.10: with everything at v1 it could not fail, so it
+would ship as an untested green light. **It becomes testable the moment the first phase lands and a
+mixed state is reachable — add it then, and verify it by deliberately mixing two generations and
+watching it go red.** This is the failure mode the project has already suffered once (a metric that
+changed mid-flight, read as a seed effect), so it is not hypothetical.
+
 **The route dataset is the sharpest case.** v1 can support route artifacts for only 5 cell-seeds; the
 matrix-wide, chemist-facing dataset exists only as a by-product of this re-run (`benchmark_v2/README`,
 route readiness as a hard gate). The exporter is being built now against the cells that exist, so
