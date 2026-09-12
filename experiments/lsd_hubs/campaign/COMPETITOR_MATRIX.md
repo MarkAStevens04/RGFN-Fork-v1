@@ -101,7 +101,15 @@ hypothesis. The superseding sEH cells (jobs 75753-55) are clean at 10,000 trace 
 
 **A second budget is UNAVAILABLE on the competitor side, on a measured basis.** SynFormer's three
 sEH cells trained at 10,048 oracle calls in **19.30 h / 20.70 h / 20.17 h** wall-clock
-(`timing.json`, `total_run_s` = 69,489 / 74,502 / 72,605; jobs 75753-55, 10,000 trace rows each).
+(`timing.json`: top-level **`total_s`** = 69,489 / 74,502 / 72,605, with `unaccounted_s` 0.0 and
+`phases` summing exactly to it; jobs 75753-55, 10,000 trace rows each). NOTE the field name —
+`total_run_s` is a PHASE key *inside* `phases`, not a top-level field, and an earlier draft of
+this file cited it as though it were. Timing schemas are not uniform across this project: a
+sweep of the v2 cells found `train_s` recorded as 0.0 on 9 of them (indistinguishable from
+"training was skipped"), absent entirely on 24 more, and one cell with 99.5% of its runtime in
+`unaccounted_s`. **No figure in this document is sourced from `train_s`**; the oracle counts
+come from traces and `upsample_log.json`, and the wall-clock from `total_s` above, all of which
+have `unaccounted_s` 0.0. `unaccounted_s` is the cheap detector if you extend this table.
 Linear in calls, 320,000 would be ~615 h per cell — **~5,530 GPU-h for its nine cells alone**.
 Saturn and TANGO are the same shape. So an iteration-matched external comparison at a second budget
 is not merely expensive, it is out of reach; a budget-dependence check has to run on generators we
