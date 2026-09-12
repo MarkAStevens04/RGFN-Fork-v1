@@ -29,11 +29,12 @@ TWO STAGES, because "verified" means different things at different points:
 ⚠ CONTRACT FOR THE TRAINING RUNNERS (agent A implements, this file enforces). A cell's train dir
 must contain ``arm_meta.json``:
 
-    {"arm": "a", "budget_calls": 10000, "n_scored_at_checkpoint": 10004,
+    {"arm": "a", "budget_calls": 10000, "n_train_scored_at_checkpoint": 10004,
+     "n_total_scored_at_checkpoint": 12004,
      "checkpoint": "checkpoint.pt", "pythonhashseed": "0", "generator": "scent",
      "batch_size": 64, "commit": "<git sha>"}
 
-``n_scored_at_checkpoint`` is the load-bearing field and it must be READ FROM THE TRACE, never
+``n_train_scored_at_checkpoint`` is the load-bearing field and it must be READ FROM THE TRACE, never
 computed as batch x steps: the three reaction-GFNs have three different per-step call counts (RGFN
 100, SCENT 64, RxnFlow 64) and replay buffers make that arithmetic unsettleable. Recording it is what
 makes "this checkpoint is the 10,000-call one" an auditable claim rather than an assumption.
@@ -73,6 +74,7 @@ from manifest import Cell, get_cell, select  # noqa: E402  -- this tree's, unamb
 
 def _load_from_path(name: str, path: Path):
     import importlib.util
+
     spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load {name} from {path}")
@@ -157,11 +159,15 @@ def verify_train(cell: Cell, arm: str) -> Result:
         # therefore unacceptable.
         # A requirement stated only in a docstring is how that happened; pointing at the tool is
         # what stops it happening again.
-        r.add("arm_meta.json", False, "missing -- the runner must record which call count this "
-                                     "checkpoint sits at. Generated cells: call "
-                                     "tools/write_arm_meta.py from INSIDE the training job "
-                                     '(--pythonhashseed "${PYTHONHASHSEED-}"). Copied cells: '
-                                     "copy_forward.py writes it.")
+        r.add(
+            "arm_meta.json",
+            False,
+            "missing -- the runner must record which call count this "
+            "checkpoint sits at. Generated cells: call "
+            "tools/write_arm_meta.py from INSIDE the training job "
+            '(--pythonhashseed "${PYTHONHASHSEED-}"). Copied cells: '
+            "copy_forward.py writes it.",
+        )
     else:
         try:
             meta = json.loads(meta_p.read_text())
@@ -172,8 +178,13 @@ def verify_train(cell: Cell, arm: str) -> Result:
     # -- the checkpoint itself
     ckpt_name = (meta or {}).get("checkpoint", "checkpoint.pt")
     ckpt = d / ckpt_name
-    r.add("checkpoint", ckpt.is_file(),
-          f"{ckpt_name} ({ckpt.stat().st_size/1e6:.0f} MB)" if ckpt.is_file() else f"missing {ckpt_name}")
+    r.add(
+        "checkpoint",
+        ckpt.is_file(),
+        f"{ckpt_name} ({ckpt.stat().st_size/1e6:.0f} MB)"
+        if ckpt.is_file()
+        else f"missing {ckpt_name}",
+    )
 
     # -- the trace: present, well-formed, monotone, and long enough
     budget = cell.arm_calls(arm) or 0
@@ -182,8 +193,11 @@ def verify_train(cell: Cell, arm: str) -> Result:
         # A missing trace does not make the cell WRONG -- it costs Stage 2 its free pool of
         # already-scored molecules. But the cell is never ACCEPTED without one, because the arm's
         # budget is then an assertion with no evidence behind it.
-        r.add("trace.csv", False, "missing -- arm budget cannot be evidenced, and Stage 2 loses "
-                                  "its free-pool harvest")
+        r.add(
+            "trace.csv",
+            False,
+            "missing -- arm budget cannot be evidenced, and Stage 2 loses " "its free-pool harvest",
+        )
         return r
 
     n_rows = last_scored = 0
@@ -229,19 +243,31 @@ def verify_train(cell: Cell, arm: str) -> Result:
     # would pay to re-sample a pool we already hold. Fail it loudly and name the rotations.
     if n_rows == 0:
         rotations = sorted(tp.parent.glob(tp.name + ".*"))
-        hint = (f" -- but {len(rotations)} rotation(s) exist ({', '.join(p.name for p in rotations)}); "
-                f"the real history is probably in one of them") if rotations else ""
+        hint = (
+            (
+                f" -- but {len(rotations)} rotation(s) exist ({', '.join(p.name for p in rotations)}); "
+                f"the real history is probably in one of them"
+            )
+            if rotations
+            else ""
+        )
         r.add("trace rows", False, f"HEADER-ONLY stub ({tp.stat().st_size} bytes){hint}")
         return r
     r.add("trace rows", True, f"{n_rows:,} rows, final n_scored={last_scored:,}")
-    r.add("trace monotone", monotone,
-          "n_scored never decreases" if monotone else "n_scored DECREASES -- rows are interleaved "
-          "or the file was appended to by two writers")
+    r.add(
+        "trace monotone",
+        monotone,
+        "n_scored never decreases"
+        if monotone
+        else "n_scored DECREASES -- rows are interleaved "
+        "or the file was appended to by two writers",
+    )
     # phase is load-bearing: some generators score outside the training loop (S3-GFN's evaluate()
     # scores a 1,000-molecule sample), and counting those inflates the budget AND puts molecules on
     # the learning curve the policy never learned from.
-    r.add("trace phase column", "train" in phases,
-          f"phases present: {sorted(p for p in phases if p)}")
+    r.add(
+        "trace phase column", "train" in phases, f"phases present: {sorted(p for p in phases if p)}"
+    )
 
     # THE BUDGET IS THE COUNT OF TRAINING ROWS, NOT THE FINAL COUNTER. `n_scored` is a single
     # cumulative counter SHARED across phases, and at least one entrant interleaves evaluation with
@@ -255,26 +281,61 @@ def verify_train(cell: Cell, arm: str) -> Result:
     # (non-monotone) trace the difference can go negative, and "-5,997 non-train rows" reads as
     # nonsense on top of the monotonicity failure that already explains it.
     eval_pad = last_scored - n_train_rows
-    r.add("budget reached (train rows)", n_train_rows >= budget * BUDGET_TOLERANCE,
-          f"{n_train_rows:,} / {budget:,} ({100*n_train_rows/max(budget,1):.0f}%)"
-          + (f"   [counter reads {last_scored:,}; {eval_pad:,} of those are non-train]"
-             if eval_pad > 0 else ""))
+    r.add(
+        "budget reached (train rows)",
+        n_train_rows >= budget * BUDGET_TOLERANCE,
+        f"{n_train_rows:,} / {budget:,} ({100*n_train_rows/max(budget,1):.0f}%)"
+        + (
+            f"   [counter reads {last_scored:,}; {eval_pad:,} of those are non-train]"
+            if eval_pad > 0
+            else ""
+        ),
+    )
     if max_distinct:
         # The gap between the two counters is itself a mode-collapse signal, so it is reported
         # rather than merely bounded.
-        r.add("distinct <= scored", max_distinct <= last_scored,
-              f"{max_distinct:,} distinct of {last_scored:,} scored "
-              f"({100*max_distinct/max(last_scored,1):.0f}% unique)")
+        r.add(
+            "distinct <= scored",
+            max_distinct <= last_scored,
+            f"{max_distinct:,} distinct of {last_scored:,} scored "
+            f"({100*max_distinct/max(last_scored,1):.0f}% unique)",
+        )
 
     # -- the checkpoint sits where the metadata claims
-    if meta and "n_scored_at_checkpoint" in meta:
-        at = int(meta["n_scored_at_checkpoint"])
+    #
+    # THE FIELD NAME CARRIES ITS UNIT, AND THE OLD NAME IS REFUSED RATHER THAN ACCEPTED. Until
+    # 2026-09-12 this read `n_scored_at_checkpoint`, which does not say WHICH count it is -- and one
+    # trace yields three defensible readings (s3gfn/seh/43: cumulative counter 12,048, max(n_scored)
+    # over train rows 11,048, true budget 10,048 train rows). That ambiguity had already produced a
+    # bug in the budget checkpointer.
+    #
+    # A SILENT FALLBACK TO THE LEGACY NAME WOULD BE WORSE THAN THE RENAME. If this quietly accepted
+    # the old key we could never tell a migrated cell from an unmigrated one, which is the same
+    # class of defect as a check that cannot fail. So a legacy-only cell FAILS and is told what to
+    # run. The migration ships in the same commit as the rename, so no cell is red in practice.
+    if meta and "n_train_scored_at_checkpoint" in meta:
+        at = int(meta["n_train_scored_at_checkpoint"])
         ok = at >= budget * BUDGET_TOLERANCE and at <= last_scored
-        r.add("checkpoint placement", ok,
-              f"recorded at n_scored={at:,} (budget {budget:,}, trace ends {last_scored:,})")
+        total = meta.get("n_total_scored_at_checkpoint")
+        r.add(
+            "checkpoint placement",
+            ok,
+            f"recorded at {at:,} train rows (budget {budget:,}, trace ends {last_scored:,})"
+            + (f"   [counter read {int(total):,}]" if total else ""),
+        )
+    elif meta and "n_scored_at_checkpoint" in meta:
+        r.add(
+            "checkpoint placement",
+            False,
+            "arm_meta.json still uses the pre-2026-09-12 key `n_scored_at_checkpoint`. "
+            "Migrate: tools/migrate_arm_meta.py --cell <gen>/<target>/<seed>",
+        )
     else:
-        r.add("checkpoint placement", False,
-              "arm_meta.json does not record n_scored_at_checkpoint")
+        r.add(
+            "checkpoint placement",
+            False,
+            "arm_meta.json does not record n_train_scored_at_checkpoint",
+        )
 
     # -- determinism. THREE STATES, and the third must be DECLARED rather than inferred.
     #
@@ -307,15 +368,24 @@ def verify_train(cell: Cell, arm: str) -> Result:
         if str(hs) == "0":
             r.add("PYTHONHASHSEED", True, "recorded as '0'")
         elif hs is None and origin == "copied" and note:
-            r.add("PYTHONHASHSEED", True,
-                  f"n/a -- declared unrecoverable for a copied v1 run ({note[:80]})")
+            r.add(
+                "PYTHONHASHSEED",
+                True,
+                f"n/a -- declared unrecoverable for a copied v1 run ({note[:80]})",
+            )
         elif hs is None and origin == "copied":
-            r.add("PYTHONHASHSEED", False,
-                  "declared null for a copied cell but with NO pythonhashseed_note -- "
-                  "'never recordable' and 'we forgot' must not look the same on disk")
+            r.add(
+                "PYTHONHASHSEED",
+                False,
+                "declared null for a copied cell but with NO pythonhashseed_note -- "
+                "'never recordable' and 'we forgot' must not look the same on disk",
+            )
         else:
-            r.add("PYTHONHASHSEED", False,
-                  f"recorded as {hs!r}" if hs != "__absent__" else "not recorded")
+            r.add(
+                "PYTHONHASHSEED",
+                False,
+                f"recorded as {hs!r}" if hs != "__absent__" else "not recorded",
+            )
     return r
 
 
@@ -332,13 +402,20 @@ def verify_campaign(cell: Cell, arm: str) -> Result:
     # §6.1 routes were emitted. Non-zero for rgfn/rxnflow/scent; FragGFN never reaches here.
     n_routes = _n_routes(sample)
     if cell.route_bearing:
-        r.add("routes.json (§6.1)", bool(n_routes),
-              f"{n_routes:,} routes" if n_routes else
-              "EMPTY or missing -- downstream every hub is skipped and SPARROW prices the empty "
-              "library as trivially Optimal at zero cost")
+        r.add(
+            "routes.json (§6.1)",
+            bool(n_routes),
+            f"{n_routes:,} routes"
+            if n_routes
+            else "EMPTY or missing -- downstream every hub is skipped and SPARROW prices the empty "
+            "library as trivially Optimal at zero cost",
+        )
         rs = sample / "route_status.json"
-        r.add("route_status.json", rs.is_file(),
-              "written by the write-time contract check" if rs.is_file() else "missing")
+        r.add(
+            "route_status.json",
+            rs.is_file(),
+            "written by the write-time contract check" if rs.is_file() else "missing",
+        )
     else:
         r.add("routes.json (§6.1)", True, "n/a -- attachments, not reactions; empty is CORRECT")
 
@@ -350,9 +427,12 @@ def verify_campaign(cell: Cell, arm: str) -> Result:
     else:
         n_child, n_rxn, n_hubs = cov
         frac = n_rxn / n_child if n_child else 0.0
-        r.add("children[].reaction (§6.2)", n_child > 0 and frac >= 1.0,
-              f"{n_rxn:,}/{n_child:,} = {frac:.4f} over {n_hubs:,} hubs"
-              + ("" if frac >= 1.0 else "  <- a partial artifact prices SOME children at their hub"))
+        r.add(
+            "children[].reaction (§6.2)",
+            n_child > 0 and frac >= 1.0,
+            f"{n_rxn:,}/{n_child:,} = {frac:.4f} over {n_hubs:,} hubs"
+            + ("" if frac >= 1.0 else "  <- a partial artifact prices SOME children at their hub"),
+        )
 
     # §6.3 recipes exist AND belong to this run.
     #
@@ -376,23 +456,34 @@ def verify_campaign(cell: Cell, arm: str) -> Result:
     if cell.generator != "scent":
         r.add("recipes (§6.3)", True, "n/a -- no dynamic library, routes bottom out at stock")
     elif n_promoted is None:
-        r.add("recipes (§6.3)", False,
-              "cannot tell: the run declares no n_promoted_fragments in its meta.json, so "
-              "'nothing to expand' and 'recipes lost' are indistinguishable")
+        r.add(
+            "recipes (§6.3)",
+            False,
+            "cannot tell: the run declares no n_promoted_fragments in its meta.json, so "
+            "'nothing to expand' and 'recipes lost' are indistinguishable",
+        )
     elif n_promoted == 0:
-        r.add("recipes (§6.3)", True,
-              "n/a -- this run promoted 0 fragments (declared), so every route bottoms out at "
-              "base stock and there is nothing to expand")
+        r.add(
+            "recipes (§6.3)",
+            True,
+            "n/a -- this run promoted 0 fragments (declared), so every route bottoms out at "
+            "base stock and there is nothing to expand",
+        )
     elif rh is None:
-        r.add("recipes (§6.3)", False,
-              f"run declares {n_promoted:,} promoted fragments but its snapshot could not be "
-              f"resolved from meta.json -- the recipes may be the unrecoverable kind")
+        r.add(
+            "recipes (§6.3)",
+            False,
+            f"run declares {n_promoted:,} promoted fragments but its snapshot could not be "
+            f"resolved from meta.json -- the recipes may be the unrecoverable kind",
+        )
     else:
         covr, snap = rh
-        r.add("recipes (§6.3)", covr >= 1.0,
-              f"coverage {covr:.1%} of this run's {n_promoted:,} promoted fragments "
-              f"({Path(snap).name})"
-              + ("" if covr >= 1.0 else "  <- the rest are BOUGHT, not built"))
+        r.add(
+            "recipes (§6.3)",
+            covr >= 1.0,
+            f"coverage {covr:.1%} of this run's {n_promoted:,} promoted fragments "
+            f"({Path(snap).name})" + ("" if covr >= 1.0 else "  <- the rest are BOUGHT, not built"),
+        )
     return r
 
 
@@ -430,22 +521,24 @@ def _write_marker(cell: Cell, arm: str, stage: str, res: Result):
         p.write_text(json.dumps(prev, indent=2, sort_keys=True))
     except PermissionError:
         if not os.access(p.parent, os.W_OK):
-            return None          # frozen: expected, and the existing marker still stands
-        raise                    # writable but unwritable -> genuinely broken, do not swallow
+            return None  # frozen: expected, and the existing marker still stands
+        raise  # writable but unwritable -> genuinely broken, do not swallow
     return p
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--cell", metavar="GEN/TARGET/SEED")
     g.add_argument("--all", action="store_true", help="sweep every cell in the grid")
     ap.add_argument("--arm", default="a", choices=("a", "b"))
     ap.add_argument("--stage", default="train", choices=("train", "campaign", "both"))
     ap.add_argument("--phase", type=int, default=None, help="with --all: restrict to a phase")
-    ap.add_argument("--no-marker", action="store_true",
-                    help="report only; do not write .verified.json")
+    ap.add_argument(
+        "--no-marker", action="store_true", help="report only; do not write .verified.json"
+    )
     a = ap.parse_args()
 
     if a.cell:
@@ -472,8 +565,10 @@ def main() -> int:
                 if not a.no_marker:
                     p = _write_marker(cell, a.arm, stage, res)
                     if p is None:
-                        print("  -> ACCEPTED (cell is FROZEN, so its existing marker was "
-                              "not refreshed -- checks all passed)")
+                        print(
+                            "  -> ACCEPTED (cell is FROZEN, so its existing marker was "
+                            "not refreshed -- checks all passed)"
+                        )
                     else:
                         print(f"  -> ACCEPTED, marker at {p}")
                 else:
