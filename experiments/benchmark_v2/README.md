@@ -102,7 +102,7 @@ construction**, not a gap. Verified on disk from the traces themselves (2026-09-
 | REINVENT | 10,048 | 100.5% | ″ |
 | Saturn | 10,020 | 100.2% | ″ |
 | TANGO | 10,036 | 100.4% | ″ |
-| S3-GFN | 10,048 *(one cell; see below)* | 100.5% | ″ |
+| S3-GFN | 10,048 | 100.5% | ″ |
 
 The competitors train to their papers' own PMO budget, so there is no mid-training checkpoint to
 extract — their final model already sits at arm A. **The overshoot is 0.0–0.5%, i.e. under one
@@ -110,16 +110,25 @@ batch**, which is the same tolerance `BudgetCheckpointer` accepts on our side (i
 iteration boundary at or after the budget, bounded by one batch). So the two sides reach the same
 budget to within the same error, and the comparison is like-for-like.
 
+**Read the table with the `phase` column, or the numbers will not add up.** A raw `wc -l` on an
+S3-GFN trace returns **12,048** against a README saying 10,000 — which reads like a 20% overshoot and
+is not one. The split is `train 10,048 / eval 2,000`: its `evaluate()` scores a 1,000-molecule sample
+that *interleaves* with training, so only `phase == "train"` rows count toward the budget. Count
+rows, never the cumulative `n_scored`, which absorbs eval calls as it goes.
+
 **Two things a driver will otherwise trip on:**
 
 * **SynFormer saves no `.pt`/`.ckpt`.** It is a genetic algorithm, so its artifact is a *population*:
   `population_checkpoints/pop_10000.csv` is its arm-A state. It is also exempt from stage 2 — a GA
   cannot be upsampled, which is a finding about the method, not a gap.
-* **⚠ S3-GFN's traces are empty on 8 of 9 cells** (only `s3gfn_seh/seed44` has rows, at 10,048).
-  This is NOT an arm-A wiring gap — the budget is set in its config and the one populated cell
-  confirms it — but it has two real consequences: the other eight cells cannot *demonstrate* they hit
-  their budget from their own record, and stage 2 loses its free-pool harvest for them. Regenerating
-  those traces is copy-forward work, not arm-A work.
+* **S3-GFN: one cell short, and READ THE TREE PREFIX.** An earlier version of this note said
+  "8 of 9 traces empty". That is true of **v1** (`experiments/fixed_reward/s3gfn_*`) and false of
+  **v2**, where the copy-forward already fixed it: 8 of 9 `v2/train/s3gfn_*` carry traces at
+  12,048 rows, and the single residual is `s3gfn_seh_s43` — the cell a stray runner re-invocation
+  destroyed unrecoverably. It reports `no-trace` and acceptance already excludes it.
+  **Both trees hold cells at parallel relative paths and only the `v1`/`v2` prefix tells them
+  apart**, so a path read out of habit reports the wrong tree's state — which is how that error
+  happened.
 
 ---
 
