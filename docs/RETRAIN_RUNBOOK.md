@@ -534,6 +534,27 @@ column in the ledger, not an optional extra.
 
 ---
 
+### 4.1 Which source wins when the grid, the ledger and the disk disagree
+
+They will disagree, routinely, and the answer is not "whichever was written last". Each answers a
+different question and only one of them is evidence about the filesystem:
+
+| the question | the authority |
+|---|---|
+| what EXISTS, and in what state | **the filesystem**, via `manifest.py --status` (computed at load time, cannot go stale). **The grid is not evidence.** |
+| what PRODUCED an artifact | **`PROVENANCE.csv`**, append-only, one row per (stage, cell, arm) |
+| which cells we INTEND to have | **`grid.csv`** — here the grid wins |
+| the plan itself has changed | edit `build_grid.py`'s taxonomy and REGENERATE. **Never hand-edit the CSV.** |
+
+**`train_plan` is a PLAN, not an OBSERVATION**, and `build_grid.py`'s own docstring says so — several
+rows were known-optimistic at scoping and it names them, S3-GFN included. So **a driver must never
+branch on `train_plan` to decide what is on disk**; read `manifest.py --status`, and use
+`reconcile_plan_vs_disk.py` to report divergence (it writes nothing, because `grid.csv` is a build
+product). Deriving `train_plan` from the filesystem would convert a plan column into a status column,
+which is the thing `build_grid.py:13` exists to prevent — I proposed exactly that and was wrong.
+
+---
+
 ## 5. Order of operations, per cell
 
 Cells run concurrently and independently. Nothing waits for a phase to complete across all cells.
