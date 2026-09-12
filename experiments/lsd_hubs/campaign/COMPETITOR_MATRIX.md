@@ -121,6 +121,33 @@ Saturn and TANGO are the same shape. So an iteration-matched external comparison
 is not merely expensive, it is out of reach; a budget-dependence check has to run on generators we
 can actually train twice.
 
+**THE PER-PHASE BREAKDOWN EXISTS — IT IS IN THE LOGS, NOT THE FILE.** `timing.json` holds one
+bucket, which led to a conclusion (mine and a peer's) that any cross-generator per-phase cost table
+must have a SynFormer-shaped hole. That is wrong. `run_synformer_fixed.py` computes
+`ga_s`/`sanitize_s`/`project_s`/`score_s`/`gen_wall_s` per generation with an explicit residual and
+PRINTS them as `[SF-TIME]` lines; the `timing.json` write records only `{"total_run_s": ...}`. The
+hole is in the file, not the data — recover it with
+`grep '\[SF-TIME\]' <job>.out` (117 / 110 / 112 generations on the three sEH cells).
+
+Summed over those generations, **SynFormer is projector-bound, not oracle-bound**:
+
+| phase | seed 42 | seed 43 | seed 44 |
+|---|---|---|---|
+| `project_s` | 68,174 s (**99.0%**) | 72,878 s (**99.1%**) | 71,144 s (**99.1%**) |
+| `score_s` (the oracle) | 477 s (0.7%) | 504 s (0.6%) | 454 s (0.6%) |
+| `ga_s` | 185 s (0.3%) | 150 s (0.2%) | 177 s (0.2%) |
+| residual | 0 s | 0 s | 0 s |
+
+So its 19-20 h per cell is ~99% mapping molecules into synthesizable space, and the 10,000 oracle
+calls cost about **8 minutes**. That also says what scaling to a second budget would actually buy
+time in — the projector, not the oracle.
+
+*`total_s` is RUN time, not cell cost.* `run_t0` is set at `run_synformer_fixed.py:640`, after the
+projector is constructed, so setup is outside it. The same pattern was found in
+`run_s3gfn_fixed.py` and `run_reinvent_fixed.py`, and since `run_t0` is the only total in the file,
+no field there answers "what did this cell cost to produce". The figures above are correct as RUN
+time, which is how they are labelled.
+
 *Write durations with explicit units.* On a cluster where jobs legitimately run for both twenty
 minutes and twenty hours, `20:10` is ambiguous and the failure is silent — a reader can "correct" a
 right number to a wrong one and be confident about it. This nearly happened on these very figures.
