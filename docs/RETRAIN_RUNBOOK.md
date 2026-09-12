@@ -434,6 +434,22 @@ are both lower bounds on the competitor, and no amount of care removes that — 
 disclosed per row. Report both classes; do not let the fixed ones imply the structural ones went
 away.
 
+**THE COUNTEREXAMPLE, so "does it flatter us?" does not become the only filter.** A reader who
+absorbs the table above will start triaging errors by direction. Here is one that points the other
+way, found 2026-09-12 before it ran: **five of the six competitor docking bridges hardcode
+`max(-float(raw)/norm, 0.0)` with no orientation seam** (`s3gfn`, `reinvent`, `synformer`, `saturn`,
+`fraggfn`; only RxnFlow has `self.sign`). `cnn_vs` is higher-is-better in ~[0, 9], so that expression
+returns **exactly 0.0 for every molecule** — a flat reward, silently, for ~3.3 h of docking per cell
+across **18 cells**. It would have made the COMPETITORS look terrible on 6TD3-B, which is the
+direction a reviewer would never think to question and we would never think to check.
+
+**And a banner did not prevent it.** `rxnflow_6td3b_docking_fixed_5k.yaml` carries a
+"⚠ LOAD-BEARING — DO NOT DELETE" warning describing precisely this catastrophe. The fix landed in the
+one generator whose header carries the warning; the five that needed the identical fix never got it,
+because they had no 6td3b cell at the time it was written. **A banner protects the file it is written
+in and nothing else** — the same lesson as §8.7/§8.9 and as the four backup gaps: a rule stated in one
+place is not a rule applied in every place that needs it.
+
 **Why this is worth a section rather than a footnote.** Errors 1–3 were each found by looking for
 them, and each was corrected *against our own result*: #1 cost us the 32× training advantage, #2
 removed 2.84× of SCENT's apparent budget, #3 gave up ~20% of headroom on the arm that carries the
