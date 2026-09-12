@@ -329,6 +329,13 @@ stereo fallback recovering none), so no BC share is quoted.
   from a second code path), but `hub_pool`, `min_hub_depth`, `max_hub_depth` and `walked_depth_hist`
   are null because `pick_hubs` is a separate stage that never tells the campaign which pool it used.
   In production those stages are always separate, so this is not an artifact of how the pilot ran.
+  **Mechanism found and fixed by agent C (2026-09-12):** `run_campaign` resolved
+  `pick_hubs_timing.json` in two places -- `load_hub_pick_s` honoured `--hub-pick-timing` while
+  the depth block fifteen lines away re-derived the path from `--enum-children` and ignored the
+  flag. This pilot enumerated into a directory with no sidecar beside `enum_children.json`, so
+  the depth fields came back null. One resolver now, both callers on it. Of the two per-cell
+  outputs `benchmark_v2/README.md` requires, `depth0_mode_frac` was always present and only
+  `walked_depth_hist` was genuinely null -- see Result 12.
 - **`timing.json`'s `score` column is a SEMANTICS trap, not a broken timer — corrected 2026-09-12.**
   An earlier draft of this entry called RGFN's `score: 0.052 s` "not credible", reasoning that 52 ms
   for 16,919 molecules is 3 µs each. **That arithmetic used the wrong denominator.** The `score`
@@ -386,6 +393,31 @@ at the end), but the trace cannot carry a modes-vs-calls curve without re-runnin
 | campaign | 17 s | *(job 75996)* |
 
 RGFN costs ~3.3× SCENT per oracle call at arm A.
+
+**12 - depth-0 reliance is a SCENT/library phenomenon, and effectively ABSENT in RGFN.** `depth_mix`
+on the same axis, same run, both arm-A cells (measured 2026-09-12 after the checker below was fixed):
+
+| cell | modes @ R=100 | from walked hubs | modes by hub depth | **depth0_mode_frac** |
+|---|---|---|---|---|
+| RGFN arm A, hub-batching | 65 | 65 (`n_unmapped` 0) | {1:18, 2:28, 3:19} | **0.0** |
+| SCENT arm A, hub-batching | 39 | 39 (`n_unmapped` 0) | {2:7, 3:32} | **0.0** |
+| best-candidate (either) | 25 | 2 (`n_unmapped` 23) | {3:2} | 0.0 |
+| *SCENT v1 320k, for contrast* | *96* | *96* | *{0:35, 1:48, 2:13}* | ***0.365*** |
+
+Against Result 5's 36.5% on the v1 SCENT cell, this is independent corroboration that **bought-hub
+reliance travels with the dynamic library, not with hub-batching**. RGFN delivers zero modes off a
+depth-0 hub -- it has no library, so its flow field never surfaces one high enough to walk. That
+sharpens Result 3: the library decides not only *where* the hubs sit but *whether any delivered mode
+comes off a bought one*, which is the form the degenerate-optimum objection actually takes.
+
+Best-candidate's 23-of-25 unmapped is the control and is correct: it walks no hubs, so most of its
+molecules have no hub to map to.
+
+One observation worth recording without over-reading. RGFN's *hub* ranking is 85% depth-3 in the top
+40 ({1:1, 2:5, 3:34}, Result 3) while its *delivered* library skews shallower ({1:18, 2:28, 3:19}).
+The two are consistent with Result 5's cost mechanism -- shallower hubs buy more modes per reaction,
+so they contribute disproportionately to whatever fits inside a 100-reaction budget -- but that is one
+cell and the inference is not tested here.
 
 **11 — the compute-to-reactions sentence, with the cost localised to one stage.** From job 75999's
 `compute_time.csv` (RGFN, arm A, sEH seed 42, 64 hubs), read beside the same run's mode counts:
