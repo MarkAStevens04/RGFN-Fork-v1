@@ -414,6 +414,34 @@ S3-GFN's edge over Saturn and TANGO is partly bought with up to 1.8× their orac
 - **Two pools per competitor cell** (naive / pruned), each read two ways (reactions/candidate,
   reactions/mode). Run `mode_saturation.py` first — cells whose two pools coincide need only one.
 
+### 2.5 Every budget error found so far points the same way — say so before a reviewer does
+
+Five separate measurement errors on the budget and cost axes have surfaced in this project. **All
+five flatter us.** No individual one is suspicious; the pattern is the kind of thing a reviewer
+notices and asks about, and the answer is much better volunteered than extracted.
+
+| # | the error | size | direction | status |
+|---|---|---|---|---|
+| 1 | our three reaction-GFNs trained to 320,000 oracle calls against the competitors' 10,000 | **32×** | favours us | **fixed** — the arm split (§1) |
+| 2 | SCENT's periodic validation scored 1,000 molecules per pass, labelled `train`, inflating its own training count | **2.84×** | favours us | **fixed** — phase-gated budget + `valid_step` wrapper (§1) |
+| 3 | placing the arm-A checkpoint by step count rather than by oracle calls (RGFN scores 100 forward **+ 20 replay** = 120.6/iter, so it crossed at iteration **83**, not 100) | **~20%** | favours us | **avoided** — never shipped; the phase counter was written first (§7.2) |
+| 4 | a CBC `TimeLimit` row is a feasible solution, not an optimum, so it understates the competitor's selector | unbounded | favours us | **structural — flag, cannot fix** (§6.7) |
+| 5 | trimming an already-solved SPARROW selection to a smaller budget is feasible but not re-optimised, so it understates the competitor | unbounded | favours us | **structural — flag, cannot fix** (CLAUDE.md) |
+
+The 1–3 / 4–5 split is the honest part and must not be collapsed. **1–3 were our own errors and are
+corrected.** **4–5 are properties of the comparison itself**: a truncated solve and a trimmed solve
+are both lower bounds on the competitor, and no amount of care removes that — it can only be
+disclosed per row. Report both classes; do not let the fixed ones imply the structural ones went
+away.
+
+**Why this is worth a section rather than a footnote.** Errors 1–3 were each found by looking for
+them, and each was corrected *against our own result*: #1 cost us the 32× training advantage, #2
+removed 2.84× of SCENT's apparent budget, #3 gave up ~20% of headroom on the arm that carries the
+external head-to-head. That is the claim to make — not "we made no errors", which is false, but "we
+went looking in the direction that costs us, and we published what we found." Anyone adding a sixth
+row should record its direction even when it points the other way; a table in which every row
+flatters us is only credible if the other direction was also searched.
+
 ---
 
 ## 3. The two stage graphs
@@ -678,14 +706,36 @@ learning curve costs nothing extra.
   of that script reads `from targets import get_target` and line 90 calls it, on both this branch
   and the competitor branch. Flagged by the Standard Pipeline session and verified. The remaining
   bullets below were NOT re-checked at the same time and should be treated as still open.
-- `upsample_to_modes.py`'s `--target` choices are `sorted(DEFAULT_CAP)` = clpp/drd2/seh, and
-  `DEFAULT_CAP` has no `6td3b` entry.
-- About eight hardcoded `("6td3","clpp")` membership tests and `_HIGHER_IS_BETTER_BY_REWARD` dicts in
-  the sample/enumerate path — `scent_worker.py:67,696,793`, `rgfn_adapter.py:63`,
-  `rxnflow_worker.py:98`, `fraggfn_worker.py:120`, `scent_adapter.py:43,87`,
-  `greedy_oracle/analyze_greedy.py:49` — where `6td3b` falls through a `.get(name, True)` default and
-  lands on the **correct answer by luck** (it is higher-is-better, unlike both existing docking
-  targets). Add it explicitly and make unknown targets fail loudly.
+- ~~`upsample_to_modes.py`'s `--target` choices are `sorted(DEFAULT_CAP)` = clpp/drd2/seh, and
+  `DEFAULT_CAP` has no `6td3b` entry.~~ **STRUCK 2026-09-12 — correctly NOT done.** That script is
+  the Stage-2 **competitor** pool builder; the three reaction-GFNs never call it. 6TD3-B is scoped to
+  our three models only, so adding a `6td3b` entry there would assert that the competitors run 6TD3-B.
+  The argparse rejection is the right behaviour, not a gap. (Raised by agent C against this bullet.)
+- ~~About eight hardcoded `("6td3","clpp")` membership tests and `_HIGHER_IS_BETTER_BY_REWARD`
+  dicts~~ **DONE 2026-09-12, `69c1251` / `947493f`** — and the fix was not the one this bullet
+  described. **The same literal `("6td3","clpp")` means two different things** in the four places it
+  appears, and 6TD3-B belongs in one of them and not the other:
+
+  | the test really asks | 6TD3-B? | why |
+  |---|---|---|
+  | is the reward produced by the docking bridge? | **yes — added** (`rxnflow_worker`, `scent_worker`) | it is a docking reward |
+  | does the gate read a DIFFERENT column than the reward? | **no — deliberately absent** | 6TD3/ClpP reward is `clip(-vina)` while the bar is raw Vina; 6TD3-B's reward *is* `cnn_vs` and it gates on `cnn_vs`, so reward and gate are the same column |
+
+  With one literal serving both questions, 6TD3-B was landing on the second answer **by coincidence**,
+  exactly as the `.get(name, True)` default was landing on the first. Both
+  `_HIGHER_IS_BETTER_BY_REWARD` dicts now carry an explicit `"6td3b": True`, and `rgfn_adapter`
+  records that the *absence* from the second test is load-bearing so nobody "completes" it later.
+  Verified end to end: `scent/6td3b/42` resolves to `REWARD_TYPE=docking`, `HIGHER_IS_BETTER=true`,
+  gate `6.718`, `ORACLE=docking_6td3b_gpu`, `PHASE=2`, with the oracle name read from the config
+  rather than a literal.
+- **STILL OPEN, and it is what actually blocks phase 2: there are no `6td3b` TRAINING CONFIGS.**
+  Plumbing alone cannot launch a cell. The three generators have `fixed_reward_6td3_5k.gin`,
+  `scent_6td3_fixed_5k.gin` and `rxnflow_6td3_docking_fixed_5k.yaml`; there is **no `6td3b`
+  equivalent of any of them** (a repo-wide search for `*6td3b*` returns one log, one analysis script
+  and its `.pyc`). The oracle side is ready — `docking_6td3b_gpu` → `Docking6TD3BGpuOracle` is
+  registered in `glue/oracles/__init__.py` and dispatched in `docking_server.py:268` — so this is
+  three configs cloned from the `6td3` ones and repointed at that oracle, not new science. Until they
+  exist, all 27 phase-2 cells are unlaunchable.
 
 ### 7.4 ~~Correct RxnFlow's batch size~~ — WITHDRAWN, no change needed
 
@@ -779,6 +829,26 @@ boost libraries, which surfaces as all-`nan` and reads exactly like a degraded G
 
 Chains claim cells before any file appears. Grep every queued job's `CELLS=` line first, and prefer
 `scontrol hold` over cancel.
+
+### 8.7 Artifacts that are not where the naming convention says
+
+A driver that locates a cell's artifact by **describing** it — a glob, a filename pattern, a
+directory shape — has been wrong silently every time it has been tried here. Two live instances, both
+verified 2026-09-12:
+
+| generator | what a weight-glob finds | what the artifact actually is |
+|---|---|---|
+| **SynFormer** | **nothing** — zero `.pt` and zero `.ckpt` anywhere under `synformer/` | it is a genetic algorithm; its arm-A artifact is a **population**, `population_checkpoints/pop_10000.csv` (ten `pop_*.csv` per cell). A driver globbing for weights reads a healthy cell as a failed one. It is also exempt from Stage 2 — a population cannot be upsampled |
+| **S3-GFN** | three targets' models at the **same path tail** | it hardcodes its run name, so every target writes `<cell>/seed<N>/s3gfn_seh/s3gfn_seh-seed<N>_model.pt`. Only the outermost cell directory carries the truth; keying on basename or immediate parent silently collides three different models, each of which loads fine and produces plausible numbers for the wrong target |
+
+Related but distinct from §8.2: there the field name lies about its *contents*; here the convention
+lies about the artifact's *location or form*. Both fail successfully.
+
+**The rule:** consult the record the pipeline already produces — `.copy_manifest.json`,
+`arm_meta.json`, the cell's own inventory — instead of restating the convention. Where a filter is
+unavoidable, assert on the RESULT (destination bytes vs source bytes) rather than on the rule; a
+transferred-file count reads ~0 on a correct incremental re-run and so cannot distinguish success
+from a no-op.
 
 ---
 
