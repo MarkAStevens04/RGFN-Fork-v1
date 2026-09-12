@@ -5,10 +5,10 @@ WHY THIS EXISTS. ``verify_cell.py`` requires every train/ directory to carry ``a
 says so in its own failure text: "missing -- the runner must record which call count this checkpoint
 sits at". No runner did. ``copy_forward.py`` writes it for COPIED cells, so the 54 competitor cells
 verify; nothing on the TRAINING path wrote it at all. The consequence was silent and total: every
-generated cell -- all 27 reaction-GFN cells of arm A, not merely one retrain -- would fail
-verification on a missing file before any substantive check ran, and a cell that cannot verify
-cannot be frozen, and a cell that cannot be frozen cannot be accepted. The gate was not lenient,
-it was unreachable.
+generated cell -- all 54 rows of grid.csv carrying ``train_plan=generate`` (27 phase-1 + 27 phase-2;
+36 of them reaction-GFNs), not merely the one retrain that exposed it -- would fail verification on
+a missing file before any substantive check ran, and a cell that cannot verify cannot be frozen, and
+a cell that cannot be frozen cannot be accepted. The gate was not lenient, it was unreachable.
 
 ⛔ RUN THIS INSIDE THE TRAINING JOB, NOT AFTERWARDS FROM A LOGIN NODE. ``--pythonhashseed`` must be
 passed from the live environment of the run (``--pythonhashseed "${PYTHONHASHSEED-}"``). Reading it
