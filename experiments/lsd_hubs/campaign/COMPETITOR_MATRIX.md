@@ -101,8 +101,14 @@ hypothesis. The superseding sEH cells (jobs 75753-55) are clean at 10,000 trace 
 
 **A second budget is UNAVAILABLE on the competitor side, on a measured basis.** SynFormer's three
 sEH cells trained at 10,048 oracle calls in **19.30 h / 20.70 h / 20.17 h** wall-clock
-(`timing.json`: top-level **`total_s`** = 69,489 / 74,502 / 72,605, with `unaccounted_s` 0.0 and
-`phases` summing exactly to it; jobs 75753-55, 10,000 trace rows each). NOTE the field name —
+(`timing.json`: top-level **`total_s`** = 69,489 / 74,502 / 72,605; jobs 75753-55, 10,000 trace rows
+each). **Do NOT read these cells' `unaccounted_s: 0.0` as a passing audit** — an earlier draft did.
+`phases` holds exactly ONE key (`total_run_s`) on all nine SynFormer cells, so `unaccounted_s` is
+0.0 by construction and carries no information: a complete-looking breakdown of a single bucket.
+What makes the wall-clock trustworthy here is different and weaker — `total_s` is a directly measured
+job runtime, and the **trace row count is an independent witness** that the work happened (10,000
+rows on eight cells, 6,950 on `drd2/43`, see below). `unaccounted_s` is only a detector where
+`phases` has more than one entry to sum. NOTE the field name —
 `total_run_s` is a PHASE key *inside* `phases`, not a top-level field, and an earlier draft of
 this file cited it as though it were. Timing schemas are not uniform across this project: a
 sweep of the v2 cells found `train_s` recorded as 0.0 on 9 of them (indistinguishable from
