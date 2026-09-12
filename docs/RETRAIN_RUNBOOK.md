@@ -803,6 +803,9 @@ project at least once:
 | durations in prose | `20:10` = 20 min 10 s | on this cluster it is as likely **20 h 10 min**. Always write `19.30 h` |
 | a complete-looking `candidates.csv` | the budget was spent | the file is written at full size regardless. `synformer_drd2/43` scored **6,950 of 10,000** — its search exhausted before its budget did — and passed every downstream check as a complete cell. The **trace row count is the only witness**; label the cell, do not average it in |
 | a `oom-kill` block in a job's `.out` | this job was OOM-killed | node-level dmesg spills into NEIGHBOURING jobs' logs. `ch_sf_drd2_43-74719.out` carries one naming `oom_memcg=.../job_74716`, a different cell. **Check the job id inside the block before believing it** — this produced a confident wrong diagnosis once already |
+| `train_s: 0.0` (`timing.json`) | training was free / instant | **the resume path ran and no training happened.** `run_s3gfn_fixed.py:344` writes `train_s = 0.0` when it finds a checkpoint and skips straight to sampling. **9 of the 54 copied v2 cells record it** — 8 of the 9 S3-GFN cells plus `saturn_clpp_s43`. Only `s3gfn_seh_s44` carries a real S3-GFN training cost (598.959 s) |
+| `phases` keys across generators | one schema | **three.** S3-GFN/Saturn write `train_s`/`sample_s`; **FragGFN writes `train`/`sample`** with no suffix. A cost table keyed on `train_s` silently skips all 9 FragGFN cells and reports nothing rather than failing |
+| `total_s` vs its own `phases` | the phases sum to the total | not necessarily. `saturn_clpp_s43` reads `total_s` 10,264 s against phases summing to **47 s** — `unaccounted_s` 10,217, i.e. **99.5% of the run is outside the accounting**. Check `unaccounted_s` before quoting any per-phase cost |
 
 **The rule:** read the field's writer before quoting its reader. The names lie by omission, and a
 plausible reading of a plausible number is exactly what no re-run will catch.
@@ -831,6 +834,21 @@ boost libraries, which surfaces as all-`nan` and reads exactly like a degraded G
 
 Chains claim cells before any file appears. Grep every queued job's `CELLS=` line first, and prefer
 `scontrol hold` over cancel.
+
+### 8.8 Retired thresholds live on inside DATA, where fixing the script does not reach them
+
+`multiaiz_pools/` holds PRE-Stage-2 pools, tagged without `_stage2`, built before ClpP was
+recalibrated from **−8.0 to −9.1**. Their scores top out at exactly −8.0, so only **13–37%** of each
+clears the current gate. A `*_N*` glob picks up twelve of them — `reinvent_clpp_seed42_N500`,
+`s3gfn_clpp_seed42_N339` and siblings — and they read as badly-performing current cells rather than
+correctly-performing retired ones. Restricting to `_stage2` (plus bare `synformer_`) gives the clean
+109.
+
+**Quiet in both directions:** a glob that picks them up understates the field, and a −8.0 ceiling
+looks like a plausible ClpP score rather than an obvious sentinel. This is the same family as §7.3's
+pre-standard shell defaults with one difference that matters — **the stale bar is baked into the
+DATA, so correcting the script does not correct these files.** They have to be excluded by tag or
+re-built.
 
 ### 8.7 Artifacts that are not where the naming convention says
 
