@@ -890,6 +890,27 @@ boost libraries, which surfaces as all-`nan` and reads exactly like a degraded G
 Chains claim cells before any file appears. Grep every queued job's `CELLS=` line first, and prefer
 `scontrol hold` over cancel.
 
+### 8.9 A backup scope silently NARROWS as the data grows around it
+
+Four backup gaps surfaced on 2026-09-12, and none was a mistake at the time it was written. Each was
+a scope decision that stayed still while the data moved:
+
+| gap | size | why the rule stopped covering it |
+|---|---|---|
+| `lsdflow_sparrow/` — the **whole 106-cell competitor matrix** | 2.4 G | the script copies `experiments/` and `lsdflow/`; the matrix lives in a THIRD tree that postdates the `lsdflow/` line. The header says "the LSD-Flow artifacts derived from them", which reads as though it covers it |
+| `routes.jsonl` (SynFormer's native routes) | — | the tier-1 include list predates it; without it SynFormer's Stage 3 cannot be reproduced at all |
+| `*.out` / `*.err` SLURM logs | 139 M | excluded **deliberately** — correct while logs were transcripts, wrong the moment instrumentation printed without serialising (§8.8) |
+| the tier-1 name allowlist | 0.74% of the tree | written from our generators' conventions; `last_gfn.pt` matched 9 files, `checkpoint*.pt` matched none |
+
+**The lesson is not "be careful".** It is that an include-list or a named-subtree scope is a claim
+about data that existed when it was written, and it degrades silently and successfully — a backup
+protecting 0.7% logs exactly what one protecting 100% logs.
+
+**How to check one:** compare DESTINATION against SOURCE, per irreplaceable artifact type, and
+prefer no filter where the data is small. 139 MB against 949 GB free does not justify a clever rule.
+And when comparing, **match on CONTENT, not on filename** — S3-GFN writes three targets' models to the
+same path tail (§8.7), so a basename comparison reports three distinct models as one and passes.
+
 ### 8.8 Instrumentation that PRINTS but does not SERIALISE — and the logs are not backed up
 
 `run_synformer_fixed.py` measures four phases per generation and prints them as `[SF-TIME]` lines,
