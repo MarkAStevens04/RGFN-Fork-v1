@@ -1011,6 +1011,31 @@ artifact path it lands in, and the `reproduce/` script that consumes it. Note
 Figures are build products and are never committed. Run `tools/check_identity.py --all` before
 committing there — the default scans only *tracked* files, so a new file is invisible to it.
 
+### 10.1 When a generation lands, re-harvest and flip the marker — this is OUR step, not theirs
+
+**Every artifact in `RGFN-LSD/artifacts/` is v1 and is superseded by this re-run.** The publication
+repo tracks which measurement generation each committed artifact belongs to
+(`artifacts/MANIFEST.csv`, built by `tools/build_manifest.py`, with `--check` failing on a stale one).
+That marker cannot flip itself, and the publication side cannot know when a generation lands. So:
+
+> **On completing a phase, re-run the named harvest script in `tools/harvest/` against the new tree
+> and flip `GENERATION` in the publication repo, then rebuild the manifest.** No `reproduce/` script
+> changes — the harvest layer is the seam, and it is already parameterised by `--matrix-root` /
+> `--campaign-root` / `--research-root`, so retargeting is a flag change.
+
+This deliberately lives here and NOT as a generation column inside `benchmark_v2/`. The research
+tree's tooling computes live status at load time *because the research tree changes constantly*;
+published artifacts change once per generation. Teaching `manifest.py` which of its cells someone
+downstream happened to publish would couple the producer to the consumer in the wrong direction, and
+a fourth hand-maintained inventory beside `grid.csv`, `PROVENANCE.csv` and `manifest.py` is exactly
+the document that goes stale and misleads.
+
+**The route dataset is the sharpest case.** v1 can support route artifacts for only 5 cell-seeds; the
+matrix-wide, chemist-facing dataset exists only as a by-product of this re-run (`benchmark_v2/README`,
+route readiness as a hard gate). The exporter is being built now against the cells that exist, so
+**the machinery is what is proven today, not the dataset.** Do not describe the dataset as existing
+until the phase that produces it has passed §6.
+
 ---
 
 ## 11. Open questions
