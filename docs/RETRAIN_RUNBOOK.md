@@ -69,6 +69,22 @@ Never on the step axis. Three generators have three different per-step call coun
 SCENT 64, RxnFlow 64 at the authors' `num_from_policy`), and replay buffers make the arithmetic
 unsettleable. **The trace counter decides, not multiplication.**
 
+**And at arm B the counter must survive a PROCESS boundary.** `TraceWriter.__init__` sets
+`n_scored = 0` and `n_train_scored = 0` fresh, then rotates any existing `trace.csv` to `trace.csv.N`
+— **with no resume seed** (`_trace.py:78,83,95-99`). SCENT's arm B requeues two or three times on the
+docking targets, so a stop reading the LIVE counter would restart from zero on each requeue and train
+**640,000–960,000 calls against a declared 320,000**, with every artifact looking healthy. The arm-B
+stop must therefore **COUNT `phase == "train"` rows across `trace.csv` AND its `.N` siblings** — which
+the module's own comment already prescribes ("readers that want the FULL history across rounds should
+concatenate trace.csv with its .N siblings"). This is the cumulative-counter trap in its third place,
+after `asked` and `n_scored` (§8.2); here it crosses a process boundary rather than a phase or a round.
+
+**Consequence for scheduling, since a call budget is not an iteration budget:** at a true 320,000
+calls RGFN needs ~2,650 iterations, SCENT 5,000, RxnFlow ~10,300 — so RGFN roughly HALVES and RxnFlow
+roughly DOUBLES against an iteration-matched run. Iteration-matching would instead give ~603k / 320k /
+~155k, a **4× spread on the very axis this campaign claims to control**, which is why the arms are
+defined on calls.
+
 | arm | budget | who | purpose |
 |---|---|---|---|
 | **A** | **10,000 oracle calls** | all 9 generators | the PMO convention the competitors' own papers use |
@@ -442,6 +458,13 @@ way, found 2026-09-12 before it ran: **five of the six competitor docking bridge
 returns **exactly 0.0 for every molecule** — a flat reward, silently, for ~3.3 h of docking per cell
 across **18 cells**. It would have made the COMPETITORS look terrible on 6TD3-B, which is the
 direction a reviewer would never think to question and we would never think to check.
+
+**A TRAP SITS ON THE REPAIR PATH.** `oracle_higher_is_better` looks like the fix and is not: it is
+consumed at `al_loop.py:230` as `min(valid) if not ... else max(valid)`, i.e. candidate **SELECTION**,
+and FragGFN passes it too, so it does not even distinguish the affected generators. Flip it and you
+change which molecules are kept, leave the reward flat, and believe you are done. The reward seam is
+`self.sign` in the `_value` mapping; `rxnflow/fixed_reward.py:160-172` documents the same hazard from
+the other side and is worth reading before touching any of the five.
 
 **And a banner did not prevent it.** `rxnflow_6td3b_docking_fixed_5k.yaml` carries a
 "⚠ LOAD-BEARING — DO NOT DELETE" warning describing precisely this catastrophe. The fix landed in the
