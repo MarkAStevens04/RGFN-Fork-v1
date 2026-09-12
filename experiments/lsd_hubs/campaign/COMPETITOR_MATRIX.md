@@ -1,7 +1,7 @@
 # The competitor matrix — where the numbers are, and how to quote them
 
-**State as of 2026-09-08: 106 of 108 cells complete.** Branch `worktree-fraggfn-stage2`, head
-`6e62255`. Full narrative in [`Logs/079`](../../../Logs/079_reprice-capped-rows-and-coarse-ladder.md);
+**State as of 2026-09-08: 106 of 108 cells complete.** Merged to `Hub-Analysis` at `8ca3cd9`
+(originated on `worktree-fraggfn-stage2`). Full narrative in [`Logs/079`](../../../Logs/079_reprice-capped-rows-and-coarse-ladder.md);
 this file is the operational summary for anyone comparing against these numbers.
 
 This is the **competitor** half of the benchmark: 6 generators × 3 targets × 3 seeds × 2 pools.
@@ -48,6 +48,60 @@ an "exists and non-empty" check passes that.
    about a quarter of the answer, and there a relaxed-gap `Optimal` can be BELOW a capped incumbent.
 5. **Never mix the two axes** (modes-at-100-reactions vs reactions-for-100-modes) or two ladder
    resolutions in one table. A co-agent already lost a result to the second.
+
+---
+
+## What budget are these cells at? NOT 10,000 oracle calls
+
+Stage 2 equalises **pools** (500 modes), not oracle calls, so the oracle-call axis is uncontrolled —
+and uncontrolled in a generator-correlated way. Measured from each cell's
+`$SCRATCH/rgfn_runs/stage2/<cell>/upsample_log.json` (`newly_sampled`, on top of Stage 1's 10,048):
+
+| generator | total oracle calls |
+|---|---|
+| reinvent / saturn / tango | 12,018 - 12,048 |
+| fraggfn | 12,047 - 14,046 |
+| s3gfn | 10,048 - 18,048 |
+
+Spread **1.80x** (10,048 - 18,048); total Stage-2 surcharge across 45 cells **122,411 calls**. The
+largest surcharges are all S3-GFN's — `seh 43` +8,000, `drd2 42` +7,308, and the three ClpP cells
++6,300-6,500 each, all of which STALLED and still did not reach 500 modes.
+
+**So these are not "10,000 oracle call" results and must not be placed in a column that claims to
+be.** The honest label is *"arm-A training plus a measured Stage-2 surcharge of 2,000-8,000"*, with
+the 1.80x spread and its S3-GFN concentration stated rather than averaged away.
+
+**This is a LABELLING obligation, not a fairness hole — an earlier draft of this file had the
+direction backwards.** Within the competitor field the surcharge does tilt things: S3-GFN's edge over
+Saturn and TANGO is partly bought with up to 1.8x their oracle calls, and that is worth stating. But
+the inference-time oracle axis is uncontrolled for *everyone*, and **we are by far its heavier
+user** — our own campaign's per-cell `cum_reward_gen_calls` runs to **447,000-791,503** in the
+budget-scale runs (`results/budget_scale_ours_*/curve_hub_batching.csv`), i.e. 50-100x the
+competitors' entire Stage-2 surcharge. Equalising this axis is not the fix; the project deliberately
+demoted the fixed-MODE readout that equalising would force. Measure it and report it per arm.
+
+**Do not compute the surcharge from `rounds[].asked`.** That field is the CUMULATIVE escalating
+request per round (4000, then 8000, then 12000), so summing it double-counts — it reports 24,000 for
+a cell whose distinct set grew by 1,216. Use the top-level `newly_sampled`; `free_from_training` and
+`distinct_scored` are the other honest fields.
+
+**A second budget is UNAVAILABLE on the competitor side, on a measured basis.** SynFormer's three
+sEH cells trained at 10,048 oracle calls in **19.30 h / 20.70 h / 20.17 h** wall-clock
+(`timing.json`, `total_run_s` = 69,489 / 74,502 / 72,605; jobs 75753-55, 10,000 trace rows each).
+Linear in calls, 320,000 would be ~615 h per cell — **~5,530 GPU-h for its nine cells alone**.
+Saturn and TANGO are the same shape. So an iteration-matched external comparison at a second budget
+is not merely expensive, it is out of reach; a budget-dependence check has to run on generators we
+can actually train twice.
+
+*Write durations with explicit units.* On a cluster where jobs legitimately run for both twenty
+minutes and twenty hours, `20:10` is ambiguous and the failure is silent — a reader can "correct" a
+right number to a wrong one and be confident about it. This nearly happened on these very figures.
+
+**Consequence for any budget-matched comparison:** the redundancy and route-sharing mechanisms below
+are properties of the CONVERGED pool, so both are budget-dependent in principle. Nothing here has
+been measured at a second budget. If you are comparing against a run at a different oracle budget,
+measure the greedy→SB uplift on both rather than assuming it transfers — it is free, since both arms
+already run for every cell.
 
 ---
 
