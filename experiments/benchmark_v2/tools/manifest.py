@@ -107,6 +107,30 @@ _RUNNER = {
 # CORRECT (attachments, not reactions) and must never be "fixed".
 _ROUTE_BEARING = {"rgfn", "rxnflow", "scent"}
 
+# Training config per (generator, target) for the three reaction-GFNs, at the uniform 5k budget.
+#
+# WRITTEN OUT IN FULL ON PURPOSE -- do NOT derive these from a naming convention, because there
+# isn't one. Two of the three generators name their docking cells and their surrogate cells
+# differently: RGFN has fixed_reward_6td3_5k.gin but fixed_reward_drd2_STDLIB_5k.gin, and RxnFlow
+# has rxnflow_6td3_DOCKING_fixed_5k.yaml but rxnflow_seh_fixed_STDLIB_5k.yaml. An f-string that
+# reproduced the 6td3 pattern would resolve four of these twelve to paths that do not exist, and
+# `cfg` would hand a launcher a missing file instead of raising. Verified against ls;
+# `--check-configs` re-verifies every entry is still on disk.
+_CFG = {
+    ("rgfn", "seh"): "configs/glue/fixed_reward_seh_proxy_stdlib_5k.gin",
+    ("rgfn", "drd2"): "configs/glue/fixed_reward_drd2_stdlib_5k.gin",
+    ("rgfn", "clpp"): "configs/glue/fixed_reward_clpp_5k.gin",
+    ("rgfn", "6td3b"): "configs/glue/fixed_reward_6td3b_5k.gin",
+    ("scent", "seh"): "validation/configs/scent_seh_fixed_5k.gin",
+    ("scent", "drd2"): "validation/configs/scent_drd2_fixed_5k.gin",
+    ("scent", "clpp"): "validation/configs/scent_clpp_fixed_5k.gin",
+    ("scent", "6td3b"): "validation/configs/scent_6td3b_fixed_5k.gin",
+    ("rxnflow", "seh"): "validation/configs/rxnflow_seh_fixed_stdlib_5k.yaml",
+    ("rxnflow", "drd2"): "validation/configs/rxnflow_drd2_fixed_stdlib_5k.yaml",
+    ("rxnflow", "clpp"): "validation/configs/rxnflow_clpp_docking_fixed_5k.yaml",
+    ("rxnflow", "6td3b"): "validation/configs/rxnflow_6td3b_docking_fixed_5k.yaml",
+}
+
 
 @dataclass
 class Cell:
@@ -114,14 +138,14 @@ class Cell:
 
     generator: str
     gen_class: str
-    role: str          # hub_batching | competitor
-    pipeline: str      # ours | competitor
+    role: str  # hub_batching | competitor
+    pipeline: str  # ours | competitor
     target_name: str
     seed: int
     phase: int
     arm_a_calls: int
     arm_b_calls: Optional[int]
-    train_plan: str    # generate | copy -- a PLAN, see build_grid.py
+    train_plan: str  # generate | copy -- a PLAN, see build_grid.py
     note: str
 
     # -- identity ---------------------------------------------------------------
@@ -151,6 +175,19 @@ class Cell:
     @property
     def runner(self) -> str:
         return _RUNNER[self.generator]
+
+    @property
+    def cfg(self) -> str:
+        """Training config for this cell. Raises for combinations that have none -- the six
+        competitor generators are launched by their own scripts, not from a config in this tree,
+        and a silently-empty CFG is how a launcher trains the wrong target."""
+        try:
+            return _CFG[(self.generator, self.target_name)]
+        except KeyError:
+            raise KeyError(
+                "no training config registered for (%s, %s); _CFG covers %s"
+                % (self.generator, self.target_name, sorted({g for g, _ in _CFG}))
+            ) from None
 
     @property
     def worker(self) -> str:
@@ -281,31 +318,40 @@ class Cell:
 def load_grid(path: Path = GRID_CSV) -> List[Cell]:
     if not path.is_file():
         raise SystemExit(
-            f"no grid at {path}\n"
-            f"  regenerate it:  python {HERE / 'build_grid.py'}"
+            f"no grid at {path}\n" f"  regenerate it:  python {HERE / 'build_grid.py'}"
         )
     cells: List[Cell] = []
     with open(path) as fh:
         for r in csv.DictReader(fh):
             b = r.get("arm_b_calls", "").strip()
-            cells.append(Cell(
-                generator=r["generator"].strip(),
-                gen_class=r["gen_class"].strip(),
-                role=r["role"].strip(),
-                pipeline=r["pipeline"].strip(),
-                target_name=r["target"].strip(),
-                seed=int(r["seed"]),
-                phase=int(r["phase"]),
-                arm_a_calls=int(r["arm_a_calls"]),
-                arm_b_calls=int(b) if b else None,
-                train_plan=r["train_plan"].strip(),
-                note=r.get("note", "").strip(),
-            ))
+            cells.append(
+                Cell(
+                    generator=r["generator"].strip(),
+                    gen_class=r["gen_class"].strip(),
+                    role=r["role"].strip(),
+                    pipeline=r["pipeline"].strip(),
+                    target_name=r["target"].strip(),
+                    seed=int(r["seed"]),
+                    phase=int(r["phase"]),
+                    arm_a_calls=int(r["arm_a_calls"]),
+                    arm_b_calls=int(b) if b else None,
+                    train_plan=r["train_plan"].strip(),
+                    note=r.get("note", "").strip(),
+                )
+            )
     return cells
 
 
-def select(cells: Optional[List[Cell]] = None, *, generators=None, targets=None,
-           seeds=None, phase=None, role=None, pipeline=None) -> List[Cell]:
+def select(
+    cells: Optional[List[Cell]] = None,
+    *,
+    generators=None,
+    targets=None,
+    seeds=None,
+    phase=None,
+    role=None,
+    pipeline=None,
+) -> List[Cell]:
     """Filter the grid. All criteria AND together; None = no constraint."""
     cells = cells if cells is not None else load_grid()
     out = []
@@ -362,6 +408,9 @@ def emit_shell(cell: Cell, arm: str = "a") -> str:
         "ORACLE": (t.oracle if t.is_docking else ""),
         "CONDA_ENV": cell.conda_env,
         "RUNNER": cell.runner,
+        # Training config for the three reaction-GFNs; "" for competitors, which are
+        # launched by their own scripts. A launcher that trains MUST refuse an empty CFG.
+        "CFG": cell.cfg if (cell.generator, cell.target_name) in _CFG else "",
         "WORKER": cell.worker if cell.is_hub_batching else "",
         "ROUTE_BEARING": "true" if cell.route_bearing else "false",
         "TRAIN_DIR": str(cell.train_dir(arm)),
@@ -386,34 +435,52 @@ def emit_shell(cell: Cell, arm: str = "a") -> str:
 
 
 def _print_table(cells: List[Cell], arm: str) -> None:
-    hdr = (f"{'cell':<26}{'class':<20}{'role':<14}{'ph':>3}{'gate':>9}  "
-           f"{'plan':<9}{'trace':>9}  status")
+    hdr = (
+        f"{'cell':<26}{'class':<20}{'role':<14}{'ph':>3}{'gate':>9}  "
+        f"{'plan':<9}{'trace':>9}  status"
+    )
     print(hdr)
     print("-" * len(hdr))
     for c in cells:
         t = c.target
         gate = f"{'>' if t.higher_is_better else '<'}{t.mode_reward_threshold:g}"
         rows = c.trace_rows(arm)
-        print(f"{c.tag:<26}{c.gen_class:<20}{c.role:<14}{c.phase:>3}{gate:>9}  "
-              f"{c.train_plan:<9}{(rows if rows is not None else '-'):>9}  {c.status(arm)}")
+        print(
+            f"{c.tag:<26}{c.gen_class:<20}{c.role:<14}{c.phase:>3}{gate:>9}  "
+            f"{c.train_plan:<9}{(rows if rows is not None else '-'):>9}  {c.status(arm)}"
+        )
     n = len(cells)
     done = sum(1 for c in cells if c.status(arm) in ("verified", "frozen"))
     print(f"\n{done}/{n} accepted (verified or frozen) on arm {arm}")
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--emit", nargs=3, metavar=("GEN", "TARGET", "SEED"),
-                    help="shell-sourceable spec for one cell")
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument(
+        "--emit",
+        nargs=3,
+        metavar=("GEN", "TARGET", "SEED"),
+        help="shell-sourceable spec for one cell",
+    )
     ap.add_argument("--arm", default="a", choices=ARMS)
     ap.add_argument("--list", action="store_true", help="print tags only, one per line")
     ap.add_argument("--phase", type=int, default=None)
     ap.add_argument("--role", default=None, choices=("hub_batching", "competitor"))
     ap.add_argument("--generator", action="append", default=None)
     ap.add_argument("--target", action="append", default=None)
-    ap.add_argument("--status", action="store_true",
-                    help="status table plus a plan-vs-disk reconciliation summary")
+    ap.add_argument(
+        "--status",
+        action="store_true",
+        help="status table plus a plan-vs-disk reconciliation summary",
+    )
+    ap.add_argument(
+        "--check-configs",
+        action="store_true",
+        help="prove every _CFG entry exists on disk and every generate-plan "
+        "reaction-GFN cell resolves one (exit 1 otherwise)",
+    )
     a = ap.parse_args()
 
     if a.emit:
@@ -423,6 +490,29 @@ def main() -> int:
             raise SystemExit(f"{cell.tag} has no arm {a.arm} (arm B is reaction-GFNs only)")
         print(emit_shell(cell, a.arm))
         return 0
+
+    if a.check_configs:
+        root = Path(__file__).resolve().parents[3]
+        bad = 0
+        print("_CFG entries vs disk:")
+        for (gen, tgt), rel in sorted(_CFG.items()):
+            ok = (root / rel).exists()
+            bad += 0 if ok else 1
+            print(f"  {'ok ' if ok else 'MISSING'}  {gen:<8} {tgt:<6} {rel}")
+        print("\ncells with train_plan=generate that must resolve a config:")
+        for c in select(role="hub_batching"):
+            if c.train_plan != "generate":
+                continue
+            try:
+                rel = c.cfg
+                ok = (root / rel).exists()
+                bad += 0 if ok else 1
+                print(f"  {'ok ' if ok else 'MISSING'}  {c.tag:<22} -> {rel}")
+            except KeyError as e:
+                bad += 1
+                print(f"  UNRESOLVED  {c.tag:<22} -> {e}")
+        print(f"\n{'FAIL' if bad else 'PASS'}: {bad} problem(s)")
+        return 1 if bad else 0
 
     cells = select(phase=a.phase, role=a.role, generators=a.generator, targets=a.target)
     cells = [c for c in cells if c.has_arm(a.arm)]
