@@ -2204,3 +2204,63 @@ other REPO_DIR job ran fine. Fixed with a symlink `oracle -> <shared checkout>/o
 **That symlink must never be committed.** A symlink into the shared checkout was committed on this
 project once before and a later merge DELETED the real directories behind it. It shows as `?? oracle`;
 stage files explicitly, never `git add -A`, in any worktree of this repo.
+
+---
+
+## 2026-09-12 — `glue/export/`: the route dataset gets an implementation
+
+`docs/ROUTE_DATASET_SCHEMA.md` had been a specification with no code since 2026-08-24. It now has
+one, split the way `CLAUDE.md` requires: the reusable core in **`glue/export/`** (naming, route
+assembly, the AiZynth-tree and flat-table views, the writers, the batch scheme), and a thin driver
+**`experiments/lsd_hubs/campaign/export_library.py`** that locates a cell's artifacts and wires them
+to it. The core opens no run directory and hardcodes no path — it takes a `CampaignResult`, a map of
+logged routes and a catalogue — so `benchmark_v2` needs a new driver, not a new exporter. The name
+is neutral on purpose: it is meant to migrate to the publication repo as `hubbatching.export`.
+
+Nothing was reimplemented. The selection comes from `run_campaign._load_candidates` +
+`build_strategy`; the enumerated hubs from `parallel_groups.load_hubs_with_reactions` (which
+parity-checks itself against `run_campaign._load_enumerated_hubs` before anything is written); route
+linearization is lifted verbatim from `synthesis_routes.linearize`; the scheme is
+`render_route_scheme.py`'s rendering generalised from one molecule to one batch.
+
+### Two files outside `glue/export/` changed, both additively
+
+* **`experiments/lsd_hubs/campaign/reaction_names.py` is now a shim.** The template→named-reaction
+  table moved to `glue/export/naming.py`, because the exporter needs exactly those names and
+  `glue/` may not import from `experiments/`. `parse_template` / `named_reaction` /
+  `is_single_reactant` / `RULES` / `FGI` are re-exported verbatim and every existing caller
+  (`parallel_groups.py`, `yield_by_strategy.py`, `plot_acid_amine_families.py`) is unchanged; the
+  audit CLI `emit_review_table()` stays in `experiments/`. A second copy of the table would let one
+  template acquire two names in two artifacts, which is the one failure a reading aid must not have.
+* **`parallel_groups.RxChild` gained `template` and `product`** (plain strings, defaulted, so the
+  class stays hashable and every grouping is byte-identical). `product` is the only record of an
+  enumerated child's stereo-aware form — `smiles` is the stereo-stripped key — and `template` is
+  what §4.3 puts in the route tree's metadata.
+
+### Verified, on real data (cell `scent_seh_seed43`, frozen `_enum_snapshot_20260820`)
+
+* **The exported selection reproduces the committed campaign exactly.** At the gate the committed
+  `parallel_groups` run used (5.0), both arms match `results/parallel_groups/scent_seh_seed43/
+  modes_*.csv` sliced to `cum_reactions <= 100`: same count (79 / 27), same order, same SMILES,
+  same `cum_reactions`, same `reactions_added`.
+* **`routes.json` is readable by AiZynthFinder itself** — 75/75 and 27/27 parse through
+  `ReactionTree.from_dict` in the `aizynth` env, and `is_solved` (AiZynth's own "every leaf is in
+  stock" test) is True for all 102. Its reaction count agrees with `steps.csv` and with
+  `molecules.csv.n_steps` for every molecule.
+* 31 `scheme.png` rendered; 0 unpurchasable leaves in either arm.
+
+### One spec correction the implementation forced
+
+§4.3's illustrative JSON gives a reaction node only `metadata` and `children`. AiZynth's
+`ReactionTreeFromDict._parse_tree_dict` reads `rxn_tree_dict["smiles"]` with **no default**, so a
+file that followed the example literally raises `KeyError` on load — measured: 0 of 75 trees parsed
+before a retro-direction `"smiles": "<product>>><reactants>"` was added to each reaction node, 75 of
+75 after. The exporter writes it; the doc's example should show it. The doc was NOT edited.
+
+### Not done / not verified
+
+* Only the one cell has been exported. The other three route-complete v1 cells
+  (`scent_seh_seed44`, `scent_drd2_seed43/44`) are the same command with different paths.
+* The output tree is in `$SCRATCH/rgfn_runs/lsdflow-routes/`, not committed — 30 MB of PNGs.
+* `glue/export/` is deliberately NOT registered in `glue/registry.py`: nothing in it is
+  `@gin.configurable`, and registry membership exists so gin can resolve a name.

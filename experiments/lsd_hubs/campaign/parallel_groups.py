@@ -128,6 +128,14 @@ class RxChild(EnumChild):
     # is the stereo-STRIPPED key, so this is the identity a policy can key its per-group records by
     # without two stereoisomeric hubs colliding.
     parent_input: str = ""
+    # The final step's raw template string and its STEREO-AWARE product. Added for the route
+    # exporter (``docs/ROUTE_DATASET_SCHEMA.md``), which has to reconstruct the whole logged step --
+    # ``template`` because §4.3 puts the template that actually fired in the route tree's metadata,
+    # and ``product`` because it is the only place the enumerated child's stereo-aware form is
+    # recorded (``smiles`` is the stereo-stripped key). Both are plain strings so ``RxChild`` stays
+    # hashable and every existing grouping is byte-identical.
+    template: str = ""
+    product: str = ""
 
 
 def load_hubs_with_reactions(enum_path: Path, comps: dict):
@@ -167,6 +175,8 @@ def load_hubs_with_reactions(enum_path: Path, comps: dict):
                     template_id=tid,
                     reagents=tuple(steps[-1].get("reactants", ()) or ()) if steps else (),
                     parent_input=(steps[-1].get("input") or "") if steps else "",
+                    template=tmpl,
+                    product=(steps[-1].get("product") or "") if steps else "",
                 )
             )
         hubs.append(
