@@ -85,6 +85,20 @@ request per round (4000, then 8000, then 12000), so summing it double-counts —
 a cell whose distinct set grew by 1,216. Use the top-level `newly_sampled`; `free_from_training` and
 `distinct_scored` are the other honest fields.
 
+**ONE CELL SPENT ONLY 6,950 OF ITS 10,000 CALLS: `synformer_drd2_seed43`.** Its siblings' traces
+hold 10,000 rows; this one holds 6,950. It was NOT killed — the run ended normally after 29.72 h
+(`[SF-FR] optimization done in 106973.4s (6950 scored, 6955 routed)`) with the last two generations
+adding zero new scored molecules (`gen 80: 6950/10000`, `gen 81: 6950/10000`). The search exhausted
+before the budget did, which is the same shape as Saturn's mode collapse and is a RESULT, not a
+defect — but it means that cell sits at a **1.44x smaller oracle budget** than the rest of its row
+and must be labelled, not averaged in. It still emitted a full 2,000-row `candidates.csv`, so every
+downstream check passed it; the only trace is the row count.
+
+*Beware the log.* `ch_sf_drd2_43-74719.out` contains an `oom-kill` block naming `job_74716` — that is
+`ch_sf_seh_43`, a DIFFERENT cell which TIMEOUT'd at 3 days; node-level dmesg spilled into a
+neighbouring job's log. Reading that OOM as this cell's cause is wrong, and it was my first
+hypothesis. The superseding sEH cells (jobs 75753-55) are clean at 10,000 trace rows each.
+
 **A second budget is UNAVAILABLE on the competitor side, on a measured basis.** SynFormer's three
 sEH cells trained at 10,048 oracle calls in **19.30 h / 20.70 h / 20.17 h** wall-clock
 (`timing.json`, `total_run_s` = 69,489 / 74,502 / 72,605; jobs 75753-55, 10,000 trace rows each).
