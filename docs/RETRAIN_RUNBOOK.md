@@ -857,7 +857,7 @@ project at least once:
 | a complete-looking `candidates.csv` | the budget was spent | the file is written at full size regardless. `synformer_drd2/43` scored **6,950 of 10,000** — its search exhausted before its budget did — and passed every downstream check as a complete cell. The **trace row count is the only witness**; label the cell, do not average it in |
 | a `oom-kill` block in a job's `.out` | this job was OOM-killed | node-level dmesg spills into NEIGHBOURING jobs' logs. `ch_sf_drd2_43-74719.out` carries one naming `oom_memcg=.../job_74716`, a different cell. **Check the job id inside the block before believing it** — this produced a confident wrong diagnosis once already |
 | `train_s: 0.0` (`timing.json`) | training was free / instant | **the resume path ran and no training happened.** `run_s3gfn_fixed.py:344` writes `train_s = 0.0` when it finds a checkpoint and skips straight to sampling. **9 of the 54 copied v2 cells record it** — 8 of the 9 S3-GFN cells plus `saturn_clpp_s43`. Only `s3gfn_seh_s44` carries a real S3-GFN training cost (598.959 s) |
-| `phases` keys across generators | one schema | **four, and only 21 of the 54 copied cells carry a directly readable training cost.** Counted 2026-09-12 — **21** `train_s` real (reinvent/s3gfn/saturn/tango); **9** `train`/`sample`, no suffix (FragGFN) — recoverable by a mapper; **9** whose only phase key is `total_run_s` (SynFormer) — a total with **no train/sample split**, so a mapper does NOT recover a training cost (and note the two names: the top-level field is `total_s`, `total_run_s` is a key *inside* `phases`; citing the wrong one has already propagated two hops); **9** `train_s: 0.0` (see the row above); **6** with **no `timing.json` at all** (Saturn seh + drd2 — its clpp cells have one, unexplained). Keep MISSING and MISMATCHED apart: one is a parsing problem, the other a measurement never taken, and no re-run recovers the second |
+| `phases` keys across generators | one schema | **four, and only 21 of the 54 copied cells carry a directly readable training cost.** Counted 2026-09-12 — **21** `train_s` real (reinvent/s3gfn/saturn/tango); **9** `train`/`sample`, no suffix (FragGFN) — recoverable by a mapper; **9** whose only phase key is `total_run_s` (SynFormer) — no split **in the file**, but the breakdown EXISTS: the runner computes `ga_s`/`sanitize_s`/`project_s`/`score_s` per generation and prints them as `[SF-TIME]`, then serialises only the total. Recoverable by `grep '\[SF-TIME\]'` on the SLURM log, not by a file read (and note the two names: the top-level field is `total_s`, `total_run_s` is a key *inside* `phases`; citing the wrong one has already propagated two hops); **9** `train_s: 0.0` (see the row above); **6** with **no `timing.json` at all** (Saturn seh + drd2 — its clpp cells have one, unexplained). Keep MISSING and MISMATCHED apart: one is a parsing problem, the other a measurement never taken, and no re-run recovers the second |
 | SynFormer's `unaccounted_s: 0.0` | the breakdown is complete | everything is in **one bucket**. `phases` holds only `total_run_s`, so nothing is unaccounted because nothing was separated |
 | `total_s` | what the cell cost to produce | **setup is outside the bracket.** `run_s3gfn_fixed.py:330-331` constructs `SynthSmilesTrainer(...)` and only THEN sets `run_t0`, so loading the 200k-block `zincfrag_hb105` env is untimed — job 76229 spent **6+ minutes** in setup against a recorded `total_s` of 618 s for the whole cell. `run_reinvent_fixed.py:316` has the same shape. This applies to **all 21 otherwise-good cells**, and because `run_t0` is the TOTAL timer it is not only `train_s` that excludes it. "S3-GFN trains in ten minutes" and "an S3-GFN cell takes ten minutes" are different claims and the file supports only the first. Not uniform across runners — check where `run_t0` sits before quoting any cell cost |
 | `total_s` vs its own `phases` | the phases sum to the total | not necessarily. `saturn_clpp_s43` reads `total_s` 10,264 s against phases summing to **47 s** — `unaccounted_s` 10,217, i.e. **99.5% of the run is outside the accounting**. Check `unaccounted_s` before quoting any per-phase cost |
@@ -889,6 +889,38 @@ boost libraries, which surfaces as all-`nan` and reads exactly like a degraded G
 
 Chains claim cells before any file appears. Grep every queued job's `CELLS=` line first, and prefer
 `scontrol hold` over cancel.
+
+### 8.8 Instrumentation that PRINTS but does not SERIALISE — and the logs are not backed up
+
+`run_synformer_fixed.py` measures four phases per generation and prints them as `[SF-TIME]` lines,
+then writes `timing.json` as `{"total_run_s": ...}` and discards every one. **The measurement was
+taken; only the serialisation is single-bucket.** So "SynFormer has no per-phase timings" was wrong in
+the most expensive direction — it would have designed a figure around a hole that is not there. The
+data recovers from the SLURM log with a grep: 117/110/112 generations on the sEH cells,
+130/143/129 on ClpP.
+
+And it is a RESULT. Summed across generations, SynFormer is **projector-bound, not oracle-bound**:
+
+| phase | sEH seeds 42/43/44 | share |
+|---|---|---|
+| `project_s` | 68,174 / 72,878 / 71,144 s | **99.0 / 99.1 / 99.1 %** |
+| `score_s` | 477 / 504 / 454 s | 0.7 / 0.6 / 0.6 % |
+| `ga_s` | 185 / 150 / 177 s | 0.3 / 0.2 / 0.2 % |
+
+19–20 h per cell is ~99% mapping molecules into synthesizable space; **its 10,000 oracle calls cost
+about eight minutes.** So the ~5,530 GPU-h arm-B estimate is a PROJECTION cost, not an oracle cost,
+and must not be argued about as one.
+
+**THE EXPOSURE THIS REVEALED.** That data lived only in `/scratch/markymoo/rgfn_runs/*.out`, which
+is purge-eligible, and the backup held **zero** `.out`/`.err` files — it covered cell trees only.
+A measurement whose sole home is a SLURM log is one purge from gone. Fixed 2026-09-12: all 2,633 log
+files (139 MB) now mirror to the backup, verified 1320/1320 `.out`, 1313/1313 `.err`, 100% of bytes,
+18/18 files carrying `[SF-TIME]`. **No name filter** — 139 MB against 949 GB free does not justify a
+clever rule, and a clever rule is what made the checkpoint allowlist copy 0.74%.
+
+**The rule:** before concluding an artifact lacks a measurement, grep the RUN LOG, not just the
+summary file. And any instrumentation that prints without serialising needs its log treated as a
+primary artifact.
 
 ### 8.8 Retired thresholds live on inside DATA, where fixing the script does not reach them
 
