@@ -136,6 +136,14 @@ Root: `$SCRATCH/rgfn_runs/lsdflow_sparrow/`
 for SynFormer (no Stage 2), and `_stage2fix` for s3gfn drd2 seeds 43/44 — which marks **which cells
 stalled in Stage 2**, not a second pipeline. Seed 42 reads `target-reached` and needed no re-run.
 
+**LEGACY PRE-STANDARD POOLS SHARE THIS DIRECTORY — filter on the tag, not just the target.**
+`multiaiz_pools/` also holds pools built before Stage 2 and before the ClpP gate was recalibrated,
+and they are tagged WITHOUT `_stage2`. Their ClpP scores top out at exactly **-8.0**, the
+pre-standard bar, so only **13-37%** of each clears the current **-9.1** gate. A glob like
+`*clpp*` picks them up beside the real cells and they will look like badly-performing matrix cells
+rather than correctly-performing old ones. Restricting to `_stage2` (plus bare `synformer_`) gives
+109 pools, all of which are varied, unclamped, and on the correct side of their gate.
+
 **Glob the size, never assume `_N500`.** A pool-limited cell writes `_N<actual>`
 (`synformer_drd2_seed44_pruned` is `_N495`), and a hard-coded `_N500` reports a complete cell as
 missing.
