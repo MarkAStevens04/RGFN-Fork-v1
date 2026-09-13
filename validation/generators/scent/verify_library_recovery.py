@@ -277,9 +277,18 @@ def main() -> int:
         )
     if not repro:
         print(
-            "FAIL: the requeued run promoted a DIFFERENT fragment set than the uninterrupted one. "
-            "The library is correct but the RNG position was not restored, so this cell is not "
-            "reproducible (see rng_io)."
+            "FAIL: the requeued run promoted a DIFFERENT fragment set than the uninterrupted one, "
+            "so this cell is not bit-reproducible.\n"
+            "      This message NAMES NO CAUSE, deliberately. It used to assert 'the library is "
+            "correct but the RNG position was not restored', and on 2026-09-12 that was exactly "
+            "backwards: the RNG position matched the uninterrupted run EXACTLY at the resume point "
+            "(2fbe4efe81f44f59 on both sides) and the divergence came from the LIBRARY sidecar, "
+            "which was captured before its own iteration's promotion and came back empty. A "
+            "failure message that guesses a cause sends the next reader to the wrong file.\n"
+            "      To find the real one: run with SCENT_RNG_DEBUG=1 and compare the per-iteration "
+            "fingerprints. If they match at the resume point the RNG is exonerated; then check "
+            "whether the library sidecar's promoted count agrees with the last "
+            "additional_fragments/fragments_*.json the stopped run wrote."
         )
     return 1
 

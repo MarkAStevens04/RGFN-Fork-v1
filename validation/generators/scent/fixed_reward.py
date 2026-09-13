@@ -131,8 +131,21 @@ class ScentFixedRewardRun:
 
             def _make_ckpt_with_guidance(*a, **k):
                 _orig_make_ckpt(*a, **k)
+                # STAYS HERE: the guidance models pair with THIS checkpoint's weights in
+                # last_gfn.pt. Capturing them later would describe a model one optimizer step (and
+                # one promotion) further on than the checkpoint they accompany.
                 self._save_guidance_models()
-                self._save_dynamic_library()
+                # THE LIBRARY DOES *NOT* STAY HERE. make_checkpoint fires inside the validation
+                # block (trainer.py:359) while the dynamic-library promotion runs at the END of the
+                # same iteration (trainer.py:378-392), so a sidecar written here records the
+                # vocabulary as it was BEFORE that iteration's promotion. Measured 2026-09-12: the
+                # run wrote additional_fragments/fragments_2.json -- the promotion demonstrably
+                # happened -- while the sidecar recorded 0 promoted, and the resume came back with
+                # an empty library. In production (valid_every 250, promotions every 1,000) a kill
+                # between the i=1000 checkpoint and the i=1250 one drops up to n_new_fragments=400
+                # promoted fragments, which is exactly the confound library_io exists to remove.
+                # Safe to move because promotion changes only `current_fragments`; the embedding
+                # rows are preallocated, so the vocabulary restores independently of the weights.
                 # THE RNG SIDECAR IS DELIBERATELY *NOT* WRITTEN HERE. make_checkpoint fires partway
                 # through an iteration's epilogue, but a resume re-enters at the START of the NEXT
                 # iteration, and the stream advances in between. Capturing here restores a position
@@ -188,6 +201,10 @@ class ScentFixedRewardRun:
                 # at the top of iteration i, so this is the position that must be persisted.
                 if self._rng_capture_pending[0]:
                     self._save_rng_state(iteration=i)
+                    # Captured HERE, with the RNG, for the reason recorded on the checkpoint
+                    # wrapper: the previous iteration's promotion has now happened, so this is the
+                    # vocabulary a resume re-enters with.
+                    self._save_dynamic_library()
                     self._rng_capture_pending[0] = False
                 _iter_k[0] += 1
                 return _inner(*a, **k)
