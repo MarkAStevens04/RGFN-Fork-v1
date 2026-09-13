@@ -31,7 +31,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from validation.generators._budget_stop import BudgetStopper, arm_b_budget
+from validation.generators._budget_stop import (
+    BudgetReached,
+    BudgetStopper,
+    arm_b_budget,
+)
 from validation.generators._trace import (
     ARM_A_ORACLE_CALLS,
     BudgetCheckpointer,
@@ -277,7 +281,13 @@ def main() -> None:
             flush=True,
         )
         reward.set_step(loop._it + 1)
-        loop._train_steps(remaining, on_iteration=_on_iteration)
+        # ARM B ENDS BY RAISING, AND THAT IS A SUCCESS -- twin of the catch in
+        # glue/fixed_reward/pipeline.py. Uncaught, BudgetReached propagates out and the job reports
+        # FAILED for a cell that spent exactly the budget it was given.
+        try:
+            loop._train_steps(remaining, on_iteration=_on_iteration)
+        except BudgetReached as stop:
+            print(f"[RXN-FR] arm-B budget reached, ending training normally: {stop}", flush=True)
     else:
         print(
             f"[RXN-FR] already trained {loop._it} >= {n_train_steps} steps; skipping to sampling.",

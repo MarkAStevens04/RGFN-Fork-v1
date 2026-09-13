@@ -64,6 +64,22 @@ from typing import Iterable, Optional, Sequence
 # never puts the repo root on sys.path -- which is the thing that would make `import rgfn` ambiguous
 # inside SCENT's environment.
 def _load_budget_stop():
+    # PREFER THE PACKAGE IMPORT so there is ONE class object, not two. Path-loading unconditionally
+    # creates a SECOND module distinct from `validation.generators._budget_stop`, and
+    # `except BudgetReached` only matches the class it was given: a runner that imports the
+    # exception one way while the stopper was built the other way gets an except clause that
+    # silently never fires -- on an arm-B cell, in production, where the symptom is the job
+    # reporting FAILED for a successful run. Each runner happens to be self-consistent today; this
+    # removes the way that stops being true.
+    try:
+        from validation.generators import _budget_stop as _pkg  # noqa: PLC0415
+
+        return _pkg
+    except Exception:  # noqa: BLE001
+        pass
+
+    # SCENT cannot take that path: its runner deliberately keeps the repo root OFF sys.path so its
+    # own `rgfn` clone is not shadowed, so the package import fails there and must fall back.
     import importlib.util as _ilu
 
     _p = Path(__file__).resolve().parent / "_budget_stop.py"
@@ -76,6 +92,14 @@ def _load_budget_stop():
 
 
 _budget_stop = _load_budget_stop()
+
+# RE-EXPORTED so every runner has ONE import point for the exception it must catch. The stop is
+# raised from inside a training hook and propagates out through `trainer.train()`, so each runner
+# has to catch it where it can still finish normally -- and a runner that cannot name the type
+# cannot catch it. Reaching into `_trace._budget_stop.BudgetReached` would work and would be the
+# kind of private path that breaks the next time this module is reorganised.
+BudgetReached = _budget_stop.BudgetReached
+BudgetStopper = _budget_stop.BudgetStopper
 
 FIELDS = [
     "n_scored",

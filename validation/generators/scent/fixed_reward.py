@@ -211,7 +211,18 @@ class ScentFixedRewardRun:
 
             self.trainer.sample_training_trajectories = _sample_with_rng_capture
 
-        self.trainer.train()
+        # ARM B ENDS BY RAISING, AND THAT IS A SUCCESS -- see the twin comment in
+        # glue/fixed_reward/pipeline.py. Uncaught, BudgetReached exits the process with a traceback
+        # and reports FAILED for a cell that did exactly what it was asked to do.
+        # Resolved from the module _attach_trace loaded by path; if the trace was unavailable there
+        # is no stop either, so an except clause that catches nothing is the consistent fallback.
+        _stop_exc = getattr(getattr(self, "_trace_mod", None), "BudgetReached", None)
+        try:
+            self.trainer.train()
+        except Exception as stop:  # noqa: BLE001 - re-raised below unless it IS the budget stop
+            if _stop_exc is None or not isinstance(stop, _stop_exc):
+                raise
+            print(f"[SCENT-FR] arm-B budget reached, ending training normally: {stop}", flush=True)
 
         # 1a-post. THE LAST CHECKPOINT HAS NO FOLLOWING ITERATION, so the pending capture above
         #     never fires for it -- the trainer check-points unconditionally at

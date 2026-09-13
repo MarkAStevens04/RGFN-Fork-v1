@@ -121,9 +121,30 @@ class FixedRewardPipeline:
         # 0. instrument the reward BEFORE training: one row per evaluation, written continuously.
         self._attach_trace()
 
+        # The arm-B stop's exception type. Resolved defensively for the same reason _attach_trace is:
+        # an unavailable trace module must degrade to an untraced run, not abort one. If it cannot be
+        # imported there is no stop either, so catching nothing is consistent.
+        try:
+            from validation.generators._trace import BudgetReached as _BudgetReached
+        except Exception:  # noqa: BLE001
+
+            class _BudgetReached(Exception):  # type: ignore[no-redef]
+                """Never raised; keeps the except clause below well-formed."""
+
         # 1. train pi_theta ONCE against r(x) = reward_generator(x)^beta.
+        #    ARM B ENDS BY RAISING, AND THAT IS A SUCCESS. BudgetStopper raises BudgetReached from
+        #    the training hook once the oracle-call budget is spent -- a control-flow signal, not a
+        #    failure. Uncaught it propagates out of trainer.train(), kills the process with a
+        #    traceback and exits 1, so the DESIGNED outcome of every arm-B cell would report FAILED
+        #    to sacct and to the sweep. Measured on the first real smoke (job 76243): the stop fired
+        #    correctly at 2,055 distinct against a 2,000 budget, and the job still recorded
+        #    "FAILED 1:0". Caught here so the run proceeds to its normal checkpointing, sampling and
+        #    candidate emission, and exits 0.
         with timer.phase("train_gfn", 1):
-            self.trainer.train()
+            try:
+                self.trainer.train()
+            except _BudgetReached as stop:
+                print(f"[FR] arm-B budget reached, ending training normally: {stop}", flush=True)
 
         # 1b. Everything from here is EVALUATION, not training signal. The final candidate batch
         #     is scored through the same proxy, so without this flip those rows would be labelled
