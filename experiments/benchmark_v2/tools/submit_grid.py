@@ -192,13 +192,36 @@ def reward_orientation_broken(cell) -> str | None:
     as both reviewers suggested. A hardcoded list of five goes stale in the dangerous direction the
     moment someone adds a seam (cries wolf) or adds a tenth generator without one (silent). An empty
     CFG is worse for THIS defect specifically: it tracks whether a config exists, and the config and
-    the seam are exactly the two things that must land together. Write the six competitor configs
-    without touching the sign and a CFG-keyed guard goes green while the flat reward ships -- the
+    the seam are exactly the two things that must land together. Write a competitor's 6td3b config
+    without touching its sign and a CFG-keyed guard goes green while the flat reward ships -- the
     failure it was put there to stop. Reading the file keys on the defect itself, so it stops firing
     the moment the seam lands and never stops firing for any other reason.
 
-    (A's empty-CFG refusal in the trainer is still wanted; it catches a different thing -- a missing
-    config -- and the two are independent.)
+    ⛔ DO NOT COLLAPSE THIS WITH THE TRAINER'S EMPTY-CFG REFUSAL. They agree on all 18 cells TODAY,
+    purely because the three generators that have configs are also the three that have seams -- a
+    coincidence of scheduling, not a relationship. Keeping one is the obvious tidy-up later and it
+    silently removes half the cover:
+
+        missing config, seam present  -> the trainer's CFG check fires. This one does not, correctly.
+        config present, NO seam       -> ONLY this one fires. A CFG check is green, the run starts,
+                                         and every molecule scores 0.0 for the full docking budget.
+
+    The second row is the dangerous one, and it is UNREACHABLE TODAY: verified 2026-09-12 across all
+    branches (`git log --all --diff-filter=A`) that no competitor 6td3b config has ever existed --
+    only our three, for rgfn/rxnflow/scent, which are also the three with seams. Nobody is assigned
+    to write the other six, and whether the competitors run 6TD3-B at all is an open question for the
+    researcher. So the overlap is not merely an accident of scheduling, it is an accident of work
+    that has not been scoped.
+
+    That is precisely why the row has to be written down rather than waited for. The moment those six
+    configs exist -- whenever that is, and by whoever -- a CFG-keyed guard goes green while the five
+    sign seams may still be absent, which is when the flat-reward run first becomes possible. Two
+    guards, two different failures, both required.
+
+    (An earlier version of this comment said the six configs "are being written now". They are not,
+    and never were; I had merged an open question from the trainer's author -- who owns the six? --
+    with an unrelated assignment to write OUR three, and asserted the result as a schedule. The
+    argument did not depend on it, so it is stated as a condition instead of a date.)
     """
     t = cell.target
     if not (getattr(t, "reward_type", "") == "docking" and getattr(t, "higher_is_better", False)):
