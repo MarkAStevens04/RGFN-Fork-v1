@@ -48,12 +48,26 @@ export XDG_CACHE_HOME=$SCRATCH/.cache/xdg
 mkdir -p "$OUT/sample" "$TRITON_CACHE_DIR" "$MPLCONFIGDIR" "$XDG_CACHE_HOME"
 
 case "$GEN" in
-  rgfn)  ENV=rgfn;  WORKER=validation/lsdflow/adapters/workers/rgfn_worker.py
-         CFG=configs/glue/fixed_reward_seh_proxy_stdlib_5k.gin ;;
-  scent) ENV=scent; WORKER=validation/lsdflow/adapters/workers/scent_worker.py
-         CFG=validation/configs/scent_${SYSTEM}_fixed_5k.gin ;;
-  *) echo "FATAL: GEN must be rgfn|scent"; exit 2 ;;
+  rgfn|scent|rxnflow) WORKER=validation/lsdflow/adapters/workers/${GEN}_worker.py ;;
+  *) echo "FATAL: GEN must be rgfn|scent|rxnflow"; exit 2 ;;
 esac
+# Resolve CFG and CONDA_ENV from the manifest, never from a naming pattern. There ISN'T one:
+# fixed_reward_6td3_5k.gin sits beside fixed_reward_drd2_stdlib_5k.gin, and
+# rxnflow_6td3_docking_fixed_5k.yaml beside rxnflow_seh_fixed_stdlib_5k.yaml. An earlier version of
+# this script built the RGFN path as configs/glue/fixed_reward_${SYSTEM}_proxy_stdlib_5k.gin, which
+# resolves for sEH ONLY -- clpp and 6td3b both point at files that do not exist. Grep the specific
+# keys rather than eval'ing the whole emit: submit_cell.sh's `eval "$SPEC"` is what clobbered env
+# overrides in v1, and this script has its own.
+manifest_val() {  # manifest_val KEY -> value, or empty
+    python experiments/benchmark_v2/tools/manifest.py --emit "$GEN" "$SYSTEM" "$SEED" 2>/dev/null \
+        | sed -n "s/^$1=//p" | head -1
+}
+CFG=$(manifest_val CFG)
+[ -n "$CFG" ] || { echo "FATAL: manifest emitted no CFG for $GEN/$SYSTEM/$SEED"; exit 2; }
+[ -f "$CFG" ] || { echo "FATAL: manifest CFG does not exist on disk: $CFG"; exit 2; }
+ENVN=$(manifest_val CONDA_ENV); ENVN=${ENVN:-$GEN}
+echo "[pilot] cfg=$CFG env=$ENVN (from manifest)"
+ENV="$ENVN"
 
 echo "host=$(hostname) gen=$GEN ckpt=$CKPT n_traj=$N_TRAJ n_hubs=$N_HUBS"
 nvidia-smi -L || true

@@ -36,8 +36,10 @@ def main():
 
     rows = json.loads(a.grid.read_text())
     out = []
-    print(f"{'cell':<14} {'seed':>4} {'cap':>4} {'mode':>5} {'share':>6} {'median':>7} "
-          f"{'agree':>6} {'concentrated':>13}  histogram")
+    print(
+        f"{'cell':<14} {'seed':>4} {'cap':>4} {'mode':>5} {'share':>6} {'median':>7} "
+        f"{'agree':>6} {'concentrated':>13}  histogram"
+    )
     print("-" * 104)
     for r in sorted(rows, key=lambda x: (x.get("generator", ""), x.get("target", ""), x["seed"])):
         if "error" in r or r.get("generator") == "fraggfn":
@@ -50,29 +52,44 @@ def main():
         share = hist[mode] / len(vals)
         med = statistics.median(vals)
         rec = {
-            "cell": r["cell"], "seed": r["seed"], "generator": r.get("generator"),
-            "target": r.get("target"), "cap": r.get("cap"),
-            "modal_depth": mode, "modal_share": round(share, 3),
-            "median_depth": med, "mode_median_agree": mode == med,
+            "cell": r["cell"],
+            "seed": r["seed"],
+            "generator": r.get("generator"),
+            "target": r.get("target"),
+            "cap": r.get("cap"),
+            "modal_depth": mode,
+            "modal_share": round(share, 3),
+            "median_depth": med,
+            "mode_median_agree": mode == med,
             "concentrated": share >= CONCENTRATED,
             "hist": r["top_depth_hist"],
         }
         out.append(rec)
-        print(f"{r['cell']:<14} {r['seed']:>4} {str(r.get('cap')):>4} {mode:>5} {share:>5.0%} "
-              f"{med:>7} {str(mode == med):>6} {str(share >= CONCENTRATED):>13}  {r['top_depth_hist']}")
+        print(
+            f"{r['cell']:<14} {r['seed']:>4} {str(r.get('cap')):>4} {mode:>5} {share:>5.0%} "
+            f"{med:>7} {str(mode == med):>6} {str(share >= CONCENTRATED):>13}  {r['top_depth_hist']}"
+        )
 
     print()
     disagree = [r for r in out if not r["mode_median_agree"]]
     spread = [r for r in out if not r["concentrated"]]
+
     def name(rs):
         return ", ".join("{}/{}".format(r["cell"], r["seed"]) for r in rs) or "none"
 
     print("mode != median on {}/{} cells: {}".format(len(disagree), len(out), name(disagree)))
-    print("NOT concentrated (mode < {:.0%} of top-40) on {}/{}: {}".format(
-        CONCENTRATED, len(spread), len(out), name(spread)))
+    print(
+        "NOT concentrated (mode < {:.0%} of top-40) on {}/{}: {}".format(
+            CONCENTRATED, len(spread), len(out), name(spread)
+        )
+    )
     print()
-    print("A cell in the second list should NOT be described by its modal depth: the field is spread,")
-    print("not hubbing at one depth. The (cap-1) claim only means something for concentrated cells.")
+    print(
+        "A cell in the second list should NOT be described by its modal depth: the field is spread,"
+    )
+    print(
+        "not hubbing at one depth. The (cap-1) claim only means something for concentrated cells."
+    )
 
     if a.json_out:
         a.json_out.parent.mkdir(parents=True, exist_ok=True)

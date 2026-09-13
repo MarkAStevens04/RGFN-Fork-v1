@@ -85,7 +85,11 @@ def report(run_dir: Path, depth: tuple, budget: int) -> dict:
         a["joined_via_stereo_strip"] = via_stereo
         a["distinct_hubs_walked"] = len(set(named))
         a["hub_depth_of_walked_hubs"] = dict(
-            sorted(Counter(dep for dep, how in (depth_of(h, exact, stripped) for h in set(named)) if how).items())
+            sorted(
+                Counter(
+                    dep for dep, how in (depth_of(h, exact, stripped) for h in set(named)) if how
+                ).items()
+            )
         )
         a["modes_by_hub_depth"] = dict(sorted(d.items()))
         a["share_modes_on_depth0"] = round(d.get(0, 0) / n, 4) if n else None
@@ -108,9 +112,7 @@ def report(run_dir: Path, depth: tuple, budget: int) -> dict:
         a["reactions_by_hub_depth"] = dict(sorted(rxn.items()))
         a["reactions_accounted"] = tot
         a["share_reactions_on_depth0"] = round(rxn.get(0, 0) / tot, 4) if tot else None
-        a["rxn_per_mode_by_hub_depth"] = {
-            k: round(rxn[k] / d[k], 3) for k in sorted(d) if d.get(k)
-        }
+        a["rxn_per_mode_by_hub_depth"] = {k: round(rxn[k] / d[k], 3) for k in sorted(d) if d.get(k)}
     return out
 
 

@@ -72,16 +72,22 @@ if [ "$GEN" = scent ] && \
     echo "[pilot-campaign] no additional_fragments snapshot -> --no-freeze (418 base library)"
     GARG+=(--no-freeze)
 fi
-# Per-generator env + config. RGFN reaches the proxy in-process through gin and lives in the `rgfn`
-# env; SCENT chdir's into its clone and needs the `scent` env. Hardcoding SCENT's config here made
-# the script silently SCENT-only.
-case "$GEN" in
-  scent) ENVN=scent; CFG=validation/configs/scent_${SYSTEM}_fixed_5k.gin ;;
-  rgfn)  ENVN=rgfn;  CFG=configs/glue/fixed_reward_${SYSTEM}_proxy_stdlib_5k.gin
-         [ "$SYSTEM" = drd2 ] && CFG=configs/glue/fixed_reward_drd2_stdlib_5k.gin ;;
-  *) echo "FATAL: GEN must be scent|rgfn"; exit 2 ;;
-esac
-[ -f "$CFG" ] || { echo "FATAL: no config at $CFG"; exit 2; }
+# Resolve CFG and CONDA_ENV from the manifest, never from a naming pattern. There ISN'T one:
+# fixed_reward_6td3_5k.gin sits beside fixed_reward_drd2_stdlib_5k.gin, and
+# rxnflow_6td3_docking_fixed_5k.yaml beside rxnflow_seh_fixed_stdlib_5k.yaml. An earlier version of
+# this script built the RGFN path as configs/glue/fixed_reward_${SYSTEM}_proxy_stdlib_5k.gin, which
+# resolves for sEH ONLY -- clpp and 6td3b both point at files that do not exist. Grep the specific
+# keys rather than eval'ing the whole emit: submit_cell.sh's `eval "$SPEC"` is what clobbered env
+# overrides in v1, and this script has its own.
+manifest_val() {  # manifest_val KEY -> value, or empty
+    python experiments/benchmark_v2/tools/manifest.py --emit "$GEN" "$SYSTEM" "$SEED" 2>/dev/null \
+        | sed -n "s/^$1=//p" | head -1
+}
+CFG=$(manifest_val CFG)
+[ -n "$CFG" ] || { echo "FATAL: manifest emitted no CFG for $GEN/$SYSTEM/$SEED"; exit 2; }
+[ -f "$CFG" ] || { echo "FATAL: manifest CFG does not exist on disk: $CFG"; exit 2; }
+ENVN=$(manifest_val CONDA_ENV); ENVN=${ENVN:-$GEN}
+echo "[pilot] cfg=$CFG env=$ENVN (from manifest)"
 conda run --no-capture-output -n "$ENVN" python validation/lsdflow/adapters/workers/${GEN}_worker.py \
     --mode enumerate --config "$CFG" \
     --checkpoint "$CKPT" --reward-name "$SYSTEM" --model-name "$GEN" --seed "$SEED" \
