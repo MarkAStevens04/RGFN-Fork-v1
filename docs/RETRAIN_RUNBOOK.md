@@ -984,6 +984,23 @@ bash resumes at a **byte offset**; an edit mid-job runs garbage hours later (thi
 five hours in, *after* its work had succeeded). The chain scripts snapshot their callee to `/tmp` for
 this reason. Copy that pattern; do not reinvent it.
 
+**The same hazard exists in PYTHON, via re-import rather than byte offset.** A multi-process harness
+that launches runs sequentially re-imports every module per process — so editing a module between
+run A and run B means the two runs execute different code, and if the edit touched a written schema
+(a CSV column, a sidecar key) the comparison is between incomparable artifacts while both report
+success. Caught 2026-09-12 mid-flight on `_trace.py` during the RNG verification, and reverted for
+exactly this reason. **Freeze every module a comparison spans for the duration of that comparison**,
+the same way §6.8 freezes inputs for a comparative arm.
+
+**And save state at the point it will be RESTORED, not at a convenient earlier one.** The RNG sidecar
+was captured inside the `make_checkpoint` wrapper, which fires part-way through an iteration's
+epilogue, while a resume re-enters at the TOP of the next iteration — so the restore faithfully
+reinstated a position the uninterrupted run never occupied there. The restore mechanism was correct
+throughout; the capture point was not, and no amount of verifying the restore would have found it.
+The fix is a pending flag at the checkpoint and the write at the next iteration's top, which is
+correct **whatever** consumes randomness in between — so it does not depend on identifying the
+consumer, and the two candidate consumers considered were both wrong.
+
 ### 8.4 Shared scratch is rewritten by other agents
 
 On 2026-08-19 all three `scent_seh` enumerations were re-run mid-experiment (a correct fix) *after* a
