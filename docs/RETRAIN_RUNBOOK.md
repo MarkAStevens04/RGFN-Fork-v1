@@ -473,6 +473,14 @@ On the DOCKING targets both sides cache, so the gap narrows to the difference in
 **The direction is against us**, on the exhibit whose whole justification is that budget parity makes
 a cross-generator claim fair (§2.5's counterexample list).
 
+**THE TRACE RECORDS PRESENTATIONS, AND UPSTREAM DISAGREES WITH IT.** Settled from source, not inferred:
+`attach_proxy_trace` patches `proxy.compute_proxy_output` — `CachedProxyBase`'s **OUTER** method
+(`cached_proxy.py:45`), the one that filters uncached indices — so every presented state is traced
+before dedup. Meanwhile `CachedProxyBase.n_proxy_calls` returns **`len(self.cache)`**. So on our own
+side of the comparison, **the framework's own definition of a proxy call is a distinct state**, and
+our budget counts rows. That is not our interpretation of the parity question; it is upstream's,
+already in the code we build on.
+
 **Two things this is NOT.** (1) A 60% shortfall: `s3gfn/drd2` traces 39.5% unique, but DRD2 has no
 cache, so every one of those presentations is a real invocation — the repetition is mode collapse, a
 RESULT of the Saturn family, not a budget artifact. (2) Settled: `n_train_scored_at_checkpoint` counts
