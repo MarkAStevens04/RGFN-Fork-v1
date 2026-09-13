@@ -1227,6 +1227,33 @@ outputs showed it. See §6.8.
 docks must `source ~/bin/rgfn-smoke-env.sh` — omitting it leaves QuickVina2-GPU with three unresolved
 boost libraries, which surfaces as all-`nan` and reads exactly like a degraded GPU.
 
+### 8.4b TWO WRITERS, ONE RUN DIR — the rotation is correct and it is what sets the trap
+
+Two agents launched the same cell into the same `OUT_ROOT` a minute apart, both holding standing
+authorisation to run smokes without confirming. What followed is not a plain overwrite and is worse:
+
+`TraceWriter` **rotates rather than truncates** — the fix that saved ten v1 cells (§8.2). So the
+second job found the first's `trace.csv`, renamed it to `trace.csv.1`, and opened a fresh one. The
+first process **kept writing through its open handle** into the file now called `trace.csv.1`, while
+the second job's orphaned header sat at `trace.csv`. Measured: `trace.csv.1` grew 25,624 → 38,778
+bytes in 25 s while `trace.csv` stayed at 76 bytes.
+
+**The first run would have trained perfectly and then materialised arm A from the SECOND job's empty
+trace**, failing at the end for a reason with nothing to do with the code under test. **A correct
+safety mechanism produced a confusing failure because two writers were never in its model** — and the
+rotation is still right; do not remove it.
+
+**THE CHECK, not the convention.** `submit_grid.py` already stamps `--comment=v2cells:<tag>` on every
+job and `squeue -o "%.8i %k"` prints it in any state — built for exactly this, and neither agent read
+it before launching. So:
+
+* **before any launch, check the claim** and refuse if the tag is already held;
+* **the launcher owns the tree name and names are never reused** — state it before `sbatch`, not
+  after.
+
+The first is a property, the second a discipline; they are listed in that order deliberately. Related:
+§6.8 and the standing rule that chains claim cells before any file appears.
+
 ### 8.5a Which INTERPRETER — the tools split into stdlib-only and not, and nothing declares it
 
 `manifest.py` is **stdlib-only on purpose**, so a bare SLURM shell can bootstrap with conda base and
