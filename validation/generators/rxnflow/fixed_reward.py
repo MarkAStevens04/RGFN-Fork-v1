@@ -164,11 +164,14 @@ class DockingBridgeReward:
     # disagree on every existing docking config.
     #
     # So the constructor argument is stored as `self.sign`, NOT as `self.higher_is_better`. The
-    # obvious tidy-up -- assigning it to the matching name -- would overwrite this attribute with
-    # the raw orientation. ScentFixedRewardRun.run reads it
+    # obvious tidy-up -- assigning it to the matching name -- silently redefines this attribute
+    # from "the value is higher-better" to "the raw score is higher-better". Nothing in RxnFlow's
+    # own fixed-reward path reads it today (it is interface parity), so the tidy-up would look
+    # harmless here; the cost is visible in the closest twin of this class, where
+    # ScentFixedRewardRun.run reads ITS proxy's attribute
     # (validation/generators/scent/fixed_reward.py:103) and sorts top-k with
-    # `reverse=higher_is_better` at line 188, so the flip would make every lower-is-better cell
-    # select the WORST 100 molecules instead of the best, silently. Do not "fix" the naming.
+    # `reverse=higher_is_better` (line 188) -- flipping it there keeps the WORST 100 molecules,
+    # with no exception and no nan. Do not "fix" the naming.
     higher_is_better = True  # the recorded VALUE (clip(-raw/norm)) is higher-is-better
 
     def __init__(
