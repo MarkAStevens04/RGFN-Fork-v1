@@ -290,9 +290,12 @@ Two details that a later reader will otherwise simplify away, both in
   proxy the training loop uses, so those rows are flipped to `phase="eval"` before sampling. Without
   it a smoke measured 600 training calls followed by 185 scoring calls, indistinguishable — and every
   budget or modes-vs-calls reading would count the second set. **Filter to `phase == "train"` for any
-  budget claim** — and count ROWS, never the cumulative `n_scored`, which absorbs eval calls as it
-  goes (measured on `s3gfn_drd2/42`: the same file reads 12,048 / 11,048 / 10,048 depending on which
-  you take).
+  budget claim** — and never the cumulative `n_scored`, which absorbs eval calls as it goes (measured
+  on `s3gfn_drd2/42`: the same file reads 12,048 / 11,048 / 10,048 depending on which you take).
+  **There are THREE rungs here and rows is the middle one**, so do not stop on it: `n_scored` is
+  contaminated by eval; train ROWS fix that but count a cached repeat as spend; **DISTINCT train
+  molecules are the budget** (§2.3b, ruled 2026-09-13). Rows remain the right answer for "how much did
+  this run present", which is what `n_train_scored_at_checkpoint` says on the tin.
 * **SCENT's periodic validation was inflating its own training count 2.84×**, and this is a measured
   figure rather than a rounding concern. Its config sets `valid_sampler = RandomSampler` with
   `valid_n_trajectories = 1000`, so every validation pass scores a thousand molecules through the
@@ -1038,7 +1041,8 @@ project at least once:
 | `used_rxns` | what the selection cost | **inflates** outside the budget-binding regime; quote `cost_kept_rxns` (65 molecules priced at 247 read as 300→387) |
 | `n_modes` | modes delivered | modes **requested**; `n_targets_priced` is delivered (89 vs 100 on native routes) |
 | `n_modes_kept` | same as `n_modes` | post-filter count — a co-agent lost a result to the difference |
-| `n_scored` (`trace.csv`) | training oracle calls | **all phases**, eval interleaved; count `phase == "train"` ROWS, and note that `max(n_scored)` over filtered rows is still contaminated |
+| `n_scored` (`trace.csv`) | training oracle calls | **all phases**, eval interleaved, and `max(n_scored)` over filtered rows is still contaminated. Filter to `phase == "train"` — but rows are PRESENTATIONS: since 2026-09-13 the budget is **distinct** train molecules (§2.3b), so rows overstate it wherever the provider caches |
+| train ROW count | the budget | **presentations.** The middle rung of three: `n_scored` → rows → distinct. Correct for "what did this run present", wrong for "what did it spend" on any cached provider — `s3gfn_clpp` presented 10,048 and reached 8,451 |
 | `total_modes` | a total | capped at the 500-molecule prefix |
 | `sample_s` / any timing component | 0.0 when absent | **absent ≠ zero** — a missing component must be omitted from the total, never written as 0.0, or an untimed stage becomes a free one |
 | durations in prose | `20:10` = 20 min 10 s | on this cluster it is as likely **20 h 10 min**. Always write `19.30 h` |
