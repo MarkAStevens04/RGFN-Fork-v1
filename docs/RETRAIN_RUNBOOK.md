@@ -452,9 +452,33 @@ far its heavier user. Equalising it is not the fix: that would force the fixed-M
 project demoted to secondary. Report it; do not equalise it. One within-field reading does survive:
 S3-GFN's edge over Saturn and TANGO is partly bought with up to 1.8× their oracle calls.
 
-### 2.3b Presented vs REACHED THE ORACLE — the arms are not call-matched on the surrogate targets
+### 2.3b Presented vs REACHED THE ORACLE — DECIDED 2026-09-13: the budget counts what reached the oracle
 
-**OPEN: needs the researcher's ruling.** The budget gates on `phase == "train"` ROWS, which count
+**RULING (researcher, 2026-09-13): the budget counts molecules that REACHED THE ORACLE, not molecules
+presented.** So a cached repeat does not spend budget, and `n_distinct` — not the train row count — is
+what a cell is measured against. This aligns our budget with `CachedProxyBase.n_proxy_calls`, which
+already returns `len(self.cache)`; the framework's definition and ours no longer disagree.
+
+**THE COST IS SIX CELLS, all on ClpP** — measured, not estimated:
+
+| cell | reached | presented | short by |
+|---|---|---|---|
+| `fraggfn_clpp` s42 / s43 / s44 | 9,371 / 9,375 / 9,258 | 10,048 | 629 / 625 / 742 |
+| `s3gfn_clpp` s42 / s43 / s44 | 8,451 / 8,912 / 8,735 | 10,048 | 1,549 / 1,088 / 1,265 |
+
+**The other 47 landed cells are unaffected, and the reason matters**: on the SURROGATE targets the
+competitors' `SEHFrozenReward` and `DRD2FrozenReward` hold no cache, so every presentation *is* a real
+invocation and rows already equal calls. `s3gfn_drd2` reading 34.4–45.2% unique is therefore **mode
+collapse, not a budget shortfall** — the same family as the Saturn finding, and a cell to report rather
+than repair. ReINVENT, Saturn, TANGO and SynFormer are ≥99.7% unique everywhere and unaffected on any
+target. Separately, `synformer_drd2_s43` reached 6,950 because its search exhausted before its budget
+(§8.2), which is a different and already-recorded condition.
+
+**WHAT THIS CHANGES GOING FORWARD:** the arm-A checkpoint and the arm-B stop must gate on DISTINCT
+train molecules, not train rows. `n_train_scored_at_checkpoint` keeps counting rows — it says rows on
+the tin — but the BUDGET comparison is now against distinct, so a cell must record both.
+
+**ORIGINAL FINDING, retained because it is why the ruling was needed.** The budget gates on `phase == "train"` ROWS, which count
 states PRESENTED to the reward. Several paths CACHE, so a repeat presentation never invokes the
 oracle — and **which paths cache is not symmetric between us and the competitors.** Read at the
 class, 2026-09-12:
