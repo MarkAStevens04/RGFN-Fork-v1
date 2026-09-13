@@ -452,6 +452,41 @@ far its heavier user. Equalising it is not the fix: that would force the fixed-M
 project demoted to secondary. Report it; do not equalise it. One within-field reading does survive:
 S3-GFN's edge over Saturn and TANGO is partly bought with up to 1.8× their oracle calls.
 
+### 2.3b Presented vs REACHED THE ORACLE — the arms are not call-matched on the surrogate targets
+
+**OPEN: needs the researcher's ruling.** The budget gates on `phase == "train"` ROWS, which count
+states PRESENTED to the reward. Several paths CACHE, so a repeat presentation never invokes the
+oracle — and **which paths cache is not symmetric between us and the competitors.** Read at the
+class, 2026-09-12:
+
+| path | sEH / DRD2 (surrogate) | ClpP / 6TD3-B (docking) |
+|---|---|---|
+| **ours** — `SehMoleculeProxy(CachedProxyBase)`, `DRD2Proxy(CachedProxyBase)` | **CACHES** (`compute_proxy_output` filters uncached indices, then `list(set(...))` — deduped twice) | CACHES |
+| **competitors** — `SEHFrozenReward`, `DRD2FrozenReward` | **NO CACHE**, zero `_cache` references in either class, on all five | `DockingBridgeReward` CACHES |
+
+So on the two SURROGATE targets — two of phase 1's three — every molecule a competitor presents is a
+real model invocation, while ours are deduped. Measured repeat rates: RGFN's arm-A pilot is **16,919
+presented / 12,114 distinct = 28.4%**, i.e. **~7,160 real invocations against the competitors' ~10,000**.
+On the DOCKING targets both sides cache, so the gap narrows to the difference in repeat rates
+(s3gfn/clpp ~13%, fraggfn/clpp ~7%).
+
+**The direction is against us**, on the exhibit whose whole justification is that budget parity makes
+a cross-generator claim fair (§2.5's counterexample list).
+
+**Two things this is NOT.** (1) A 60% shortfall: `s3gfn/drd2` traces 39.5% unique, but DRD2 has no
+cache, so every one of those presentations is a real invocation — the repetition is mode collapse, a
+RESULT of the Saturn family, not a budget artifact. (2) Settled: `n_train_scored_at_checkpoint` counts
+train ROWS under either reading, so nothing landed changes. **Exception to log:** SynFormer alone has
+an `SEHBridgeReward` that caches, and its runner traces `todo` — deduped, cache-missed and
+budget-capped (`room = budget - len(scored)`) — so its rows are oracle calls by construction while
+s3gfn's and fraggfn's are presentations.
+
+**Do not decide this from the repeat rate.** Distinct-SMILES is a proxy for oracle calls that is exact
+only where the provider caches — reporting it as a call count is the ingredient-vs-mechanism error.
+Instrument the INNER uncached path so real invocations are a MEASURED third column, then rule.
+
+---
+
 ### 2.4 Reporting conventions (unchanged, restated so a cell can be checked against them)
 
 - **Primary readout: modes at a fixed 100-reaction budget.** Emit 50/100/150/200/300 for the
