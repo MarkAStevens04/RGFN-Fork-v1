@@ -55,6 +55,7 @@ Exit 0 = plan printed (or submitted). 1 = something was refused that needs a hum
 from __future__ import annotations
 
 import argparse
+import ast
 import os
 import re
 import subprocess
@@ -282,7 +283,83 @@ _STOP_MARKERS = re.compile(
 )
 
 
-def arm_budget_unenforceable(arm: str) -> str | None:
+# Where each reaction-GFN's training run is DRIVEN from. File locations, not verdicts -- which file
+# actually drives a given generator is derived below, and whether that file stops is read from its
+# AST. RGFN and SCENT reach the shared trace machinery through `attach_proxy_trace`; RxnFlow does
+# not, and that difference is the entire bug this check exists for.
+ARM_B_DRIVER = {
+    "rgfn": "glue/fixed_reward/pipeline.py",
+    "scent": "validation/generators/scent/fixed_reward.py",
+    "rxnflow": "validation/generators/rxnflow/run_rxnflow_fixed.py",
+}
+TRACE_MODULE = "validation/generators/_trace.py"
+
+
+def _calls(path: Path, name: str) -> bool | None:
+    """Does this file actually CALL `name`? None if it cannot be parsed.
+
+    AST, NOT A GREP, AND THAT IS THE WHOLE POINT. A textual search is satisfied by a MENTION --
+    a docstring, a comment, an import that is never used. A's first version of this same check
+    reported RxnFlow as wired while it was unwired, because it matched their own new comment reading
+    "RxnFlow does not go through attach_proxy_trace": the guard was satisfied by the sentence saying
+    the opposite. Mine had the identical hole one layer up, and C found the same shape in my seam
+    detector hours earlier. Comments do not appear in an AST at all, so this class of false pass is
+    not merely unlikely here, it is unrepresentable.
+    """
+    try:
+        tree = ast.parse(path.read_text())
+    except Exception:
+        return None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            f = node.func
+            if (getattr(f, "id", None) or getattr(f, "attr", None)) == name:
+                return True
+    return False
+
+
+def arm_b_stop_wired(cell) -> tuple[bool | None, str]:
+    """(wired?, evidence) for THIS generator's own path. None = undetermined, which refuses.
+
+    ⛔ ONE FILE CANNOT ANSWER FOR THREE GENERATORS, which is what both A's guard and mine got wrong.
+    Both grepped `_trace.py`, found the stop there, and concluded the capability was present. It is
+    -- for RGFN and SCENT, which reach that machinery via `attach_proxy_trace`. RxnFlow takes the
+    TracedReward shape and drives its budget from its own `_on_iteration` hook, so `_trace.py` having
+    a stop says nothing about it. All twelve of its arm-B cells would have trained to ~155,000 calls
+    against a declared 320,000, at ~89 GPU-h each, and both guards passed the whole time.
+
+    That is an existence check standing in for a capability check -- the same defect I fixed on my
+    own `trainer_missing` yesterday, reintroduced one file over. So the path is RESOLVED per
+    generator: if its entry file calls `attach_proxy_trace`, the shared module drives it and must
+    construct the stopper; otherwise the generator's own driver must.
+    """
+    rel = ARM_B_DRIVER.get(cell.generator)
+    if rel is None:
+        return (
+            None,
+            f"no known arm-B driver file for {cell.generator}; refusing rather than guessing",
+        )
+    entry = REPO / rel
+    if not entry.is_file():
+        return None, f"{rel} does not exist"
+    goes_via_trace = _calls(entry, "attach_proxy_trace")
+    if goes_via_trace is None:
+        return None, f"cannot parse {rel}"
+    target_rel = TRACE_MODULE if goes_via_trace else rel
+    constructs = _calls(REPO / target_rel, "BudgetStopper")
+    if constructs is None:
+        return None, f"cannot parse {target_rel}"
+    if constructs:
+        return True, f"{target_rel} constructs BudgetStopper"
+    return False, (
+        f"{rel} does not reach attach_proxy_trace, and {target_rel} never constructs a "
+        f"BudgetStopper"
+        if not goes_via_trace
+        else f"{target_rel} never constructs a BudgetStopper"
+    )
+
+
+def arm_budget_unenforceable(cell, arm: str) -> str | None:
     """Why this arm's budget cannot be HELD, or None. Not the same question as 'does a launcher exist'.
 
     ⛔ ARM A AND ARM B NEED DIFFERENT THINGS, AND ONLY ONE OF THEM IS BUILT.
@@ -312,20 +389,13 @@ def arm_budget_unenforceable(arm: str) -> str | None:
     """
     if arm != "b":
         return None
-    p = REPO / "validation" / "generators" / "_trace.py"
-    try:
-        src = p.read_text()
-    except Exception as e:
-        return (
-            f"cannot read _trace.py to check for a budget stop ({e}); refusing rather than assuming"
-        )
-    if _STOP_MARKERS.search(src):
+    wired, why = arm_b_stop_wired(cell)
+    if wired:
         return None
     return (
-        "arm B is a 320,000-CALL budget and nothing stops a run at it -- BudgetCheckpointer only "
-        "saves. The run would end at its configured iteration count instead (~603k / 320k / ~155k "
-        "for RGFN / SCENT / RxnFlow at 5,000 iters). If a stop now exists under another name, "
-        "update _STOP_MARKERS in this file"
+        f"arm B is a {cell.arm_calls('b') or 320_000:,}-CALL budget and this generator's own "
+        f"training path does not stop at it: {why}. The run would end at its configured iteration "
+        f"count instead (~603k / 320k / ~155k for RGFN / SCENT / RxnFlow at 5,000 iters)"
     )
 
 
@@ -445,7 +515,7 @@ def main() -> int:
             if broken:
                 buckets["refuse"].append((c, broken))
                 continue
-            unenforceable = arm_budget_unenforceable(a.arm)
+            unenforceable = arm_budget_unenforceable(c, a.arm)
             if unenforceable:
                 buckets["refuse"].append((c, unenforceable))
                 continue
