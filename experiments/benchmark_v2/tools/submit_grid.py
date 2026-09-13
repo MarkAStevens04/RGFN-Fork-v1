@@ -148,38 +148,79 @@ def claimed_cells() -> dict[str, str]:
     return out
 
 
+# Where each generator's DOCKING reward decides its sign. A table of FILE LOCATIONS, deliberately
+# not a table of verdicts: the verdict is read out of the file at call time, so it cannot disagree
+# with the code. TANGO has no directory of its own -- submit_baseline.sh:71 points it at Saturn's
+# runner -- so five files cover six generators. RGFN is not a validation bridge at all; its
+# OracleRewardProxy takes the sign off the ORACLE object, which is why no config-shaped search finds
+# it and why it was never at risk.
+REWARD_SOURCE = {
+    "fraggfn": "validation/generators/fraggfn/fixed_reward.py",
+    "reinvent": "validation/generators/reinvent/fixed_reward.py",
+    "saturn": "validation/generators/saturn/fixed_reward.py",
+    "tango": "validation/generators/saturn/fixed_reward.py",
+    "s3gfn": "validation/generators/s3gfn/fixed_reward.py",
+    "synformer": "validation/generators/synformer/fixed_reward.py",
+    "rxnflow": "validation/generators/rxnflow/fixed_reward.py",
+    "scent": "validation/generators/scent/docking_bridge_proxy.py",
+    "rgfn": "glue/proxies/oracle_reward_proxy.py",
+}
+_SEAM = re.compile(r"self\._?sign\b")
+
+
 def reward_orientation_broken(cell) -> str | None:
     """Why this cell's reward cannot express its target's orientation, or None if it can.
 
-    ⛔ THE MOST EXPENSIVE SILENT FAILURE LEFT IN THE CAMPAIGN, and it fails GREEN. Every generator's
-    docking reward hardcodes the lower-is-better mapping -- ``max(-float(raw) / self.norm, 0.0)`` --
-    at seven sites swept 2026-09-12:
+    ⛔ A SILENT FAILURE THAT FAILS GREEN. Five generators' docking rewards hardcode the
+    lower-is-better mapping ``max(-float(raw) / self.norm, 0.0)`` -- fraggfn:257, reinvent:237,
+    s3gfn:243, saturn:236 (which TANGO shares), synformer:353. That mapping is CORRECT for ClpP and
+    has been correct for every docking target this project has ever run. 6TD3-B is the first
+    HIGHER-is-better DOCKING target: cnn_vs is roughly [0, 9], so the expression is non-positive for
+    every molecule and the clamp makes it exactly 0.0. A flat reward raises nothing, logs nothing and
+    produces no nan -- the cell burns its whole docking budget (~1.2 s/mol) training against a
+    constant and finishes looking healthy. RxnFlow (:245), SCENT (:154) and RGFN's proxy already take
+    the sign from a parameter and are unaffected.
 
-        fraggfn/fixed_reward.py:257      reinvent/fixed_reward.py:237
-        rxnflow/fixed_reward.py:223      scent/docking_bridge_proxy.py:133
-        saturn/fixed_reward.py:236       s3gfn/fixed_reward.py:243
-        synformer/fixed_reward.py:353
+    THE DEFECT IS A PROPERTY OF THE (GENERATOR, TARGET) PAIR, WHICH COST ME NINE FALSE REFUSALS.
+    My first version keyed on the TARGET alone -- "higher-is-better docking" -- which is the half of
+    the condition that identifies the new case but not the half that says who mishandles it. It
+    refused all 27 phase-2 cells including the 9 reaction-GFN ones, which are correctly wired. That
+    is the worse direction to be wrong in: a guard that fires on healthy cells gets switched off, and
+    then it is not there for the 18 that need it.
 
-    That mapping is CORRECT for ClpP, which is lower-is-better docking, and it has been correct for
-    every docking target the project has ever run. 6TD3-B is the first HIGHER-is-better docking
-    target: cnn_vs is roughly [0, 9], so ``-raw/norm`` is non-positive for every molecule and the
-    clamp makes it exactly 0.0. A flat reward raises nothing, logs nothing and produces no nan -- the
-    cell burns its entire docking budget (~1.2 s/mol) training against a constant and finishes
-    looking healthy.
+    WHY THIS READS THE SOURCE RATHER THAN LISTING THE FIVE, and why it is NOT keyed on an empty CFG
+    as both reviewers suggested. A hardcoded list of five goes stale in the dangerous direction the
+    moment someone adds a seam (cries wolf) or adds a tenth generator without one (silent). An empty
+    CFG is worse for THIS defect specifically: it tracks whether a config exists, and the config and
+    the seam are exactly the two things that must land together. Write the six competitor configs
+    without touching the sign and a CFG-keyed guard goes green while the flat reward ships -- the
+    failure it was put there to stop. Reading the file keys on the defect itself, so it stops firing
+    the moment the seam lands and never stops firing for any other reason.
 
-    SO THE CHECK IS ON THE TARGET'S ORIENTATION, NOT ITS NAME. "Refuse 6td3b" would go stale the
-    moment a fifth target is added; "refuse a higher-is-better DOCKING target while the bridges
-    hardcode the other sign" states the actual precondition and will keep firing for the right
-    reason. Delete this function when the sign becomes a parameter -- not before.
+    (A's empty-CFG refusal in the trainer is still wanted; it catches a different thing -- a missing
+    config -- and the two are independent.)
     """
     t = cell.target
-    if getattr(t, "reward_type", "") == "docking" and getattr(t, "higher_is_better", False):
+    if not (getattr(t, "reward_type", "") == "docking" and getattr(t, "higher_is_better", False)):
+        return None
+    rel = REWARD_SOURCE.get(cell.generator)
+    if rel is None:
         return (
-            f"{t.name} is HIGHER-is-better docking, but every generator's docking reward "
-            f"hardcodes max(-raw/norm, 0) -- which maps every molecule to 0.0. The cell would "
-            f"train against a flat reward and look healthy. Needs the sign seam first"
+            f"{cell.generator} has no known reward source to check for a sign seam; refusing "
+            f"rather than guessing on a higher-is-better docking target"
         )
-    return None
+    p = REPO / rel
+    try:
+        src = p.read_text()
+    except Exception as e:
+        return f"cannot read {rel} to check the sign seam ({e}); refusing rather than assuming"
+    if _SEAM.search(src):
+        return None
+    return (
+        f"{cell.generator}'s docking reward ({rel}) hardcodes max(-raw/norm, 0) with no sign "
+        f"seam, but {t.name} is HIGHER-is-better docking -- every molecule would score exactly "
+        f"0.0 and the cell would train against a flat reward and look healthy"
+    )
 
 
 def decide(cell, arm: str) -> tuple[str, str]:
