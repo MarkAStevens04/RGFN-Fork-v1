@@ -62,6 +62,10 @@ sys.path.insert(0, str(HERE))
 
 import manifest  # noqa: E402
 
+# Same tolerance verify_cell uses: a batch may straddle the boundary, 5% is one batch at any of
+# our batch sizes. Imported as a constant rather than restated, so the two cannot drift.
+BUDGET_TOLERANCE = 0.95
+
 # Where each generator's reward providers are defined. File locations, not verdicts -- the verdict is
 # read out of the file. `rgfn` and `scent` are ours and go through upstream's CachedProxyBase.
 PROVIDER_SOURCE = {
@@ -127,6 +131,28 @@ def _read_config(d: Path) -> dict:
         return {}
 
 
+def _verdict(row: dict, budget: int) -> tuple[str, str]:
+    """Apply the 2026-09-13 ruling: the budget counts molecules that REACHED THE ORACLE.
+
+    WHICH NUMBER THAT IS DEPENDS ON THE PROVIDER, and getting this backwards is the whole reason the
+    cache column exists. Where the provider CACHES, a repeat never reaches the oracle, so the cell is
+    measured on `distinct`. Where it does NOT, every presentation is a real invocation, so the cell
+    is measured on `train_rows` and a low unique% is MODE COLLAPSE to report, not a shortfall to
+    repair. Applied the other way round, s3gfn_drd2 (34-45% unique, uncached) reads as 60% short and
+    three healthy cells get re-run for nothing.
+
+    `unknown` yields `unknown`, never a pass: a cell whose provider we cannot resolve has not been
+    measured against the ruling, and that must not look like meeting it.
+    """
+    if row["cached"] == "unknown" or row["train_rows"] == "":
+        return "unknown", "not measured against the ruling"
+    reached = int(row["distinct"] if row["cached"] == "yes" else row["train_rows"])
+    basis = "distinct" if row["cached"] == "yes" else "rows"
+    if reached >= budget * BUDGET_TOLERANCE:
+        return "ok", f"{reached:,}/{budget:,} on {basis}"
+    return "SHORT", f"{reached:,}/{budget:,} on {basis}, short by {budget - reached:,}"
+
+
 def measure(cell, arm: str) -> dict:
     row = {
         "cell": cell.tag,
@@ -138,6 +164,8 @@ def measure(cell, arm: str) -> dict:
         "unique_pct": "",
         "provider": "",
         "cached": "unknown",
+        "verdict": "unknown",
+        "basis": "",
         "evidence": "",
     }
     d = cell.train_dir(arm)
@@ -169,6 +197,7 @@ def measure(cell, arm: str) -> dict:
     cached, ev = _class_caches(REPO / rel, cls)
     row["cached"] = {True: "yes", False: "no", None: "unknown"}[cached]
     row["evidence"] = ev
+    row["verdict"], row["basis"] = _verdict(row, cell.arm_calls(arm) or 0)
     return row
 
 
@@ -184,28 +213,47 @@ def main() -> int:
     cells = [c for c in manifest.select(generators=a.generator) if c.has_arm(a.arm)]
     rows = [measure(c, a.arm) for c in cells]
 
-    hdr = f"{'cell':<22} {'rows':>7} {'distinct':>9} {'uniq%':>7} {'cached':>7}  {'provider':<20} evidence"
+    hdr = (
+        f"{'cell':<22} {'rows':>7} {'distinct':>9} {'uniq%':>7} {'cached':>7} "
+        f"{'verdict':>8}  {'provider':<20} basis / evidence"
+    )
     print(hdr)
     print("-" * len(hdr))
     for r in rows:
+        tail = r["basis"] or r["evidence"]
         print(
             f"{r['cell']:<22} {str(r['train_rows']):>7} {str(r['distinct']):>9} "
-            f"{str(r['unique_pct']):>7} {r['cached']:>7}  {r['provider']:<20} {r['evidence'][:44]}"
+            f"{str(r['unique_pct']):>7} {r['cached']:>7} {r['verdict']:>8}  "
+            f"{r['provider']:<20} {tail[:40]}"
         )
 
     measured = [r for r in rows if r["train_rows"] != ""]
+    short = [r for r in rows if r["verdict"] == "SHORT"]
     print(f"\n{len(measured)}/{len(rows)} cells measured; the rest carry their reason.")
     print(
         "A repeat costs an oracle call only where cached=no. Where cached=yes the gap between rows\n"
         "and distinct is budget that never reached the oracle; where cached=no it is mode collapse."
     )
+    if short:
+        print(f"\nSHORT UNDER THE ORACLE-CALL RULING: {len(short)}")
+        for r in short:
+            print(f"    {r['cell']:<22} {r['basis']}")
+        print(
+            "  These cells' artifacts are intact and still frozen -- SHORT is a property of the\n"
+            "  BUDGET, not of the data, and unfreezing them to record it would risk the artifacts\n"
+            "  to make a point. Topping one up is NOT a cheap continuation: DockingBridgeReward's\n"
+            "  cache is in-process and starts empty (fixed_reward.py:203, no load/dump), so a\n"
+            "  resumed run re-docks what the first already docked; and TraceWriter ROTATES, so the\n"
+            "  cell's combine mode would have to change from max to sum."
+        )
     if a.csv:
         with open(a.csv, "w", newline="") as fh:
             w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
             w.writeheader()
             w.writerows(rows)
         print(f"wrote {a.csv}")
-    return 0
+    # Non-zero when any cell is short, so a driver or sweep can gate on it rather than read prose.
+    return 1 if short else 0
 
 
 if __name__ == "__main__":
