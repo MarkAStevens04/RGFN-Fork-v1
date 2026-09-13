@@ -325,7 +325,46 @@ def measure(cell, arm: str) -> dict:
     return row
 
 
+def _require_pyyaml() -> str | None:
+    """The CLI's precondition. None if satisfied, else the message to print and exit on.
+
+    ⛔ LEGIBLE IS NOT LOUD, AND A TABLE OF 108 GOOD EXPLANATIONS IS STILL A MISLEADING REPORT.
+    Making each row say WHY it could not resolve was the first half of this fix; it is not enough.
+    Every row reading "unresolved" reads as "the landed cells cannot be measured", which is the
+    conclusion it actually produced -- a peer ran this from conda base, got 108 careful explanations,
+    and concluded the shared branch could not resolve a single cell. The per-row reason was right and
+    the report was wrong.
+    #
+    THE INTERPRETER SPLIT IS REAL AND NOT INCIDENTAL. `manifest.py` is deliberately STDLIB ONLY so a
+    bare SLURM shell can bootstrap with conda base and ask which env a cell needs -- and conda base
+    is exactly the interpreter with no PyYAML. So base is the one interpreter that can import this
+    module and must not run its CLI. Four agents on this project each reach for a bare `python`,
+    which resolves to base.
+
+    So the library degrades legibly (an unreadable config is reported as unreadable, per cell) and
+    the CLI REFUSES rather than emitting a report whose every row is individually honest and
+    collectively false.
+    """
+    try:
+        import yaml  # noqa: F401
+    except ImportError:
+        return (
+            f"REFUSING TO REPORT: PyYAML is not importable in {sys.executable}\n"
+            f"  Every cell with a run_config.yaml would read 'unresolved', which is a property of\n"
+            f"  this interpreter and not of the cells. conda BASE has no PyYAML by design --\n"
+            f"  manifest.py is stdlib-only so a SLURM shell can bootstrap with base.\n"
+            f"  Run it from the rgfn env instead:\n"
+            f"    /home/markymoo/miniconda3/envs/rgfn/bin/python "
+            f"experiments/benchmark_v2/tools/measure_repeat_rate.py ..."
+        )
+    return None
+
+
 def main() -> int:
+    problem = _require_pyyaml()
+    if problem:
+        print(problem, file=sys.stderr)
+        return 2  # distinct from 1 (= short cells found): nothing was measured at all
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
