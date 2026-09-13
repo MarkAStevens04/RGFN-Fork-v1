@@ -326,6 +326,12 @@ def _write_arm_meta(plan: dict, dest: Path, files: dict) -> None:
         "arm": "a",
         "budget_calls": 10_000,
         "n_train_scored_at_checkpoint": t.get("train_rows") or t.get("n_scored"),
+        # max, not sum: a v1 rotation is ALTERNATIVES (a stub beside the real history), a duplicate,
+        # or a superseded partial -- summing SynFormer's 10,000 beside its abandoned 5,384 would read
+        # 15,384. write_arm_meta sums instead, because inside a training run a rotation can only be a
+        # requeue. Both are right for their own shape; the mode is recorded so they are never
+        # compared blind.
+        "n_train_scored_combine": t.get("combined", "max"),
         "n_total_scored_at_checkpoint": t.get("n_scored"),
         "checkpoint": _final_checkpoint(ckpts),
         "n_checkpoints": len(ckpts),

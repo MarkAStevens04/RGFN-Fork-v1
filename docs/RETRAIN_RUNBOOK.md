@@ -69,6 +69,59 @@ Never on the step axis. Three generators have three different per-step call coun
 SCENT 64, RxnFlow 64 at the authors' `num_from_policy`), and replay buffers make the arithmetic
 unsettleable. **The trace counter decides, not multiplication.**
 
+**And at arm B the counter must survive a PROCESS boundary.** `TraceWriter.__init__` sets
+`n_scored = 0` and `n_train_scored = 0` fresh, then rotates any existing `trace.csv` to `trace.csv.N`
+— **with no resume seed** (`_trace.py:78,83,95-99`). SCENT's arm B requeues two or three times on the
+docking targets, so a stop reading the LIVE counter would restart from zero on each requeue and train
+**640,000–960,000 calls against a declared 320,000**, with every artifact looking healthy. The arm-B
+stop must therefore **COUNT `phase == "train"` rows across `trace.csv` AND its `.N` siblings** — which
+the module's own comment already prescribes ("readers that want the FULL history across rounds should
+concatenate trace.csv with its .N siblings"). This is the cumulative-counter trap in its third place,
+after `asked` and `n_scored` (§8.2); here it crosses a process boundary rather than a phase or a round.
+
+**THE READING SIDE HAS THE SAME TWIN, and the right answer is not "sum them".** `best_trace`
+(`inventory_v1_cells.py:107`) takes the sibling with the MOST ROWS, and `write_arm_meta` /
+`verify_cell` gate on it — so a requeued arm-B cell would record ONE round's budget and fail its own
+budget gate while being genuinely complete. But blind summing is worse, because rotations come in
+three shapes and only one of them sums. Surveyed across all 24 v1 cells that carry siblings:
+
+| shape | what it is | cells | rule |
+|---|---|---|---|
+| **alternatives** | a re-invocation truncated `trace.csv` to a stub; the real history is in `.1` | 11 (s3gfn, fraggfn_drd2) | **max** |
+| **duplicates** | a `.preunshape` rename backup, identical row counts | 9 (reinvent/saturn/tango clpp) | **max** |
+| **superseded partials** | an earlier incomplete attempt beside a complete one (10,000 beside 5,384–6,867) | 4 (synformer) | **max** — summing gives 15,384–16,867 |
+| **continuations** | disjoint contiguous `step` ranges, two halves of ONE run | **0 in v1**; arises only when v2 arm B requeues | **sum** |
+
+So **max is correct for every v1 cell**, and spot-checking six copied cells confirms `copy_forward`
+took the right file in each (10,000 / 10,048 / 10,024 as expected, never a sum). No existing cell is
+short or inflated. The continuation rule is needed **prospectively only**, for v2 arm-B requeues.
+
+**But the arm-B STOP does not need the discriminator at all** — `copy_forward` collapses v1's
+alternatives on the way in (it resolves the rotation and lands the real history as `trace.csv`, which
+is why no v2 cell has siblings). So a `trace.csv.N` inside a v2 TRAINING directory can only have come
+from a v2 requeue, which is always a continuation. Inside a training run, SUM. Stage 2's re-invocation
+does create an alternatives-shaped rotation, but that happens after the cell is frozen and writes to
+its own directory, so the stop never sees it.
+
+**Implemented 2026-09-12 as `best_trace(d, combine=...)`**, defaulting to `"max"` so every v1 path is
+bit-identical, with `write_arm_meta` passing `"sum"` because it runs inside the training run. Three
+details that are not obvious:
+
+* **`n_distinct` is NOT summable** — it is a per-round dedup, so adding two rounds double-counts every
+  molecule seen in both. It is recomputed as a true union over SMILES.
+* **The caller declares the shape; the function does not guess.** An auto-detector that silently picks
+  wrong is the failure this family keeps producing.
+* **Asking to sum files whose `step` ranges overlap RAISES** rather than double-counting — the check
+  that can fail (§6.10). Where steps are blank (SynFormer writes none) the overlap check cannot run,
+  so the result carries `sum_verified: false` rather than choosing silently: legitimate for an arm-A
+  requeue, wrong for a superseded partial, and indistinguishable from inside the function.
+
+**Consequence for scheduling, since a call budget is not an iteration budget:** at a true 320,000
+calls RGFN needs ~2,650 iterations, SCENT 5,000, RxnFlow ~10,300 — so RGFN roughly HALVES and RxnFlow
+roughly DOUBLES against an iteration-matched run. Iteration-matching would instead give ~603k / 320k /
+~155k, a **4× spread on the very axis this campaign claims to control**, which is why the arms are
+defined on calls.
+
 | arm | budget | who | purpose |
 |---|---|---|---|
 | **A** | **10,000 oracle calls** | all 9 generators | the PMO convention the competitors' own papers use |
@@ -443,6 +496,21 @@ returns **exactly 0.0 for every molecule** — a flat reward, silently, for ~3.3
 across **18 cells**. It would have made the COMPETITORS look terrible on 6TD3-B, which is the
 direction a reviewer would never think to question and we would never think to check.
 
+**A TRAP SITS ON THE REPAIR PATH.** `oracle_higher_is_better` looks like the fix and is not: it is
+consumed at `al_loop.py:230` as `min(valid) if not ... else max(valid)`, i.e. candidate **SELECTION**,
+and FragGFN passes it too, so it does not even distinguish the affected generators. Flip it and you
+change which molecules are kept, leave the reward flat, and believe you are done. The reward seam is
+`self.sign` in the `_value` mapping; `rxnflow/fixed_reward.py:160-172` documents the same hazard from
+the other side and is worth reading before touching any of the five.
+
+**THE FIVE SITES, verified on `Hub-Analysis` 2026-09-12** (`fraggfn:257`, `s3gfn:243`,
+`reinvent:237`, `saturn:236`, `synformer:353`; TANGO shares Saturn's runner, so five files cover six
+generators). **Cite line numbers from the MERGED branch, never from a worktree** — this project runs
+seven of them and two agents reported stale numbers as repo facts on the same day. `benchmark-v2-infra`
+holds a 375-line `synformer/fixed_reward.py` against the merged 477, so the same statement is at 263
+there and 353 here, and both greps are honest. A file-level check in a worktree is a check on the
+worktree.
+
 **And a banner did not prevent it.** `rxnflow_6td3b_docking_fixed_5k.yaml` carries a
 "⚠ LOAD-BEARING — DO NOT DELETE" warning describing precisely this catastrophe. The fix landed in the
 one generator whose header carries the warning; the five that needed the identical fix never got it,
@@ -624,6 +692,20 @@ fragments THIS RUN used?** Part 2 is the one that was missing. Coverage of the s
 `chosen_smiles` is the wrong question — a snapshot from a *different* model is internally complete, so
 it reads **100%** while only **53%** of the run's fragments are expandable (549 of 1,169 silently
 *bought* rather than *built*).
+
+**IN v2 THAT FAILURE RECURS ACROSS ARMS, and it is created by our own design.** `_recipe_health`
+resolves the snapshot from the checkpoint's **run_id** (`check_route_readiness.py:170-176`) and takes
+`snaps[-1]`, the LATEST. Because one training run now yields both arms in ONE run directory (§1), the
+two arms **share a run_id** — so an arm-A cell's recipe check reads arm B's final snapshot and reports
+arm B's coverage. Arm A promoted nothing; the number it prints is about a different arm, and the
+verdict stays right only by luck. **The arm must disambiguate the snapshot, not just the run.**
+
+**And an ABSENT library is `n/a`, not a failure** — `if not snaps: return None  # no dynamic library
+-> nothing to expand`. An arm-A SCENT cell therefore passes on the same path RGFN and RxnFlow take,
+and that is correct rather than lucky: with zero promotions its routes bottom out on the 418 base
+blocks, so there is nothing to expand and a chemist can act on every molecule. Entry 070's
+distinction is the operative one — **no recipes because logging was OFF while fragments were promoted
+is broken; no recipes because NOTHING was promoted is complete.**
 
 ### 6.4 One command answers 6.1–6.3
 ```
@@ -910,6 +992,23 @@ bash resumes at a **byte offset**; an edit mid-job runs garbage hours later (thi
 five hours in, *after* its work had succeeded). The chain scripts snapshot their callee to `/tmp` for
 this reason. Copy that pattern; do not reinvent it.
 
+**The same hazard exists in PYTHON, via re-import rather than byte offset.** A multi-process harness
+that launches runs sequentially re-imports every module per process — so editing a module between
+run A and run B means the two runs execute different code, and if the edit touched a written schema
+(a CSV column, a sidecar key) the comparison is between incomparable artifacts while both report
+success. Caught 2026-09-12 mid-flight on `_trace.py` during the RNG verification, and reverted for
+exactly this reason. **Freeze every module a comparison spans for the duration of that comparison**,
+the same way §6.8 freezes inputs for a comparative arm.
+
+**And save state at the point it will be RESTORED, not at a convenient earlier one.** The RNG sidecar
+was captured inside the `make_checkpoint` wrapper, which fires part-way through an iteration's
+epilogue, while a resume re-enters at the TOP of the next iteration — so the restore faithfully
+reinstated a position the uninterrupted run never occupied there. The restore mechanism was correct
+throughout; the capture point was not, and no amount of verifying the restore would have found it.
+The fix is a pending flag at the checkpoint and the write at the next iteration's top, which is
+correct **whatever** consumes randomness in between — so it does not depend on identifying the
+consumer, and the two candidate consumers considered were both wrong.
+
 ### 8.4 Shared scratch is rewritten by other agents
 
 On 2026-08-19 all three `scent_seh` enumerations were re-run mid-experiment (a correct fix) *after* a
@@ -923,6 +1022,21 @@ outputs showed it. See §6.8.
 `HF_HOME`, `TORCH_HOME`, `SYNTHESEUS_CACHE_DIR` to `$SCRATCH` in every submit script. Any job that
 docks must `source ~/bin/rgfn-smoke-env.sh` — omitting it leaves QuickVina2-GPU with three unresolved
 boost libraries, which surfaces as all-`nan` and reads exactly like a degraded GPU.
+
+### 8.5b The login node is saturated — a smoke can fail for reasons that are not your code
+
+Two traps that each cost an agent a run on 2026-09-12, both reading exactly like code bugs:
+
+* **`RLIMIT_NPROC` is 1024 and counts THREADS, not processes.** Our own concurrent Claude sessions
+  hold ~490 of them, so a smoke that lets OpenBLAS spawn 64 threads per process dies with
+  `blas_thread_init: pthread_create failed for thread 17 of 64` at **59 processes**. Prefix every
+  login smoke with `OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1`.
+* **Without `source ~/bin/rgfn-smoke-env.sh` the ingest subprocess dies on `libnvrtc.so.11.2`** — the
+  same failure that destroyed a 214-row history once. It is survivable now only because the trace,
+  timing and library saves were moved BEFORE ingest; the run still exits non-zero.
+
+Same shape as §8.5: a login smoke cannot catch a compute-only bug, and now a saturated login node
+cannot reliably run the smoke either.
 
 ### 8.6 Do not submit a cell another chain has already claimed
 

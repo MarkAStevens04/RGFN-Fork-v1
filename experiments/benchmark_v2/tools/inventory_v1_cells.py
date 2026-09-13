@@ -89,7 +89,7 @@ def _rows(path: Path):
         return max(sum(1 for _ in fh) - 1, 0)
 
 
-def best_trace(d: Path):
+def best_trace(d: Path, combine: str = "max"):
     """The cell's real trace, which is often NOT ``trace.csv``.
 
     RECOVERY, measured 2026-09-07. Re-invoking a runner truncates ``trace.csv`` to its header (59
@@ -103,20 +103,110 @@ def best_trace(d: Path):
     the canonical name. Where every candidate is a header-only stub the trace is genuinely gone
     (s3gfn_seh/43 — all three are 59 bytes), which is a different verdict and must not be papered
     over by silently reporting zero.
+
+    WHY ``combine`` EXISTS, AND WHY IT DEFAULTS TO max. Rotations come in four shapes and only one
+    of them sums. Surveyed across all 24 v1 cells that carry siblings: 11 ALTERNATIVES (a stub beside
+    the real history), 9 DUPLICATES (``.preunshape`` renames, identical counts), 4 SUPERSEDED PARTIALS
+    (SynFormer, a complete 10,000 beside an abandoned 5,384-6,867 -- summing would read 16,867), and
+    ZERO CONTINUATIONS. So max is right for every v1 cell and is the default.
+
+    CONTINUATIONS arise only inside a v2 TRAINING directory, where a requeue writes the later rounds
+    to ``trace.csv`` and the earlier ones to ``trace.csv.N`` -- two disjoint halves of ONE run. There
+    max UNDERSTATES: a requeued SCENT arm-B cell would record one round's budget and fail its own
+    budget gate while being genuinely complete. Callers that know they are inside a training run pass
+    ``combine="sum"``.
+
+    The caller declares it rather than this function guessing, because an auto-detector that silently
+    picks the wrong shape is the failure this whole family keeps producing. The overlap assertion
+    below is the check that can fail: ask to sum files whose ``step`` ranges overlap and it refuses
+    instead of double-counting.
+
+    ``n_distinct`` is NOT summable -- it is a per-round dedup, so adding two rounds double-counts every
+    molecule seen in both. When summing, it is recomputed as a true union over SMILES.
     """
     cands = [d / "trace.csv"] + sorted(d.glob("trace.csv.*"))
+    stats = [(p, _trace_stats(p)) for p in cands]
+    usable = [(p, st) for p, st in stats if st is not None and "error" not in st]
+    if not usable:
+        return None
+
+    if combine == "sum":
+        live = [(p, st) for p, st in usable if (st.get("train_rows") or 0) > 0]
+        if len(live) > 1:
+            spans = []
+            for p, _ in live:
+                steps = _train_steps(p)
+                if steps:
+                    spans.append((min(steps), max(steps), p.name))
+            spans.sort()
+            for (_, hi, a), (lo, _, b) in zip(spans, spans[1:]):
+                if lo <= hi:
+                    raise ValueError(
+                        f"refusing to sum {a} and {b} in {d}: step ranges overlap "
+                        f"(..{hi} then {lo}..), so these are ALTERNATIVES, not a continuation"
+                    )
+        # THREE STATES, and the third must be DECLARED. With blank `step` values (SynFormer writes
+        # none) the overlap check cannot run, so summing is UNVERIFIED rather than wrong -- legitimate
+        # for an arm-A requeue, wrong for a superseded partial, and indistinguishable from here.
+        # Record it instead of choosing silently; a consumer that needs certainty can refuse on it.
+        verified = True
+        if len(live) > 1 and not all(_train_steps(p) for p, _ in live):
+            verified = False
+        smiles: set = set()
+        for p, _ in live:
+            smiles |= _train_smiles(p)
+        merged = {
+            "n_rows": sum((st.get("n_rows") or 0) for _, st in live),
+            "n_scored": sum((st.get("n_scored") or 0) for _, st in live),
+            "n_distinct": len(smiles) if smiles else None,
+            "train_rows": sum((st.get("train_rows") or 0) for _, st in live),
+            "train_max": max((st.get("train_max") or 0) for _, st in live) if live else 0,
+            "source": "+".join(p.name for p, _ in live) or "trace.csv",
+            "n_rotations": len(cands) - 1,
+            "combined": "sum",
+            "sum_verified": verified,
+        }
+        return merged
+
     best, best_stats = None, None
-    for p in cands:
-        st = _trace_stats(p)
-        if st is None or "error" in st:
-            continue
+    for p, st in usable:
         if best_stats is None or (st.get("n_rows") or 0) > (best_stats.get("n_rows") or 0):
             best, best_stats = p, st
     if best_stats is None:
         return None
     best_stats["source"] = best.name
     best_stats["n_rotations"] = len(cands) - 1
+    best_stats["combined"] = "max"
     return best_stats
+
+
+def _train_steps(path: Path) -> list:
+    """The `step` values on phase=="train" rows. Empty when the generator does not write steps
+    (SynFormer does not), which is why a blank result falls back to max rather than guessing."""
+    out = []
+    try:
+        with open(path, newline="") as fh:
+            for r in csv.DictReader(fh):
+                if (r.get("phase") or "") == "train" and (r.get("step") or "").strip():
+                    try:
+                        out.append(int(r["step"]))
+                    except ValueError:
+                        pass
+    except Exception:
+        return []
+    return out
+
+
+def _train_smiles(path: Path) -> set:
+    try:
+        with open(path, newline="") as fh:
+            return {
+                r["smiles"]
+                for r in csv.DictReader(fh)
+                if (r.get("phase") or "") == "train" and r.get("smiles")
+            }
+    except Exception:
+        return set()
 
 
 def _trace_stats(path: Path):
@@ -145,8 +235,7 @@ def _trace_stats(path: Path):
     except Exception as exc:  # a truncated trace is a finding, not a crash
         return {"error": str(exc), "n_rows": n}
     if last is None:
-        return {"n_rows": 0, "n_scored": 0, "n_distinct": 0,
-                "train_rows": 0, "train_max": 0}
+        return {"n_rows": 0, "n_scored": 0, "n_distinct": 0, "train_rows": 0, "train_max": 0}
 
     def _i(k):
         try:
