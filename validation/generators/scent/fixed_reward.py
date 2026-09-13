@@ -17,6 +17,7 @@ loop shells to the oracle bridge).
 
 import csv
 import json
+import os
 import shutil
 import subprocess
 import time
@@ -28,6 +29,7 @@ import gin
 # Plain sibling imports (NOT package-relative), matching al_loop.py — the runner keeps
 # the repo root OFF sys.path so SCENT's installed `rgfn` fork isn't shadowed.
 import library_io  # noqa: E402  (sibling module; dynamic-library persistence)
+import rng_io  # noqa: E402  (sibling module; RNG-stream persistence)
 from guidance_io import load_guidance_models, save_guidance_models  # noqa: E402
 from route import extract_route  # noqa: E402
 
@@ -122,6 +124,8 @@ class ScentFixedRewardRun:
         # so an un-restored requeue restarts with an empty vocabulary and re-promotes onto slots
         # whose trained embedding rows belong to the previous occupants. See library_io.
         self._load_dynamic_library()
+        # Set by the checkpoint wrapper, consumed at the top of the following iteration.
+        self._rng_capture_pending = [False]
         if hasattr(self.trainer, "make_checkpoint"):
             _orig_make_ckpt = self.trainer.make_checkpoint
 
@@ -129,15 +133,79 @@ class ScentFixedRewardRun:
                 _orig_make_ckpt(*a, **k)
                 self._save_guidance_models()
                 self._save_dynamic_library()
+                # THE RNG SIDECAR IS DELIBERATELY *NOT* WRITTEN HERE. make_checkpoint fires partway
+                # through an iteration's epilogue, but a resume re-enters at the START of the NEXT
+                # iteration, and the stream advances in between. Capturing here restores a position
+                # the uninterrupted run never held at that point: measured 2026-09-12, a resume
+                # restored a92cb12ed2f14 while run A was at cdf509c5082b5 on the same iteration, and
+                # every one of the four post-resume iterations then diverged. Flag it instead and
+                # let the next iteration capture the position it actually re-enters at.
+                self._rng_capture_pending[0] = True
 
             self.trainer.make_checkpoint = _make_ckpt_with_guidance
+
+        # 1a-pre. RNG streams, restored LAST of the three sidecars and deliberately so: model
+        #     construction and the library replay above both DRAW from the RNG, and on a resume
+        #     those draws are discarded (weights come from the checkpoint) while still having
+        #     advanced the stream. Restoring after them overwrites whatever they consumed, so the
+        #     position is exact regardless. This is what makes a requeued run REPRODUCIBLE rather
+        #     than merely correct -- without it the same seed promotes a different fragment set.
+        self._load_rng_state()
 
         # 1a. Instrument the reward, and preserve the arm-A checkpoint at 10,000 oracle calls.
         #     Attached AFTER the guidance patch above so the arm-A save goes through it and gets
         #     its P_B sidecar too -- an arm-A checkpoint without one has an UNRECOVERABLE backward
         #     policy (Logs/024), which is the whole reason the sidecar exists.
         self._attach_trace()
+
+        # 1a-bis. RNG POSITION PROBE, off unless SCENT_RNG_DEBUG is set. The 2026-09-12 resume
+        #     verification showed the replay half of an iteration reproducing exactly while the
+        #     forward half diverged, and no amount of reading settles which stream is out of
+        #     position -- the two halves draw from numpy and torch respectively
+        #     (reward_prioritized_replay_buffer.py:73 uses np.random.choice; the policy samples
+        #     through torch). Printing the position at the SAME point in both runs is the only
+        #     thing that distinguishes "the stream is misplaced" from "the stream is right and the
+        #     divergence is elsewhere" (model load, CUDA nondeterminism). Compare the two logs
+        #     iteration by iteration: the first iteration whose fingerprint differs is where to
+        #     look, and if none differ the RNG is exonerated.
+        if hasattr(self.trainer, "sample_training_trajectories"):
+            _orig_sample = self.trainer.sample_training_trajectories
+            # The trainer's loop is `for i in range(start_iteration, n_iterations)`, and this is the
+            # first thing each pass does, so the k-th call here is iteration start_iteration + k.
+            # Deriving it this way rather than reading a hook argument keeps this independent of
+            # _trace.py, which patches on_start_sampling for its own reasons.
+            _iter_k = [0]
+            _debug = bool(os.environ.get("SCENT_RNG_DEBUG"))
+
+            def _sample_with_rng_capture(*a, _inner=_orig_sample, **k):
+                i = int(getattr(self.trainer, "start_iteration", 0)) + _iter_k[0]
+                if _debug:
+                    print(
+                        f"[SCENT-RNG] iter={i} pre-sample rng={str(rng_io.fingerprint())[:16]}",
+                        flush=True,
+                    )
+                # THIS is the resume point: a checkpoint taken during iteration i-1 resumes here,
+                # at the top of iteration i, so this is the position that must be persisted.
+                if self._rng_capture_pending[0]:
+                    self._save_rng_state(iteration=i)
+                    self._rng_capture_pending[0] = False
+                _iter_k[0] += 1
+                return _inner(*a, **k)
+
+            self.trainer.sample_training_trajectories = _sample_with_rng_capture
+
         self.trainer.train()
+
+        # 1a-post. THE LAST CHECKPOINT HAS NO FOLLOWING ITERATION, so the pending capture above
+        #     never fires for it -- the trainer check-points unconditionally at
+        #     `i == n_iterations - 1` and then the loop ends. Without this the most common case of
+        #     all (a run that reaches its iteration limit and is later EXTENDED or resumed) would
+        #     find no sidecar at all, and the fix would look broken while being correct for every
+        #     other checkpoint. The position here is exactly what the next iteration would have
+        #     started from, so it is tagged with that index.
+        if getattr(self, "_rng_capture_pending", [False])[0]:
+            self._save_rng_state(iteration=int(getattr(self.trainer, "n_iterations", 0)))
+            self._rng_capture_pending[0] = False
 
         # 1b. Final guidance-model save — persists the trained P_B (cost + decomposability MLPs)
         #     that objective.state_dict() -> last_gfn.pt silently drops, so it stays exactly
@@ -287,6 +355,9 @@ class ScentFixedRewardRun:
             lib = ckpt_dir / "dynamic_library.json"
             if lib.exists():
                 shutil.copy2(lib, ckpt_dir / "dynamic_library_arm_a_10k.json")
+            rng = rng_io.sidecar_path(ckpt_dir)
+            if rng.exists():
+                shutil.copy2(rng, ckpt_dir / "rng_state_arm_a_10k.pt")
             # Make it resume-clean, same as RGFN: SCENT is an RGFN fork, so its forward policy may
             # carry the same lazily populated `*_cache` buffers that break a strict
             # load_state_dict (Logs/021). SCENT's own runner resumes straight from last_gfn.pt
@@ -370,6 +441,40 @@ class ScentFixedRewardRun:
             (self.run_dir / name).write_text(json.dumps(audit, indent=2, default=str))
         except Exception as exc:  # noqa: BLE001
             print(f"[SCENT-FR] WARNING library audit failed: {exc}", flush=True)
+
+    # ------------------------------------------------------------------ RNG persistence
+    def _save_rng_state(self, iteration: Optional[int] = None) -> None:
+        rng_io.save_rng_state(
+            rng_io.sidecar_path(Path(self.trainer.run_dir) / "train" / "checkpoints"),
+            iteration=iteration,
+        )
+
+    def _load_rng_state(self) -> bool:
+        """Restore the RNG position so a requeued run follows the uninterrupted trajectory."""
+        p = rng_io.sidecar_path(Path(self.trainer.run_dir) / "train" / "checkpoints")
+        if not p.is_file():
+            return False
+        before = rng_io.fingerprint()
+        # The trainer has already read the checkpoint and set start_iteration = epoch + 1, so this
+        # is the iteration the loop is about to re-enter. A sidecar captured for any other iteration
+        # is refused rather than applied -- see rng_io.restore_rng_state.
+        ok = rng_io.restore_rng_state(
+            p, expect_iteration=int(getattr(self.trainer, "start_iteration", 0))
+        )
+        after = rng_io.fingerprint()
+        if ok:
+            print(
+                f"[SCENT-FR] resume: RNG streams restored "
+                f"({str(before)[:12]} -> {str(after)[:12]})",
+                flush=True,
+            )
+        else:
+            print(
+                "[SCENT-FR] WARNING RNG streams NOT restored -- this resume is correct but NOT "
+                "bit-reproducible against an uninterrupted run",
+                flush=True,
+            )
+        return ok
 
     # ------------------------------------------------------- dynamic library persistence
     def _library_sidecar_path(self) -> Path:
