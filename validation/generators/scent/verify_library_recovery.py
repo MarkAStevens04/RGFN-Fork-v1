@@ -259,7 +259,13 @@ def main() -> int:
     # it regresses. Baseline before the fix, both runs at 15 promoted and 1.0 coverage:
     #     uninterrupted 7fc4acef...    resumed d10044fc...
     repro = ok_list and ok_rows
-    print(f"  requeued run is bit-reproducible : {repro}   <- rng_io; this was RED before that fix")
+    # NO COMPONENT IS NAMED HERE. This line used to read "<- rng_io; this was RED before that fix",
+    # which pointed the reader at the RNG -- and by 2026-09-13 the RNG was the one half demonstrably
+    # working (the resumed run re-enters at the uninterrupted run's exact position). The two
+    # failures found through this harness were the LIBRARY sidecar and the harness itself. A verdict
+    # that credits or blames a component teaches the next reader where to look, so it had better not
+    # be guessing.
+    print(f"  requeued run is bit-reproducible : {repro}")
 
     if not div and ok_routes and repro:
         print(
