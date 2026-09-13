@@ -24,7 +24,7 @@ current results cannot support.
 
 ## 0. What changed, and therefore what cannot be carried forward
 
-Six decisions post-date most of the results on disk. Each one is a reason a cell has to be rebuilt,
+Seven decisions post-date most of the results on disk. Each one is a reason a cell has to be rebuilt,
 and together they are why this is a re-run rather than a repair.
 
 | # | Change | Date | Consequence |
@@ -35,6 +35,7 @@ and together they are why this is a re-run rather than a repair.
 | 4 | **A fourth competitor stage: upsample-and-filter** (`upsample_to_modes.py`, `dd8f1a9`) | 2026-08-28 | A competitor "pool" is no longer a slice of a fixed 2,000-molecule sample. `pool-limited` used to conflate *the generator cannot* with *we did not ask for enough* |
 | 5 | **Route contract enforced at write time**; RGFN/RxnFlow route emission implemented | 2026-08-24 | A fresh sample now produces `routes.json`. The route dataset can go from **5 cell-seeds to matrix-wide** as a by-product of re-running — see §6 |
 | 6 | **6TD3-B** replaces the exploitable Tier2−Tier1 differential as the CDK12–DDB1 reward — reward *and* gate are `cnn_vs` (CNNscore × CNNaffinity) at **6.718** | 2026-08-21, settled 08-28 | Every 6TD3 cell of every generator is **INVALIDATED, not superseded** — the distinction is load-bearing. Row 2 supersedes: the same quantity, re-measured under a new budget, so a newer number will exist. Row 6 REDEFINES the quantity: 6TD3-B numbers are not a better measurement of old 6TD3, they measure something else, so **no newer measurement of the old quantity exists or ever will**. Calling it superseded implies a replacement number is out there and sends a reader looking for one. The old libraries do not survive re-gating. Oracle wiring in progress; see §7.1 for the threshold and the evidence |
+| 7 | **The budget counts molecules that REACHED THE ORACLE**, not molecules presented — a cached repeat does not spend budget | 2026-09-13 | Aligns us with `CachedProxyBase.n_proxy_calls`, which already returns `len(self.cache)`. **Six landed cells are short and must be topped up or flagged:** `fraggfn_clpp` reached 9,258–9,375 of 10,048 presented, `s3gfn_clpp` 8,451–8,912. The other 47 are unaffected because the competitors' surrogate rewards hold no cache, so presentations already equal invocations there — `s3gfn_drd2`'s 34–45% unique is **mode collapse to report, not a shortfall to repair**. See §2.3b |
 
 ### The one thing that survives unchanged
 
@@ -290,9 +291,12 @@ Two details that a later reader will otherwise simplify away, both in
   proxy the training loop uses, so those rows are flipped to `phase="eval"` before sampling. Without
   it a smoke measured 600 training calls followed by 185 scoring calls, indistinguishable — and every
   budget or modes-vs-calls reading would count the second set. **Filter to `phase == "train"` for any
-  budget claim** — and count ROWS, never the cumulative `n_scored`, which absorbs eval calls as it
-  goes (measured on `s3gfn_drd2/42`: the same file reads 12,048 / 11,048 / 10,048 depending on which
-  you take).
+  budget claim** — and never the cumulative `n_scored`, which absorbs eval calls as it goes (measured
+  on `s3gfn_drd2/42`: the same file reads 12,048 / 11,048 / 10,048 depending on which you take).
+  **There are THREE rungs here and rows is the middle one**, so do not stop on it: `n_scored` is
+  contaminated by eval; train ROWS fix that but count a cached repeat as spend; **DISTINCT train
+  molecules are the budget** (§2.3b, ruled 2026-09-13). Rows remain the right answer for "how much did
+  this run present", which is what `n_train_scored_at_checkpoint` says on the tin.
 * **SCENT's periodic validation was inflating its own training count 2.84×**, and this is a measured
   figure rather than a rounding concern. Its config sets `valid_sampler = RandomSampler` with
   `valid_n_trajectories = 1000`, so every validation pass scores a thousand molecules through the
@@ -451,6 +455,73 @@ competitors' entire Stage-2 cost. The inference-time axis is uncontrolled for ev
 far its heavier user. Equalising it is not the fix: that would force the fixed-MODE readout this
 project demoted to secondary. Report it; do not equalise it. One within-field reading does survive:
 S3-GFN's edge over Saturn and TANGO is partly bought with up to 1.8× their oracle calls.
+
+### 2.3b Presented vs REACHED THE ORACLE — DECIDED 2026-09-13: the budget counts what reached the oracle
+
+**RULING (researcher, 2026-09-13): the budget counts molecules that REACHED THE ORACLE, not molecules
+presented.** So a cached repeat does not spend budget, and `n_distinct` — not the train row count — is
+what a cell is measured against. This aligns our budget with `CachedProxyBase.n_proxy_calls`, which
+already returns `len(self.cache)`; the framework's definition and ours no longer disagree.
+
+**THE COST IS SIX CELLS, all on ClpP** — measured, not estimated:
+
+| cell | reached | presented | short by |
+|---|---|---|---|
+| `fraggfn_clpp` s42 / s43 / s44 | 9,371 / 9,375 / 9,258 | 10,048 | 629 / 625 / 742 |
+| `s3gfn_clpp` s42 / s43 / s44 | 8,451 / 8,912 / 8,735 | 10,048 | 1,549 / 1,088 / 1,265 |
+
+**The other 47 landed cells are unaffected, and the reason matters**: on the SURROGATE targets the
+competitors' `SEHFrozenReward` and `DRD2FrozenReward` hold no cache, so every presentation *is* a real
+invocation and rows already equal calls. `s3gfn_drd2` reading 34.4–45.2% unique is therefore **mode
+collapse, not a budget shortfall** — the same family as the Saturn finding, and a cell to report rather
+than repair. ReINVENT, Saturn, TANGO and SynFormer are ≥99.7% unique everywhere and unaffected on any
+target. Separately, `synformer_drd2_s43` reached 6,950 because its search exhausted before its budget
+(§8.2), which is a different and already-recorded condition.
+
+**WHAT THIS CHANGES GOING FORWARD:** the arm-A checkpoint and the arm-B stop must gate on DISTINCT
+train molecules, not train rows. `n_train_scored_at_checkpoint` keeps counting rows — it says rows on
+the tin — but the BUDGET comparison is now against distinct, so a cell must record both.
+
+**ORIGINAL FINDING, retained because it is why the ruling was needed.** The budget gates on `phase == "train"` ROWS, which count
+states PRESENTED to the reward. Several paths CACHE, so a repeat presentation never invokes the
+oracle — and **which paths cache is not symmetric between us and the competitors.** Read at the
+class, 2026-09-12:
+
+| path | sEH / DRD2 (surrogate) | ClpP / 6TD3-B (docking) |
+|---|---|---|
+| **ours** — `SehMoleculeProxy(CachedProxyBase)`, `DRD2Proxy(CachedProxyBase)` | **CACHES** (`compute_proxy_output` filters uncached indices, then `list(set(...))` — deduped twice) | CACHES |
+| **competitors** — `SEHFrozenReward`, `DRD2FrozenReward` | **NO CACHE**, zero `_cache` references in either class, on all five | `DockingBridgeReward` CACHES |
+
+So on the two SURROGATE targets — two of phase 1's three — every molecule a competitor presents is a
+real model invocation, while ours are deduped. Measured repeat rates: RGFN's arm-A pilot is **16,919
+presented / 12,114 distinct = 28.4%**, i.e. **~7,160 real invocations against the competitors' ~10,000**.
+On the DOCKING targets both sides cache, so the gap narrows to the difference in repeat rates
+(s3gfn/clpp ~13%, fraggfn/clpp ~7%).
+
+**The direction is against us**, on the exhibit whose whole justification is that budget parity makes
+a cross-generator claim fair (§2.5's counterexample list).
+
+**THE TRACE RECORDS PRESENTATIONS, AND UPSTREAM DISAGREES WITH IT.** Settled from source, not inferred:
+`attach_proxy_trace` patches `proxy.compute_proxy_output` — `CachedProxyBase`'s **OUTER** method
+(`cached_proxy.py:45`), the one that filters uncached indices — so every presented state is traced
+before dedup. Meanwhile `CachedProxyBase.n_proxy_calls` returns **`len(self.cache)`**. So on our own
+side of the comparison, **the framework's own definition of a proxy call is a distinct state**, and
+our budget counts rows. That is not our interpretation of the parity question; it is upstream's,
+already in the code we build on.
+
+**Two things this is NOT.** (1) A 60% shortfall: `s3gfn/drd2` traces 39.5% unique, but DRD2 has no
+cache, so every one of those presentations is a real invocation — the repetition is mode collapse, a
+RESULT of the Saturn family, not a budget artifact. (2) Settled: `n_train_scored_at_checkpoint` counts
+train ROWS under either reading, so nothing landed changes. **Exception to log:** SynFormer alone has
+an `SEHBridgeReward` that caches, and its runner traces `todo` — deduped, cache-missed and
+budget-capped (`room = budget - len(scored)`) — so its rows are oracle calls by construction while
+s3gfn's and fraggfn's are presentations.
+
+**Do not decide this from the repeat rate.** Distinct-SMILES is a proxy for oracle calls that is exact
+only where the provider caches — reporting it as a call count is the ingredient-vs-mechanism error.
+Instrument the INNER uncached path so real invocations are a MEASURED third column, then rule.
+
+---
 
 ### 2.4 Reporting conventions (unchanged, restated so a cell can be checked against them)
 
@@ -971,7 +1042,9 @@ project at least once:
 | `used_rxns` | what the selection cost | **inflates** outside the budget-binding regime; quote `cost_kept_rxns` (65 molecules priced at 247 read as 300→387) |
 | `n_modes` | modes delivered | modes **requested**; `n_targets_priced` is delivered (89 vs 100 on native routes) |
 | `n_modes_kept` | same as `n_modes` | post-filter count — a co-agent lost a result to the difference |
-| `n_scored` (`trace.csv`) | training oracle calls | **all phases**, eval interleaved; count `phase == "train"` ROWS, and note that `max(n_scored)` over filtered rows is still contaminated |
+| `n_scored` (`trace.csv`) | training oracle calls | **all phases**, eval interleaved, and `max(n_scored)` over filtered rows is still contaminated. Filter to `phase == "train"` — but rows are PRESENTATIONS: since 2026-09-13 the budget is **distinct** train molecules (§2.3b), so rows overstate it wherever the provider caches |
+| `n_distinct` (`trace.csv`, and the property) | distinct molecules scored in TRAINING | **train AND eval.** `_trace.py:112` does `self._seen.add(smiles)` OUTSIDE the `if phase == "train"` branch that guards `n_train_scored` — the row counter got its phase guard and the distinct set did not. So since the 2026-09-13 ruling made distinct the budget, the field that *sounds* like the budget is contaminated by the same mechanism `n_scored` was, one field over. **No counter produces distinct-TRAIN today**; gating on `n_distinct` would swap a rows-not-distinct error for a train-plus-eval one and look like a fix |
+| train ROW count | the budget | **presentations.** The middle rung of three: `n_scored` → rows → distinct. Correct for "what did this run present", wrong for "what did it spend" on any cached provider — `s3gfn_clpp` presented 10,048 and reached 8,451 |
 | `total_modes` | a total | capped at the 500-molecule prefix |
 | `sample_s` / any timing component | 0.0 when absent | **absent ≠ zero** — a missing component must be omitted from the total, never written as 0.0, or an untimed stage becomes a free one |
 | durations in prose | `20:10` = 20 min 10 s | on this cluster it is as likely **20 h 10 min**. Always write `19.30 h` |
@@ -1000,14 +1073,50 @@ success. Caught 2026-09-12 mid-flight on `_trace.py` during the RNG verification
 exactly this reason. **Freeze every module a comparison spans for the duration of that comparison**,
 the same way §6.8 freezes inputs for a comparative arm.
 
-**And save state at the point it will be RESTORED, not at a convenient earlier one.** The RNG sidecar
-was captured inside the `make_checkpoint` wrapper, which fires part-way through an iteration's
-epilogue, while a resume re-enters at the TOP of the next iteration — so the restore faithfully
-reinstated a position the uninterrupted run never occupied there. The restore mechanism was correct
-throughout; the capture point was not, and no amount of verifying the restore would have found it.
-The fix is a pending flag at the checkpoint and the write at the next iteration's top, which is
-correct **whatever** consumes randomness in between — so it does not depend on identifying the
-consumer, and the two candidate consumers considered were both wrong.
+**Save state at the point it will be RESTORED, not at a convenient earlier one — as HARDENING.** The
+RNG sidecar is captured inside the `make_checkpoint` wrapper, which fires part-way through an
+iteration's epilogue, while a resume re-enters at the TOP of the next iteration. Moving the write to
+the resume point is correct **whatever** later lands between those two, and tagging the sidecar with
+its iteration turns a stale one into a declared refusal rather than a silent wrong restore. **For the RNG it has NOT been shown to repair a defect that exists today**, and an
+earlier draft of this entry said it had — but **applying the same reasoning to the LIBRARY sidecar
+found one that is demonstrated.** `make_checkpoint` fires inside the validation block
+(`trainer.py:359`) and the dynamic-library promotion runs **twenty-nine lines later, in the same
+iteration** (`on_update_fragments_library`, `trainer.py:388`). So a library sidecar written inside
+`make_checkpoint` captures the vocabulary as it stood BEFORE that iteration's promotion, and a resume
+from that checkpoint loses the batch. Proven from the harness's own artifacts: the run wrote
+`additional_fragments/fragments_2.json` — the promotion happened — while its sidecar recorded **0
+promoted**. In production `valid_every_n_iterations = 250` against `DynamicLibrary.every_n_iterations
+= 1000` means a kill between the i=1000 checkpoint and the i=1250 one resumes with a library missing
+that promotion: `n_new_fragments = 400`, so **up to 400 fragments silently dropped**, on the exact
+requeue that `library_io` exists to make safe. The RNG survived the same ordering only because the
+end-of-run capture happens after `train()` returns, i.e. after the promotion.
+
+**`_save_guidance_models()` must NOT move with it.** It pairs with `last_gfn.pt`'s weights, so
+capturing it later would make the sidecar describe a model state one promotion ahead of the
+checkpoint it accompanies. The library is safe to move because promotion changes only
+`current_fragments` and the embedding rows are preallocated, so the vocabulary restores independently
+of the weights. **Two sidecars in one loop, captured at different points, and only one of them was at
+the resume point** — which is why the rule is per-artifact and not per-file. Measured: with the fix in, the restored value was IDENTICAL to the one the old placement
+produced, because nothing between `make_checkpoint` and the end of the loop consumes randomness — the
+library promotion is the only thing there and it takes the `mean_reward` branch, which draws none. So
+record it as a defensible placement with a stated rationale, not as a fix for an observed production
+failure.
+
+**⚠ A VERIFICATION HARNESS CAN PERTURB THE PROPERTY IT VERIFIES.** This is what actually broke three
+reproducibility runs, and it is the more valuable finding. `Trainer.valid_every_n_iterations = 250`
+against an 8-iteration harness means no periodic validation fires, so the only remaining trigger is
+`i == n_iterations - 1` — and SCENT's `valid_step` samples 1,000 trajectories through the RNG:
+
+    run A  (8 iterations)       validates at i=7
+    run B  (stopped at 4)       validates at i=3   <- a pass the uninterrupted run never made there
+
+**Stopping the run injected the very randomness the comparison was measuring.** No capture-point fix
+could ever reconcile that; the harness was measuring its own stop. The repaired harness binds the
+validation cadence for both runs, chooses a stop satisfying `(half - 1) % valid_every == 0` so run B's
+last iteration is one run A also validates, and **prints INVALID rather than FAIL when no such stop
+exists** — the old one reported FAIL for a condition it had manufactured, which is a check that can
+never pass, the mirror of §6.10's check that can never fail. Stopping a run is not a neutral act when
+the stopping condition also triggers work.
 
 ### 8.4 Shared scratch is rewritten by other agents
 

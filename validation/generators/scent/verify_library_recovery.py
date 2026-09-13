@@ -44,7 +44,9 @@ _REPO = _HERE.parents[2]
 RUNNER = _REPO / "validation" / "generators" / "scent" / "run_scent_fixed.py"
 
 
-def _train(run_dir: Path, root: Path, iters: int, every: int, cfg: str, seed: int) -> None:
+def _train(
+    run_dir: Path, root: Path, iters: int, every: int, cfg: str, seed: int, valid_every: int = 2
+) -> None:
     """One training invocation. Resumes automatically if run_dir already holds a checkpoint."""
     cmd = [
         sys.executable,
@@ -66,6 +68,23 @@ def _train(run_dir: Path, root: Path, iters: int, every: int, cfg: str, seed: in
         # Keep the promotion batch small so the test is fast; the mechanism is unchanged.
         "--gin-binding",
         "dynamic_library/DynamicLibrary.n_new_fragments=5",
+        # ⚠ LOAD-BEARING FOR THE RNG COMPARISON, NOT A SPEED KNOB. In production this is 250, so at
+        # these iteration counts NO periodic validation fires and the only trigger left is
+        # `i == n_iterations - 1` (trainer.py:347). That makes the two runs validate at DIFFERENT
+        # iterations purely because they stop at different points -- run A at i=7, run B's first
+        # half at i=3 -- and SCENT's valid_step samples 1,000 trajectories through the RNG. The
+        # stop itself would then advance the stream, so the resumed run could never match the
+        # uninterrupted one no matter how correctly the RNG position is captured. Measured
+        # 2026-09-12: three consecutive verification runs failed on this and not on the mechanism
+        # under test. Forcing a small cadence makes both runs validate on the SAME schedule.
+        "--gin-binding",
+        f"Trainer.valid_every_n_iterations={valid_every}",
+        # Validation is now frequent (above), and at the stock 1,000 trajectories it would dominate
+        # the harness's runtime. Shrinking it is safe for THIS test in a way that shrinking the
+        # cadence is not: both runs use the same value, so they draw the same amount at the same
+        # points, which is the only property the comparison depends on.
+        "--gin-binding",
+        "Trainer.valid_n_trajectories=64",
     ]
     env = dict(os.environ)
     env.setdefault("PYTHONHASHSEED", "0")  # load-bearing for reproducibility, not hygiene
@@ -116,13 +135,45 @@ def main() -> int:
     ap.add_argument("--every", type=int, default=2, help="DynamicLibrary.every_n_iterations")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--cfg", default="validation/configs/scent_seh_fixed_5k.gin")
+    ap.add_argument(
+        "--valid-every",
+        type=int,
+        default=2,
+        help="Trainer.valid_every_n_iterations for BOTH runs (see _train; load-bearing)",
+    )
     a = ap.parse_args()
 
     root = Path(a.out_root).resolve()
     if root.exists():
         shutil.rmtree(root)
     root.mkdir(parents=True)
-    half = max(1, a.iterations // 2)
+
+    # THE STOP POINT IS NOT ``iterations // 2``, AND THAT IS THE WHOLE TEST. Run B's LAST iteration
+    # always validates (`i == n_iterations - 1`), so unless run A validates at that same iteration
+    # the stop injects 1,000 validation trajectories' worth of RNG that run A never drew, and the
+    # two runs diverge for a reason that has nothing to do with the restore. Run A validates at
+    # i > 0 with i % valid_every == 0, so the stop must satisfy (half - 1) % valid_every == 0.
+    # Pick the largest such half below `iterations`, nearest the middle.
+    v = max(1, a.valid_every)
+    candidates = [h for h in range(2, a.iterations) if (h - 1) > 0 and (h - 1) % v == 0]
+    half = (
+        min(candidates, key=lambda h: abs(h - a.iterations / 2))
+        if candidates
+        else max(1, a.iterations // 2)
+    )
+    if not candidates:
+        print(
+            f"WARNING: no stop point in 2..{a.iterations-1} satisfies (half-1) %% {v} == 0; "
+            f"falling back to {half}, and the RNG comparison will be INVALID -- run A and run B "
+            f"will validate at different iterations. Raise --iterations or lower --valid-every.",
+            flush=True,
+        )
+    else:
+        print(
+            f"stop point {half}: run B's final iteration is {half-1}, which run A also validates "
+            f"({half-1} % {v} == 0), so both runs draw the same validation trajectories.",
+            flush=True,
+        )
 
     print("=" * 78)
     print(f"RUN A: {a.iterations} iterations, uninterrupted")
@@ -200,15 +251,21 @@ def main() -> int:
         else:
             print("    0 unexplained: every other attribute is reconstructed exactly.")
 
-    # NOTE ON ok_list / ok_rows. These compare two END-OF-RUN states and are EXPECTED to differ:
-    # the RNG is not checkpointed, so a resumed segment samples different molecules and therefore
-    # promotes different fragments. They are printed as context, not as the verdict. What the
-    # restore actually controls is (a) that the state after restoring equals the state at the stop
-    # point -- the attribute diff -- and (b) that every promoted fragment still carries a recipe.
-    if not div and ok_routes:
+    # ok_list / ok_rows ARE NOW PART OF THE VERDICT. They were not, while the RNG went
+    # uncheckpointed: a resumed segment then drew a different stream and legitimately promoted a
+    # different fragment set, so an end-of-run comparison could never pass -- and a check that can
+    # never pass is the same failure as one that can never fail. `rng_io` closes that, so these
+    # become the test of REPRODUCIBILITY, and they are the branch of this harness that goes red if
+    # it regresses. Baseline before the fix, both runs at 15 promoted and 1.0 coverage:
+    #     uninterrupted 7fc4acef...    resumed d10044fc...
+    repro = ok_list and ok_rows
+    print(f"  requeued run is bit-reproducible : {repro}   <- rng_io; this was RED before that fix")
+
+    if not div and ok_routes and repro:
         print(
             "\nPASS: the restore reconstructs the stop-point state on every audited attribute, "
-            "and every promoted fragment carries a recipe."
+            "every promoted fragment carries a recipe, and the requeued run is bit-identical to "
+            "an uninterrupted one."
         )
         return 0
     if div:
@@ -217,6 +274,21 @@ def main() -> int:
         print(
             "FAIL: a promoted fragment has no recipe -- this cell would fail "
             "check_route_readiness."
+        )
+    if not repro:
+        print(
+            "FAIL: the requeued run promoted a DIFFERENT fragment set than the uninterrupted one, "
+            "so this cell is not bit-reproducible.\n"
+            "      This message NAMES NO CAUSE, deliberately. It used to assert 'the library is "
+            "correct but the RNG position was not restored', and on 2026-09-12 that was exactly "
+            "backwards: the RNG position matched the uninterrupted run EXACTLY at the resume point "
+            "(2fbe4efe81f44f59 on both sides) and the divergence came from the LIBRARY sidecar, "
+            "which was captured before its own iteration's promotion and came back empty. A "
+            "failure message that guesses a cause sends the next reader to the wrong file.\n"
+            "      To find the real one: run with SCENT_RNG_DEBUG=1 and compare the per-iteration "
+            "fingerprints. If they match at the resume point the RNG is exonerated; then check "
+            "whether the library sidecar's promoted count agrees with the last "
+            "additional_fragments/fragments_*.json the stopped run wrote."
         )
     return 1
 
