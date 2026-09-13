@@ -141,7 +141,9 @@ def _find_class_file(cls: str) -> Path | None:
     return None
 
 
-def _resolve_provider(d: Path, cfg: dict) -> tuple[str | None, Path | None, str]:
+def _resolve_provider(
+    d: Path, cfg: dict, cfg_error: str | None = None
+) -> tuple[str | None, Path | None, str]:
     """(class name, defining file, why). Driven by the CELL's own config, never by its target name.
 
     TWO CONFIG SHAPES, BECAUSE THE PROJECT HAS TWO. The bridge generators write a YAML
@@ -150,6 +152,11 @@ def _resolve_provider(d: Path, cfg: dict) -> tuple[str | None, Path | None, str]
     itself recorded. Both are the cell telling us what it used, which is the only authority that
     cannot drift from what ran.
     """
+    # An unreadable config is reported as unreadable and NEVER falls through to the gin path, where
+    # it would come back as "no reward.type" -- a message that names the cell for the interpreter's
+    # fault. Refusing here keeps the two causes distinguishable at the point they diverge.
+    if cfg_error:
+        return None, None, cfg_error
     reward = (cfg or {}).get("reward") or {}
     rtype = str(reward.get("type", "")).strip()
     if rtype:
@@ -209,16 +216,39 @@ def _class_caches(src_path: Path, class_name: str) -> tuple[bool | None, str]:
     return None, f"class {class_name} not found in {src_path.name}"
 
 
-def _read_config(d: Path) -> dict:
+def _read_config(d: Path) -> tuple[dict, str | None]:
+    """(config, unreadable-reason). An EMPTY config and an UNREADABLE one are different facts.
+
+    ⛔ THIS SWALLOWED AN ImportError AND BLAMED THE DATA FOR IT. The first version was
+    ``try: import yaml ... except Exception: return {}``, so an interpreter without PyYAML returned
+    an empty dict for every cell -- and ``_resolve_provider`` then reported "no reward.type in
+    run_config.yaml" on files that plainly contain ``type: drd2``. An environment defect wearing a
+    data defect's message, on every cell at once.
+
+    It cost a real disagreement: two of us ran the same tool on the same cell from the same branch
+    and got different answers, and the message pointed at the cell rather than at the interpreter, so
+    the obvious next move was to go looking at the cell. Reproduced by blocking the import, which is
+    the only reason we found it rather than concluding the landed cells were unmeasurable.
+
+    THREE STATES, KEPT APART:
+      no file            -> ({}, None)   legitimate; gin-configured cells have no run_config.yaml
+      file, no PyYAML    -> ({}, reason) an ENVIRONMENT problem, and it says so
+      file, bad YAML     -> ({}, reason) a DATA problem, and it says which
+    """
     p = d / "run_config.yaml"
     if not p.is_file():
-        return {}
+        return {}, None
     try:
         import yaml
-
-        return yaml.safe_load(p.read_text()) or {}
-    except Exception:
-        return {}
+    except ImportError as e:
+        return {}, (
+            f"run_config.yaml exists but PyYAML is not importable in this interpreter ({e}) -- "
+            f"this is an ENVIRONMENT problem, not a property of the cell"
+        )
+    try:
+        return (yaml.safe_load(p.read_text()) or {}), None
+    except Exception as e:
+        return {}, f"run_config.yaml is present but unparseable: {e}"
 
 
 def _verdict(row: dict, budget: int) -> tuple[str, str]:
@@ -275,7 +305,8 @@ def measure(cell, arm: str) -> dict:
     row["distinct"] = len(seen)
     row["unique_pct"] = f"{100*len(seen)/n:.1f}" if n else ""
 
-    cls, src, why = _resolve_provider(d, _read_config(d))
+    cfg, cfg_error = _read_config(d)
+    cls, src, why = _resolve_provider(d, cfg, cfg_error)
     if cls is None:
         row["evidence"] = f"provider unresolved: {why}"
         return row
