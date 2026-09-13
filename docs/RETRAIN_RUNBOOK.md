@@ -24,7 +24,7 @@ current results cannot support.
 
 ## 0. What changed, and therefore what cannot be carried forward
 
-Six decisions post-date most of the results on disk. Each one is a reason a cell has to be rebuilt,
+Seven decisions post-date most of the results on disk. Each one is a reason a cell has to be rebuilt,
 and together they are why this is a re-run rather than a repair.
 
 | # | Change | Date | Consequence |
@@ -35,6 +35,7 @@ and together they are why this is a re-run rather than a repair.
 | 4 | **A fourth competitor stage: upsample-and-filter** (`upsample_to_modes.py`, `dd8f1a9`) | 2026-08-28 | A competitor "pool" is no longer a slice of a fixed 2,000-molecule sample. `pool-limited` used to conflate *the generator cannot* with *we did not ask for enough* |
 | 5 | **Route contract enforced at write time**; RGFN/RxnFlow route emission implemented | 2026-08-24 | A fresh sample now produces `routes.json`. The route dataset can go from **5 cell-seeds to matrix-wide** as a by-product of re-running — see §6 |
 | 6 | **6TD3-B** replaces the exploitable Tier2−Tier1 differential as the CDK12–DDB1 reward — reward *and* gate are `cnn_vs` (CNNscore × CNNaffinity) at **6.718** | 2026-08-21, settled 08-28 | Every 6TD3 cell of every generator is **INVALIDATED, not superseded** — the distinction is load-bearing. Row 2 supersedes: the same quantity, re-measured under a new budget, so a newer number will exist. Row 6 REDEFINES the quantity: 6TD3-B numbers are not a better measurement of old 6TD3, they measure something else, so **no newer measurement of the old quantity exists or ever will**. Calling it superseded implies a replacement number is out there and sends a reader looking for one. The old libraries do not survive re-gating. Oracle wiring in progress; see §7.1 for the threshold and the evidence |
+| 7 | **The budget counts molecules that REACHED THE ORACLE**, not molecules presented — a cached repeat does not spend budget | 2026-09-13 | Aligns us with `CachedProxyBase.n_proxy_calls`, which already returns `len(self.cache)`. **Six landed cells are short and must be topped up or flagged:** `fraggfn_clpp` reached 9,258–9,375 of 10,048 presented, `s3gfn_clpp` 8,451–8,912. The other 47 are unaffected because the competitors' surrogate rewards hold no cache, so presentations already equal invocations there — `s3gfn_drd2`'s 34–45% unique is **mode collapse to report, not a shortfall to repair**. See §2.3b |
 
 ### The one thing that survives unchanged
 
