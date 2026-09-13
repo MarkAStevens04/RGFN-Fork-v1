@@ -1213,6 +1213,36 @@ outputs showed it. See §6.8.
 docks must `source ~/bin/rgfn-smoke-env.sh` — omitting it leaves QuickVina2-GPU with three unresolved
 boost libraries, which surfaces as all-`nan` and reads exactly like a degraded GPU.
 
+### 8.5a Which INTERPRETER — the tools split into stdlib-only and not, and nothing declares it
+
+`manifest.py` is **stdlib-only on purpose**, so a bare SLURM shell can bootstrap with conda base and
+ask which env a cell needs. Conda base therefore has no PyYAML — **by design, not by accident**. But
+`measure_repeat_rate.py` imports `yaml`, and **PyYAML is declared in no manifest anywhere in this
+repo**: no requirements file, no environment yaml, no doc. It is available because the `rgfn` env
+happens to have it.
+
+**What that cost, 2026-09-13.** `_read_config` wrapped `import yaml` in `except Exception: return {}`,
+so from base every cell returned an empty config and the tool reported *"no `reward.type` in
+run_config.yaml"* — on files that plainly contain `type: drd2`. **An environment defect wearing a data
+defect's message, on all 108 cells at once.** Two agents got different answers from the same cell on
+the same branch, both checked the tree first, and the difference was the interpreter. One of them
+believed the message and concluded the branch could not resolve a single landed cell.
+
+**Two rules came out of it, and the second is the transferable one:**
+
+* **Split the states in the message.** No file (legitimate — gin cells have none) / no PyYAML
+  (ENVIRONMENT) / unparseable (DATA). A single "unresolved" collapses a cause you can fix in one
+  command with one you cannot.
+* **LEGIBLE IS NOT LOUD.** 108 individually honest "unresolved" rows still read as *"the cells cannot
+  be measured"*, which is the conclusion they actually produced. The CLI now **refuses up front**,
+  names the interpreter, prints the exact working command, and exits **2** — kept distinct from **1**
+  (cells measured, some short), because "nothing was measured" and "everything was measured and some
+  fell short" must not look the same to a caller gating on non-zero.
+
+**The rule for the next tool:** state which interpreter a tool needs, and make the tool say so itself
+when run from the wrong one. The library half must keep importing from base — `verify_cell` needs
+`_verdict` — so the split is CLI-refuses / library-imports, not module-refuses.
+
 ### 8.5b The login node is saturated — a smoke can fail for reasons that are not your code
 
 Two traps that each cost an agent a run on 2026-09-12, both reading exactly like code bugs:
