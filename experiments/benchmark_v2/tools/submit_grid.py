@@ -246,6 +246,60 @@ def reward_orientation_broken(cell) -> str | None:
     )
 
 
+# Markers that would indicate a trace-driven STOP exists. Broad on purpose, and named here so that
+# a stop landing under a different word is a one-line edit rather than a silent false refusal.
+_STOP_MARKERS = re.compile(
+    r"BudgetExhausted|should_stop|def\s+stop\b|StopTraining|budget_stop|raise\s+\w*Budget", re.I
+)
+
+
+def arm_budget_unenforceable(arm: str) -> str | None:
+    """Why this arm's budget cannot be HELD, or None. Not the same question as 'does a launcher exist'.
+
+    ⛔ ARM A AND ARM B NEED DIFFERENT THINGS, AND ONLY ONE OF THEM IS BUILT.
+
+    Arm A does not need a stop. ``BudgetCheckpointer`` fires ``save()`` once at the first iteration
+    boundary at or after the budget, records ``crossed_at_n_train_scored`` as the truth and
+    ``saved_at_iteration`` as where the weights are, and overshoots by at most one batch. The run
+    continuing afterwards is harmless -- arm A is a PREFIX of it, and the trace records the crossing
+    exactly.
+
+    Arm B is the opposite: there, the budget IS the stopping condition, and `BudgetCheckpointer`
+    only ever SAVES -- `note_iteration` sets `fired`, calls `_save`, returns None, and nothing in
+    `_trace.py` halts anything. Without a stop a run ends wherever its configured iteration count
+    lands, and the three generators do not agree about where that is: at 5,000 iterations RGFN
+    scores ~603,000 calls, SCENT 320,000 and RxnFlow ~155,000. A 4x spread on the axis the campaign
+    says it controls, on cells costing ~89 GPU-h each.
+
+    WHY THIS IS A SEPARATE CHECK FROM `trainer_missing`, AND THE MISTAKE IT FIXES. That check asks
+    whether a FILE EXISTS and was being read as "the trainer is ready". The moment
+    submit_train_v2.sh appeared, 37 cells flipped from NO LAUNCHER WIRED straight to TO SUBMIT while
+    the arm-B stop had not been written -- so `--execute` would have launched arm-B cells with no
+    budget. An existence check standing in for a capability check is the defect this project keeps
+    finding, and I had shipped one.
+
+    It errs toward refusing, deliberately: a false refusal on arm B costs a conversation, and a
+    false pass costs ~1,600 GPU-hours of runs whose budget means nothing.
+    """
+    if arm != "b":
+        return None
+    p = REPO / "validation" / "generators" / "_trace.py"
+    try:
+        src = p.read_text()
+    except Exception as e:
+        return (
+            f"cannot read _trace.py to check for a budget stop ({e}); refusing rather than assuming"
+        )
+    if _STOP_MARKERS.search(src):
+        return None
+    return (
+        "arm B is a 320,000-CALL budget and nothing stops a run at it -- BudgetCheckpointer only "
+        "saves. The run would end at its configured iteration count instead (~603k / 320k / ~155k "
+        "for RGFN / SCENT / RxnFlow at 5,000 iters). If a stop now exists under another name, "
+        "update _STOP_MARKERS in this file"
+    )
+
+
 def decide(cell, arm: str) -> tuple[str, str]:
     """(action, reason). Actions: submit / done / refuse / accept-pending / resample."""
     st = cell.status(arm)
@@ -362,8 +416,17 @@ def main() -> int:
             if broken:
                 buckets["refuse"].append((c, broken))
                 continue
+            unenforceable = arm_budget_unenforceable(a.arm)
+            if unenforceable:
+                buckets["refuse"].append((c, unenforceable))
+                continue
             if trainer_missing:
-                buckets["no-launcher"].append((c, f"{TRAINER} does not exist yet"))
+                # EXISTENCE ONLY, and it says so. Whether the trainer can HONOUR this arm's budget
+                # is arm_budget_unenforceable's question, above, and conflating the two is what let
+                # 37 cells flip to TO SUBMIT the moment this file appeared.
+                buckets["no-launcher"].append(
+                    (c, f"{TRAINER} does not exist (existence check only)")
+                )
                 continue
         elif c.tag in claims:
             # A claim on a cell that is NOT submittable is an anomaly, not a no-op: something has
