@@ -40,6 +40,7 @@ OUT=${OUT:?set OUT}
 GUIDANCE=${GUIDANCE:-}
 N_HUBS=${N_HUBS:-64}
 GATE=${GATE:-5.68}
+PYBIN=${PYBIN:-/home/markymoo/miniconda3/envs/rgfn/bin/python}
 ENUM_MAX=${ENUM_MAX:-4000}
 
 REPO="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
@@ -105,18 +106,59 @@ echo "[pilot-campaign] campaign exit=$RC wall=$(( $(date +%s) - T1 ))s  enumerat
 
 # C's depth_mix block has never been EXECUTED (its sandbox refused the env helper). Say plainly
 # whether it populated, rather than leaving the next reader to discover it did not.
-echo "=== depth_mix populated? (agent C's block, first real exercise) ==="
-/home/markymoo/miniconda3/envs/rgfn/bin/python - "$OUT/campaign/summary.json" <<'PY'
+echo "=== required per-cell outputs present? ==="
+# WHY THIS ASSERTS RATHER THAN PRINTS. The first version of this block printed "<ABSENT>" for a key
+# that was present, because it looked for summary["hub_batching"]["depth_mix"] when the nesting is
+# summary["depth_mix"]["hub_batching"] -- the other way round. A checker that reports the OPPOSITE of
+# the truth is worse than no checker, and this one is the version that runs on every cell. So it now
+# fails loudly on a shape it does not recognise instead of formatting a wrong answer, and it
+# distinguishes MISSING (key absent) from NULL (key present, value None) -- which are different
+# defects: absent means the writer never ran, null means it ran and could not resolve its input.
+"$PYBIN" - "$OUT/campaign/summary.json" <<'PYEOF'
 import json, sys
+
 try:
     d = json.load(open(sys.argv[1]))
 except Exception as exc:
-    print(f"  CANNOT READ summary.json: {exc}"); raise SystemExit(0)
-for k in ("hub_pool", "min_hub_depth", "max_hub_depth", "min_synth_depth",
-          "walked_depth_hist", "n_promoted_fragments"):
-    print(f"  {k:<22} = {d.get(k, '<ABSENT>')}")
-for arm in ("hub_batching", "best_candidate"):
-    a = d.get(arm) or {}
-    print(f"  {arm}.depth_mix     = {a.get('depth_mix', '<ABSENT>')}")
-PY
+    sys.exit(f"FATAL: cannot read summary.json: {exc}")
+
+MISSING = object()
+bad = []
+
+# benchmark_v2/README.md requires exactly two things per cell.
+dm = d.get("depth_mix", MISSING)
+if dm is MISSING:
+    bad.append("depth_mix ABSENT -- run_campaign did not emit it at all")
+elif not isinstance(dm, dict):
+    bad.append(f"depth_mix has unexpected type {type(dm).__name__}; expected a dict keyed by arm")
+else:
+    for arm in ("hub_batching", "best_candidate"):
+        a = dm.get(arm)
+        if not isinstance(a, dict):
+            bad.append(f"depth_mix[{arm!r}] missing or not a dict")
+            continue
+        frac, hist = a.get("depth0_mode_frac"), a.get("modes_by_hub_depth")
+        print(f"  depth_mix[{arm}]  depth0_mode_frac={frac}  by_depth={hist} "
+              f"n_unmapped={a.get('n_unmapped')}")
+        if frac is None:
+            bad.append(f"depth_mix[{arm}].depth0_mode_frac is null")
+
+for k in ("walked_depth_hist", "hub_pool", "min_hub_depth", "max_hub_depth",
+          "min_synth_depth", "n_promoted_fragments"):
+    v = d.get(k, MISSING)
+    state = "ABSENT" if v is MISSING else ("NULL" if v is None else v)
+    print(f"  {k:<22} = {state}")
+    # walked_depth_hist is the second README requirement; the rest are provenance.
+    if k == "walked_depth_hist" and (v is MISSING or v is None):
+        bad.append("walked_depth_hist is not populated -- required per cell by benchmark_v2/README")
+
+if bad:
+    print("\nFAILED required-output checks:")
+    for b in bad:
+        print(f"  - {b}")
+    sys.exit(1)
+print("\nall required per-cell outputs present")
+PYEOF
+CHECK_RC=$?
+echo "[pilot-campaign] required-output check exit=$CHECK_RC"
 exit $RC

@@ -243,6 +243,12 @@ improvement, only of no damage. **SCENT is halved.** And SCENT at arm A costs **
 against RGFN's 1.965 at the same budget, within 2.5%** — stripped of its library it lands on the
 library-less cost profile rather than degrading in some SCENT-specific way.
 
+**Caveat on the v1 baselines this table prices against.** v1 RGFN's top-40 hubs rest on a median of
+**ONE** observed child, with **72.5%** singletons, against 21 (12.5% singletons) for the arm-A RGFN
+sample and 10 for v1 SCENT. So the v1 RGFN row — and every v1 RGFN hub-ordering claim — rests on
+unreplicated point estimates. The direction is counter-intuitive (the *less*-trained sample is the
+better-evidenced one) and is not explained here.
+
 **The enumeration mismatch does not explain it, and cuts the other way.** Both arm-A runs used the
 *smaller* enumeration (64 hubs at `enum_max` 4000 against v1's 200 uncapped). The same handicap
 applied to both generators; only SCENT collapsed, and RGFN improved under it. So the mismatch is a
@@ -269,8 +275,25 @@ DynamicLibrary.n_new_fragments    = 400
 Arm A is 157 iterations; the first promotion is at iteration 1,000 = **64,000 oracle calls, 6.4× the
 arm-A budget**. Observed: `additional_fragments/` was never created. Arithmetic cross-check — v1
 (5,000 iterations) fired 4 of 10 promotions, writing `fragments_1000..4000.json`, exactly the 1,600
-promoted fragments its enumeration metadata records. Consequences: no recipes, so the cell fails
-`check_route_readiness` and cannot enter the route dataset; and `free_frag` / `prebuild-k` are no-ops.
+promoted fragments its enumeration metadata records. Consequences: `free_frag` / `prebuild-k` are no-ops, and
+there are no recipes — which, **corrected 2026-09-12, does NOT fail `check_route_readiness`**. With
+`additional_fragments/` absent entirely, `_recipe_health` returns `None`
+(`check_route_readiness.py:175-176`, comment *"no dynamic library -> nothing to expand"*) and the cell
+reports `recipes: n/a`, the same path RGFN and RxnFlow take. That is correct rather than lucky: with
+zero promotions an arm-A SCENT route bottoms out directly on the 418 base blocks, so a chemist can act
+on every molecule. Entry `070`'s distinction is the operative one — *no recipes because logging was off
+while fragments WERE promoted* is broken and unrecoverable; *no recipes because nothing was promoted*
+is complete.
+
+**The real hazard is the reverse, and it is a v2 hazard this pilot did not hit.** In v2 one training
+run yields both arms in the SAME run directory, so `additional_fragments/` WILL exist, populated by
+**arm B's** promotions. `_recipe_health` resolves the snapshot by `run_id` taken from the checkpoint
+path (`_run_id`, line 124) and both arms' checkpoints share that `run_id`, so an arm-A SCENT cell's
+recipe check will silently read **arm B's** snapshot and report arm B's coverage. The verdict stays
+right by luck — arm A has nothing to expand either way — but the number recorded is about a different
+arm. That is entry `070`'s "a snapshot from a DIFFERENT model is internally complete, so it scores
+100% while the run's own fragments go unexpanded", recurring across *arms* instead of across models.
+This pilot avoided it only by training to 157 iterations and stopping, so no snapshot ever existed.
 
 **5 — the depth-0 share of a delivered library.** `scent_seh` v1 enumeration, gate 5.68, R=100. Hub
 join exact: 96/96 accepted molecules resolve, 0 unjoined, 0 needing the stereo fallback.
@@ -306,10 +329,24 @@ stereo fallback recovering none), so no BC share is quoted.
   from a second code path), but `hub_pool`, `min_hub_depth`, `max_hub_depth` and `walked_depth_hist`
   are null because `pick_hubs` is a separate stage that never tells the campaign which pool it used.
   In production those stages are always separate, so this is not an artifact of how the pilot ran.
-- **`timing.json`'s `score` column is not credible.** RGFN reports 52 ms for scoring 16,919
-  molecules — 3 µs each. The proxy call is most likely inside `train_gfn` with the `score` timer
-  wrapping something else. Do not quote it; re-emit through `write_sample_timings()`, which omits an
-  unmeasured component rather than writing 0.0.
+  **Mechanism found and fixed by agent C (2026-09-12):** `run_campaign` resolved
+  `pick_hubs_timing.json` in two places -- `load_hub_pick_s` honoured `--hub-pick-timing` while
+  the depth block fifteen lines away re-derived the path from `--enum-children` and ignored the
+  flag. This pilot enumerated into a directory with no sidecar beside `enum_children.json`, so
+  the depth fields came back null. One resolver now, both callers on it. Of the two per-cell
+  outputs `benchmark_v2/README.md` requires, `depth0_mode_frac` was always present and only
+  `walked_depth_hist` was genuinely null -- see Result 12.
+- **`timing.json`'s `score` column is a SEMANTICS trap, not a broken timer — corrected 2026-09-12.**
+  An earlier draft of this entry called RGFN's `score: 0.052 s` "not credible", reasoning that 52 ms
+  for 16,919 molecules is 3 µs each. **That arithmetic used the wrong denominator.** The `score`
+  phase wraps `_score_with_reward_generator(states)` on the FINAL candidate batch only
+  (`pipeline.py:147`), which the run's own log records as exactly **1,000** molecules
+  (`[FR] sampled 1000 unique valid candidates`). So it is **52 µs per molecule**, entirely plausible
+  for a batched MPNN forward. The training-loop scoring is inside `train_gfn`.
+  **So there is nothing to fix before the re-run.** What there is, is a column named `score` that
+  does not mean "what scoring cost" — it means "what the final re-score cost". Any GPU-hour total
+  that reads it as the oracle bill will understate by orders of magnitude. Re-running would not have
+  caught this: the measurement was right and the reading was wrong.
 
 **7 — mode-versus-median, and why concentration is the right statistic.** Testing the "library-less
 generators hub at (cap − 1)" claim across all 35 v1 cells: **19/23 library-less cells** sit at modal
@@ -356,6 +393,50 @@ at the end), but the trace cannot carry a modes-vs-calls curve without re-runnin
 | campaign | 17 s | *(job 75996)* |
 
 RGFN costs ~3.3× SCENT per oracle call at arm A.
+
+**12 - depth-0 reliance is a SCENT/library phenomenon, and effectively ABSENT in RGFN.** `depth_mix`
+on the same axis, same run, both arm-A cells (measured 2026-09-12 after the checker below was fixed):
+
+| cell | modes @ R=100 | from walked hubs | modes by hub depth | **depth0_mode_frac** |
+|---|---|---|---|---|
+| RGFN arm A, hub-batching | 65 | 65 (`n_unmapped` 0) | {1:18, 2:28, 3:19} | **0.0** |
+| SCENT arm A, hub-batching | 39 | 39 (`n_unmapped` 0) | {2:7, 3:32} | **0.0** |
+| best-candidate (either) | 25 | 2 (`n_unmapped` 23) | {3:2} | 0.0 |
+| *SCENT v1 320k, for contrast* | *96* | *96* | *{0:35, 1:48, 2:13}* | ***0.365*** |
+
+Against Result 5's 36.5% on the v1 SCENT cell, this is independent corroboration that **bought-hub
+reliance travels with the dynamic library, not with hub-batching**. RGFN delivers zero modes off a
+depth-0 hub -- it has no library, so its flow field never surfaces one high enough to walk. That
+sharpens Result 3: the library decides not only *where* the hubs sit but *whether any delivered mode
+comes off a bought one*, which is the form the degenerate-optimum objection actually takes.
+
+Best-candidate's 23-of-25 unmapped is the control and is correct: it walks no hubs, so most of its
+molecules have no hub to map to.
+
+One observation worth recording without over-reading. RGFN's *hub* ranking is 85% depth-3 in the top
+40 ({1:1, 2:5, 3:34}, Result 3) while its *delivered* library skews shallower ({1:18, 2:28, 3:19}).
+The two are consistent with Result 5's cost mechanism -- shallower hubs buy more modes per reaction,
+so they contribute disproportionately to whatever fits inside a 100-reaction budget -- but that is one
+cell and the inference is not tested here.
+
+**11 — the compute-to-reactions sentence, with the cost localised to one stage.** From job 75999's
+`compute_time.csv` (RGFN, arm A, sEH seed 42, 64 hubs), read beside the same run's mode counts:
+
+| arm | selection wall-clock | modes @ R=100 |
+|---|---|---|
+| hub-batching | **5,647.29 s** | 65 |
+| best-candidate | **1.10 s** | 25 |
+
+**Hub-batching spends 5,129x the selection compute to deliver 2.60x the molecules at a fixed
+100-reaction budget** -- and **97.1% of that cost is a single stage**: `enumeration_s` is 5,484.77 s
+of the 5,647.29 s total. `hub_pick_s` is **0.0 s**; reading the flow field is free. The expense is
+enumerating the hubs' children so they can be scored, not anything about the method's own logic.
+
+Two things follow that the exhibit should state. The ratio is **selection-stage** compute, not total
+GPU-hours -- training is identical for both arms, since they read the same checkpoint. And because the
+cost sits entirely in enumeration, it scales with the enumeration knobs (`--n-hubs`,
+`--enum-max-children`), not with the budget R: this 64-hub run is the cost of the pool it was handed,
+not the cost of the method.
 
 **10 — what remains unexplained.** SCENT's target-dependence is narrowed but not solved. Three
 mechanisms have been ruled out: **dose-response** (all twelve SCENT cells fired exactly 4 promotions

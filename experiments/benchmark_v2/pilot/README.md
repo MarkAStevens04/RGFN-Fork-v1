@@ -82,9 +82,13 @@ enumeration metadata records.
 
 1. **SCENT's distinguishing feature is inert.** At 10,000 calls it is a reaction-GFN with no library
    learning — architecturally nearer RGFN than the SCENT the project has been reporting.
-2. **No recipes exist** (artifact ③), so the cell fails `check_route_readiness`. SCENT arm-A cells
-   **cannot enter the route dataset**, which contradicts both runbook §6.4's hard gate and the
-   "matrix-wide route dataset" claim.
+2. **No recipes exist** (artifact ③) — but this does **NOT** fail `check_route_readiness`, and an
+   earlier draft here wrongly said it did. `_recipe_health` returns `None` when
+   `additional_fragments/` is absent, so the cell reports `recipes: n/a`, exactly as RGFN does, and
+   correctly: with zero promotions the routes bottom out on the 418 base blocks and there is nothing
+   to expand. **The v2 hazard is the reverse** — one training run yields both arms in one directory,
+   so an arm-A cell's recipe check will resolve to **arm B's** snapshot and report arm B's coverage.
+   See Logs/078 Result 4.
 3. **`--child-policy free_frag` is a no-op** (nothing promoted to filter on) and `--prebuild-k` has
    nothing to stock. The hub-batching configuration standardised in runbook §2.2 is meaningful only
    at arm B.
@@ -206,7 +210,11 @@ Committed results: `results/depthmix_{base,d2,d3}.json`.
 
 RGFN costs ~3.3x SCENT per oracle call at arm A.
 
-**DO NOT quote RGFN's `score: 0.052 s`.** `timing.json` reports 52 ms for scoring 16,919 molecules --
+**`score: 0.052 s` is a semantics trap, not a broken timer (corrected 2026-09-12).** It wraps the
+FINAL 1,000-candidate re-score only, so it is 52 us/molecule, not the 3 us an earlier draft here
+computed against the wrong denominator. Nothing to fix; but a column named `score` that means "the
+final re-score" will understate any GPU-hour total that reads it as the oracle bill.
+**Superseded text below, kept for the record:** `timing.json` reports 52 ms for scoring 16,919 molecules --
 3 us each -- which is not credible for an MPNN forward pass. The proxy call is most likely happening
 inside `train_gfn` and the `score` timer wrapping something else, i.e. mis-attributed rather than
 genuinely free. A near-zero column reads as "measured and fast" when it may be "not measured here";
