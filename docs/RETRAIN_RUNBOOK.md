@@ -479,6 +479,23 @@ made more than 320,000 real invocations, at ~89 GPU-h each.
 code.** Adopting it would ratify that overshoot as policy rather than decide anything. Do not put it
 as a choice; the choice below is the real one.
 
+**HOW BIG IS THE OVERSHOOT? A FLOOR, NOT AN ESTIMATE.** rxnflow's own trace reads 187 training rows /
+181 distinct = **3.2% repeats**, so halting at 320,000 distinct is ~330,600 real invocations. **Quote
+it as a floor and say why**: that is 6 iterations of a nearly-untrained policy, and a converged policy
+re-proposes MORE. Production is worse, and the error runs in the direction that flatters us. A
+measured it, attributed it to a cache, checked the trace and withdrew the mechanism — the drop from 64
+to 19–33 per step is `valid_smis` discarding invalid molecules at `task.py:73`, not a memo. **There is
+no dedup in the fixed-reward path.**
+
+**⚠ NOTHING MECHANICAL IS HOLDING THESE SIX.** `submit_grid.py --arm b` reads **36 TO SUBMIT and all
+six are in it.** Its guard checks that a stop EXISTS and is WIRED; it does not check that the stop's
+quantity matches the cell's oracle accounting. A refusal was considered and deliberately not built:
+keying on cache status needs the provider, arm-B cells have no trace to resolve one from, and the
+fallback would be a static (generator, target) → class map — which would false-refuse the 24
+rgfn/scent cells to catch these 6, on a 3.2% floor. Refusing 24 to catch 6 is cries-wolf with the
+arithmetic against it, and the memo fix retires the condition rather than detecting it. **So only the
+agreement that nothing launches is holding them — do not read the tooling as a safeguard here.**
+
 **THE OPEN QUESTION, for those six cells only:**
 
 * **gate on ROWS** — implements the ruling literally, no code change to the reward classes, and
