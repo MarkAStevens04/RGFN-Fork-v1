@@ -24,6 +24,51 @@ from gflownet.models import bengio2021flow
 from rdkit import Chem
 
 
+def _memoised_predict(cache: Dict[str, float], smiles: List[str], compute) -> List[float]:
+    """Score ``smiles``, answering repeats from ``cache`` so they never reach the model.
+
+    WHY THIS EXISTS, AND WHY ONLY IN THIS FILE. The budget counts molecules that REACHED the
+    oracle (runbook 2.3b). Where a provider caches, a repeat is withheld and costs nothing; where
+    it does not, a repeat re-invokes the model and really does spend budget. RxnFlow's surrogate
+    path had no cache, so a run halting at N DISTINCT molecules had already made MORE than N real
+    invocations -- ~3.2% more as a floor, measured on a barely-trained policy, and worse once
+    converged.
+
+    This mirrors PMO's own harness, which is where the convention comes from: it canonicalises,
+    and a buffer hit skips the evaluator entirely (``experiments/pmo/main/optimizer.py:168-172``),
+    so its ``max_oracle_calls`` has always meant distinct molecules. Our lack of a memo here was a
+    deviation from the convention we claim to adopt, not a property of the generator.
+
+    THE TWINS IN THE OTHER FIVE GENERATORS DELIBERATELY DO NOT HAVE THIS. Every one of their
+    seh/drd2 cells is already trained and FROZEN (32 of them), and adding a memo there would make
+    any future re-run diverge from the frozen siblings it must stay comparable to. Here there are
+    six cells still to train, so the fix lands before they run rather than after.
+
+    Scores are unchanged -- the models are deterministic, so a memo hit returns what a recompute
+    would have. Invalid molecules are NOT memoised: they never reach the model anyway and PMO
+    likewise returns without touching its buffer.
+    """
+    canon: List[Optional[str]] = []
+    for s in smiles:
+        mol = Chem.MolFromSmiles(s) if s else None
+        canon.append(Chem.MolToSmiles(mol) if mol is not None else None)
+
+    todo, todo_canon, seen = [], [], set()
+    for s, c in zip(smiles, canon):
+        if c is None or c in cache or c in seen:
+            continue
+        seen.add(c)
+        todo.append(s)
+        todo_canon.append(c)
+
+    if todo:
+        for c, v in zip(todo_canon, compute(todo)):
+            if v == v:  # NaN is not a score; leave it uncached
+                cache[c] = float(v)
+
+    return [float("nan") if c is None else cache.get(c, float("nan")) for c in canon]
+
+
 class SEHFrozenReward:
     """Frozen sEH MPNN reward generator (drop-in for ``AtomMPNNProxy`` as the task reward)."""
 
@@ -36,10 +81,18 @@ class SEHFrozenReward:
         self.model = bengio2021flow.load_original_model()
         self.model.to(device)
         self.model.eval()
+        # A repeat must not spend budget -- see _memoised_predict.
+        self._cache: Dict[str, float] = {}
 
     @torch.no_grad()
     def predict(self, smiles: List[str]) -> List[float]:
-        """Raw sEH proxy value per SMILES (higher = better); ``nan`` for invalid molecules."""
+        """Raw sEH proxy value per SMILES (higher = better); ``nan`` for invalid molecules.
+
+        Repeats are answered from the memo and never reach the model (see _memoised_predict)."""
+        return _memoised_predict(self._cache, smiles, self._predict_uncached)
+
+    @torch.no_grad()
+    def _predict_uncached(self, smiles: List[str]) -> List[float]:
         out: List[float] = []
         for start in range(0, len(smiles), self.batch_size):
             chunk = smiles[start : start + self.batch_size]
@@ -92,6 +145,8 @@ class DRD2FrozenReward:
         with open(model_path, "rb") as fh:
             self.model = pickle.load(fh)  # nosec - trusted local TDC oracle
         self.clip = float(clip)
+        # A repeat must not spend budget -- see _memoised_predict.
+        self._cache: Dict[str, float] = {}
 
     @staticmethod
     def _fp(mol):
@@ -104,6 +159,10 @@ class DRD2FrozenReward:
         return nfp
 
     def predict(self, smiles: List[str]) -> List[float]:
+        """Repeats are answered from the memo and never reach the model (see _memoised_predict)."""
+        return _memoised_predict(self._cache, smiles, self._predict_uncached)
+
+    def _predict_uncached(self, smiles: List[str]) -> List[float]:
         mols = [Chem.MolFromSmiles(s) if s else None for s in smiles]
         valid_idx = [i for i, m in enumerate(mols) if m is not None]
         out = [float("nan")] * len(smiles)
