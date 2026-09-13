@@ -867,6 +867,20 @@ decoration.
 
 **A check that cries wolf is discarded, which costs the same in the end.** An orphan-detector that fires on a `README.md` teaches its reader to skip the output, and a check nobody reads has the same value as one that cannot fail. Exclude the meta-cases explicitly, with a comment saying why.
 
+**THE RECURRING FORM: the cheapest predicate that passes today's population.** One agent wrote three
+guards this week whose predicate was weaker than its intent, and named the pattern itself — each was
+correct against the cells that existed when it was written and silently wrong against the next ones:
+
+| the guard | what it asked | what it meant to ask | how it would have failed |
+|---|---|---|---|
+| driver readiness | does the trainer FILE exist | is the trainer CAPABLE of this arm | the file landed before the stop was wired; 37 cells flipped to submittable, arm B unbudgeted |
+| arm-B stop marker | does `_trace.py` match `budget_stop` | is a stop wired, under any of its names | the trainer also matched a bare `BudgetStopper`; a wiring written that way retires the trainer's guard and leaves the driver's firing forever — a false refusal |
+| sign-seam detector | does the file contain `self.sign` | is the seam in the TRANSFORM | it matched inside a COMMENT — and that comment is the shadowing warning written to be pasted verbatim into the next bridge, so copying the warning while deferring the code green-lights a flat-reward run |
+
+The third is the sharpest: **a guard its own fix's documentation can satisfy fails in the direction of
+running.** All three were repaired by asking for the thing rather than a proxy for it — a capability
+probe, a superset pattern that says it is one, and an anchored assignment plus a use.
+
 **Before recording any verification as passed, state its failing case.** If you cannot name an input
 that makes it fail, it is not a check — find one that distinguishes, or say plainly that the property
 is unverified. A negative result is worth stating only when a positive one was possible.
