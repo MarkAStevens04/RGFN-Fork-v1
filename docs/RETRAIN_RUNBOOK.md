@@ -463,7 +463,36 @@ presented.** So a cached repeat does not spend budget, and `n_distinct` — not 
 what a cell is measured against. This aligns our budget with `CachedProxyBase.n_proxy_calls`, which
 already returns `len(self.cache)`; the framework's definition and ours no longer disagree.
 
-**THE COST IS SIX CELLS, all on ClpP** — measured, not estimated:
+**⚠ THE RULING HAS TWO READINGS AND THEY DIFFER BY 13 CELLS vs 6 — AWAITING CONFIRMATION.**
+
+* **(a) UNIFORM DISTINCT** — 10,000 distinct training molecules for every generator on every target.
+  **13 cells fail**, including all 8 landed S3-GFN cells; `s3gfn_drd2` would need ~29,000
+  presentations to reach 10,000 distinct, ~2.9× its current training.
+* **(b) PER-PATH** — distinct where the reward CACHES, rows where it does not, on the grounds that an
+  uncached repeat genuinely does re-invoke the model. **6 cells fail**, all ClpP.
+
+**THE EVIDENCE FAVOURS (a), from the convention arm A exists to match.** §1 defines arm A as "the PMO
+convention the competitors' own papers use". PMO's own harness
+(`external/s3gfn/experiments/pmo/main/optimizer.py:150-173`) canonicalises and then:
+
+    smi = Chem.MolToSmiles(mol)
+    if smi in self.mol_buffer:
+        pass                      # <- the evaluator is NOT called; a repeat is FREE
+    else:
+        self.mol_buffer[smi] = [float(self.evaluator(smi)), len(self.mol_buffer)+1]
+
+and its budget check is `len(self.mol_buffer) > self.max_oracle_calls` — a dict keyed by canonical
+SMILES. **So under the convention we claim to be matching, a repeat is free FOR EVERY GENERATOR,
+cached provider or not, and the budget is distinct molecules.** Our uncached surrogate rewards are
+an implementation deviation from that convention, not a property of the generator to charge it for.
+Reading (b) is the literal reading of "reached the oracle" given OUR implementation, and it is our own
+invention rather than the literature's.
+
+**Nothing is lost either way**: both counters are written to every trace row and into `arm_meta`, and
+the gate is one property (`TraceWriter.n_train_distinct`) read in two places, so switching is a
+definition change rather than a hunt through call sites.
+
+**THE COST UNDER (b) IS SIX CELLS, all on ClpP** — measured, not estimated:
 
 | cell | reached | presented | short by |
 |---|---|---|---|
