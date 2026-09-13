@@ -197,8 +197,18 @@ def reward_orientation_broken(cell) -> str | None:
     failure it was put there to stop. Reading the file keys on the defect itself, so it stops firing
     the moment the seam lands and never stops firing for any other reason.
 
-    (A's empty-CFG refusal in the trainer is still wanted; it catches a different thing -- a missing
-    config -- and the two are independent.)
+    ⛔ DO NOT COLLAPSE THIS WITH THE TRAINER'S EMPTY-CFG REFUSAL. They agree on all 18 cells TODAY,
+    purely because the three generators that have configs are also the three that have seams -- a
+    coincidence of scheduling, not a relationship. Keeping one is the obvious tidy-up later and it
+    silently removes half the cover:
+
+        missing config, seam present  -> the trainer's CFG check fires. This one does not, correctly.
+        config present, NO seam       -> ONLY this one fires. A CFG check is green, the run starts,
+                                         and every molecule scores 0.0 for the full docking budget.
+
+    The second row is the one that is coming: the six competitor configs are being written, and if
+    they land before the five sign seams do, a CFG-keyed guard turns green at exactly the moment the
+    flat-reward run becomes possible. Two guards, two different failures, both required.
     """
     t = cell.target
     if not (getattr(t, "reward_type", "") == "docking" and getattr(t, "higher_is_better", False)):
