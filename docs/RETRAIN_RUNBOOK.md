@@ -79,6 +79,28 @@ the module's own comment already prescribes ("readers that want the FULL history
 concatenate trace.csv with its .N siblings"). This is the cumulative-counter trap in its third place,
 after `asked` and `n_scored` (§8.2); here it crosses a process boundary rather than a phase or a round.
 
+**THE READING SIDE HAS THE SAME TWIN, and the right answer is not "sum them".** `best_trace`
+(`inventory_v1_cells.py:107`) takes the sibling with the MOST ROWS, and `write_arm_meta` /
+`verify_cell` gate on it — so a requeued arm-B cell would record ONE round's budget and fail its own
+budget gate while being genuinely complete. But blind summing is worse, because rotations come in
+three shapes and only one of them sums. Surveyed across all 24 v1 cells that carry siblings:
+
+| shape | what it is | cells | rule |
+|---|---|---|---|
+| **alternatives** | a re-invocation truncated `trace.csv` to a stub; the real history is in `.1` | 11 (s3gfn, fraggfn_drd2) | **max** |
+| **duplicates** | a `.preunshape` rename backup, identical row counts | 9 (reinvent/saturn/tango clpp) | **max** |
+| **superseded partials** | an earlier incomplete attempt beside a complete one (10,000 beside 5,384–6,867) | 4 (synformer) | **max** — summing gives 15,384–16,867 |
+| **continuations** | disjoint contiguous `step` ranges, two halves of ONE run | **0 in v1**; arises only when v2 arm B requeues | **sum** |
+
+So **max is correct for every v1 cell**, and spot-checking six copied cells confirms `copy_forward`
+took the right file in each (10,000 / 10,048 / 10,024 as expected, never a sum). No existing cell is
+short or inflated. The continuation rule is needed **prospectively only**, for v2 arm-B requeues.
+
+**The discriminator is the `step` column**: disjoint contiguous ranges → continuation → SUM;
+overlapping → alternatives → MAX; blank steps → fall back to MAX **and say so** rather than guess
+(SynFormer has no step values, and falling back is what makes its case come out right). One
+implementation, consumed by both the stop and the reporter — two copies of this rule will drift.
+
 **Consequence for scheduling, since a call budget is not an iteration budget:** at a true 320,000
 calls RGFN needs ~2,650 iterations, SCENT 5,000, RxnFlow ~10,300 — so RGFN roughly HALVES and RxnFlow
 roughly DOUBLES against an iteration-matched run. Iteration-matching would instead give ~603k / 320k /
@@ -960,6 +982,21 @@ outputs showed it. See §6.8.
 `HF_HOME`, `TORCH_HOME`, `SYNTHESEUS_CACHE_DIR` to `$SCRATCH` in every submit script. Any job that
 docks must `source ~/bin/rgfn-smoke-env.sh` — omitting it leaves QuickVina2-GPU with three unresolved
 boost libraries, which surfaces as all-`nan` and reads exactly like a degraded GPU.
+
+### 8.5b The login node is saturated — a smoke can fail for reasons that are not your code
+
+Two traps that each cost an agent a run on 2026-09-12, both reading exactly like code bugs:
+
+* **`RLIMIT_NPROC` is 1024 and counts THREADS, not processes.** Our own concurrent Claude sessions
+  hold ~490 of them, so a smoke that lets OpenBLAS spawn 64 threads per process dies with
+  `blas_thread_init: pthread_create failed for thread 17 of 64` at **59 processes**. Prefix every
+  login smoke with `OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1`.
+* **Without `source ~/bin/rgfn-smoke-env.sh` the ingest subprocess dies on `libnvrtc.so.11.2`** — the
+  same failure that destroyed a 214-row history once. It is survivable now only because the trace,
+  timing and library saves were moved BEFORE ingest; the run still exits non-zero.
+
+Same shape as §8.5: a login smoke cannot catch a compute-only bug, and now a saturated login node
+cannot reliably run the smoke either.
 
 ### 8.6 Do not submit a cell another chain has already claimed
 
