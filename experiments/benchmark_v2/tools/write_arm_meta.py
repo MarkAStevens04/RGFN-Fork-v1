@@ -93,7 +93,24 @@ def build(
     meta = {
         "arm": arm,
         "budget_calls": budget,
-        # train ROWS -- see the module docstring. Never max(n_scored).
+        # ⛔ THE BUDGET GATE (researcher's ruling, 2026-09-13): DISTINCT training molecules, i.e.
+        # those that actually reached the oracle. Cached reward paths answer a repeat without
+        # invoking anything, so charging it spends budget that was never spent.
+        #
+        # THIS FIELD EXISTS BECAUSE ITS ABSENCE LET A DEFECTIVE CELL VERIFY. `verify_cell` gated on
+        # train ROWS, and rows are always >= distinct, so that check could not fail for the right
+        # reason: the first smoke's arm A was 16.7% under budget (600 rows, 500 distinct, budget 600)
+        # and was ACCEPTED -- with the number 500 printed on the line immediately above, on a check
+        # asserting the trivially true `distinct <= scored`. The evidence was on screen and the
+        # conclusion came from elsewhere.
+        "n_train_distinct_at_checkpoint": t.get("train_distinct"),
+        # How that figure was obtained: "column" from the trace's own n_train_distinct, "recomputed"
+        # from train-row SMILES for v1 cells predating it, "union" across rotations. Recorded because
+        # a recomputed figure on a cell whose trace was truncated is weaker evidence than a column.
+        "n_train_distinct_source": t.get("train_distinct_source"),
+        # PRESENTATIONS, kept and NOT the gate. It is the right answer to "what did this run present"
+        # and the trace-continuity checks need it; the gap between the two is the cell's repeat rate
+        # (16.9% for RGFN on sEH, measured on a real cell), which is worth having rather than losing.
         "n_train_scored_at_checkpoint": t.get("train_rows") or t.get("n_scored"),
         # THE MODE TRAVELS WITH THE VALUE. This writer sums across a requeue's rotations while
         # copy_forward takes the max of a v1 cell's alternatives -- both correct for their own shape,
@@ -187,7 +204,7 @@ def main() -> int:
         a.job_id,
         a.launcher,
     )
-    if not meta["n_train_scored_at_checkpoint"]:
+    if not meta["n_train_distinct_at_checkpoint"]:
         print(
             f"REFUSED: no trace rows under {run_dir} -- refusing to declare a budget of 0",
             file=sys.stderr,

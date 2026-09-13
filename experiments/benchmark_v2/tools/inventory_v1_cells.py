@@ -160,6 +160,12 @@ def best_trace(d: Path, combine: str = "max"):
             "n_scored": sum((st.get("n_scored") or 0) for _, st in live),
             "n_distinct": len(smiles) if smiles else None,
             "train_rows": sum((st.get("train_rows") or 0) for _, st in live),
+            # THE BUDGET ACROSS ROUNDS, as a UNION and never a sum: a molecule sampled in round 1 and
+            # again in round 2 reached the oracle once, because round 2 is answered from the reward's
+            # cache. Summing per-round distinct double-charges exactly the molecules a resumed run is
+            # most likely to revisit. `smiles` above is already that union over train-phase rows.
+            "train_distinct": len(smiles),
+            "train_distinct_source": "union",
             "train_max": max((st.get("train_max") or 0) for _, st in live) if live else 0,
             "source": "+".join(p.name for p, _ in live) or "trace.csv",
             "n_rotations": len(cands) - 1,
@@ -220,6 +226,7 @@ def _trace_stats(path: Path):
     last = None
     train_max = 0
     train_rows = 0
+    train_smiles: set = set()
     n = 0
     try:
         with open(path, newline="") as fh:
@@ -228,6 +235,9 @@ def _trace_stats(path: Path):
                 last = r
                 if (r.get("phase") or "") == "train":
                     train_rows += 1
+                    _smi = r.get("smiles")
+                    if _smi:
+                        train_smiles.add(_smi)
                     try:
                         train_max = max(train_max, int(r["n_scored"]))
                     except (ValueError, KeyError, TypeError):
@@ -249,11 +259,22 @@ def _trace_stats(path: Path):
     # 65..12,048. So by the last training row the counter has already absorbed eval calls, and
     # train_max reads 11,048 where the true training budget is 10,048, making an ON-BUDGET cell look
     # 10% over. Counting rows is immune to the interleaving. train_max is kept only to expose the gap.
+    # DISTINCT TRAINING MOLECULES -- the budget under the 2026-09-13 ruling. Preferred from the
+    # trace's own `n_train_distinct` column, which the cell maintains as a running count; recomputed
+    # from the train rows' SMILES when that column is absent, which is every v1 cell copied forward
+    # (the column postdates them). Recomputing rather than returning None matters: None would read
+    # downstream as "could not verify" and fail a cell for being OLD rather than for being short.
+    #
+    # NOT `n_distinct`: that column spans train AND eval, because `_seen` is added to outside the
+    # phase guard. Using it here would swap a rows-not-distinct error for a train-plus-eval one.
+    col_distinct = _i("n_train_distinct")
     return {
         "n_rows": n,
         "n_scored": _i("n_scored"),
         "n_distinct": _i("n_distinct"),
         "train_rows": train_rows,
+        "train_distinct": col_distinct if col_distinct is not None else len(train_smiles),
+        "train_distinct_source": "column" if col_distinct is not None else "recomputed",
         "train_max": train_max,
     }
 
