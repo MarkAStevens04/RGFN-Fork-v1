@@ -1239,6 +1239,24 @@ believed the message and concluded the branch could not resolve a single landed 
   (cells measured, some short), because "nothing was measured" and "everything was measured and some
   fell short" must not look the same to a caller gating on non-zero.
 
+**EXIT CODES, collected — and `2` NEVER MEANS "WORSE THAN 1".** It means the question was not
+answered:
+
+| tool | 0 | 1 | 2 |
+|---|---|---|---|
+| `verify_cell` | accepted | rejected | — |
+| `verify_backup` | content verified | failure | structural pass only (`--sizes-only`) |
+| `measure_repeat_rate` | all measured, none short | some cells SHORT | REFUSED, nothing measured |
+
+Both tools that have a `2` have it for the same reason and neither invented it: a sizes-only backup
+check and a report that could not run are both **"no answer"**. Collapsing either into plain non-zero
+turns a missing library or an unrun check into a science result.
+
+**⚠ AND AN EXIT CODE READ THROUGH A PIPE IS NOT THE COMMAND'S.** `cmd | tail` reports *tail's* status,
+so `cmd | tail; echo $?` prints 0 no matter what `cmd` did. This has caught three different people on
+this project — including once inside a message reporting an exit code as 0 when it was 1, and once
+while verifying the very refusal described above. Redirect instead: `cmd >/dev/null 2>&1; echo $?`.
+
 **The rule for the next tool:** state which interpreter a tool needs, and make the tool say so itself
 when run from the wrong one. The library half must keep importing from base — `verify_cell` needs
 `_verdict` — so the split is CLI-refuses / library-imports, not module-refuses.
