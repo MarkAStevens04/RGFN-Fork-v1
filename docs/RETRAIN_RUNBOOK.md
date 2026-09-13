@@ -1000,14 +1000,33 @@ success. Caught 2026-09-12 mid-flight on `_trace.py` during the RNG verification
 exactly this reason. **Freeze every module a comparison spans for the duration of that comparison**,
 the same way §6.8 freezes inputs for a comparative arm.
 
-**And save state at the point it will be RESTORED, not at a convenient earlier one.** The RNG sidecar
-was captured inside the `make_checkpoint` wrapper, which fires part-way through an iteration's
-epilogue, while a resume re-enters at the TOP of the next iteration — so the restore faithfully
-reinstated a position the uninterrupted run never occupied there. The restore mechanism was correct
-throughout; the capture point was not, and no amount of verifying the restore would have found it.
-The fix is a pending flag at the checkpoint and the write at the next iteration's top, which is
-correct **whatever** consumes randomness in between — so it does not depend on identifying the
-consumer, and the two candidate consumers considered were both wrong.
+**Save state at the point it will be RESTORED, not at a convenient earlier one — as HARDENING.** The
+RNG sidecar is captured inside the `make_checkpoint` wrapper, which fires part-way through an
+iteration's epilogue, while a resume re-enters at the TOP of the next iteration. Moving the write to
+the resume point is correct **whatever** later lands between those two, and tagging the sidecar with
+its iteration turns a stale one into a declared refusal rather than a silent wrong restore. **But it
+has NOT been shown to repair a defect that exists today**, and an earlier draft of this entry said it
+had. Measured: with the fix in, the restored value was IDENTICAL to the one the old placement
+produced, because nothing between `make_checkpoint` and the end of the loop consumes randomness — the
+library promotion is the only thing there and it takes the `mean_reward` branch, which draws none. So
+record it as a defensible placement with a stated rationale, not as a fix for an observed production
+failure.
+
+**⚠ A VERIFICATION HARNESS CAN PERTURB THE PROPERTY IT VERIFIES.** This is what actually broke three
+reproducibility runs, and it is the more valuable finding. `Trainer.valid_every_n_iterations = 250`
+against an 8-iteration harness means no periodic validation fires, so the only remaining trigger is
+`i == n_iterations - 1` — and SCENT's `valid_step` samples 1,000 trajectories through the RNG:
+
+    run A  (8 iterations)       validates at i=7
+    run B  (stopped at 4)       validates at i=3   <- a pass the uninterrupted run never made there
+
+**Stopping the run injected the very randomness the comparison was measuring.** No capture-point fix
+could ever reconcile that; the harness was measuring its own stop. The repaired harness binds the
+validation cadence for both runs, chooses a stop satisfying `(half - 1) % valid_every == 0` so run B's
+last iteration is one run A also validates, and **prints INVALID rather than FAIL when no such stop
+exists** — the old one reported FAIL for a condition it had manufactured, which is a check that can
+never pass, the mirror of §6.10's check that can never fail. Stopping a run is not a neutral act when
+the stopping condition also triggers work.
 
 ### 8.4 Shared scratch is rewritten by other agents
 
