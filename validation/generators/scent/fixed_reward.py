@@ -220,8 +220,16 @@ class ScentFixedRewardRun:
         #     find no sidecar at all, and the fix would look broken while being correct for every
         #     other checkpoint. The position here is exactly what the next iteration would have
         #     started from, so it is tagged with that index.
+        #     BOTH sidecars, not just the RNG. Moving the library to the resume point and giving
+        #     only the RNG an end-of-run capture left a run that ends at its final checkpoint
+        #     writing NO library sidecar at all -- so the resume found nothing and silently started
+        #     with an empty vocabulary, which is worse than the bug being fixed. Caught on the
+        #     verification's own log: the resume block had no "restored dynamic library" line.
+        #     Whatever is captured at the resume point must ALSO be captured here, or the two
+        #     capture sites disagree about which artifacts exist.
         if getattr(self, "_rng_capture_pending", [False])[0]:
             self._save_rng_state(iteration=int(getattr(self.trainer, "n_iterations", 0)))
+            self._save_dynamic_library()
             self._rng_capture_pending[0] = False
 
         # 1b. Final guidance-model save — persists the trained P_B (cost + decomposability MLPs)
