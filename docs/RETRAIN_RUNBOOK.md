@@ -648,6 +648,20 @@ fragments THIS RUN used?** Part 2 is the one that was missing. Coverage of the s
 it reads **100%** while only **53%** of the run's fragments are expandable (549 of 1,169 silently
 *bought* rather than *built*).
 
+**IN v2 THAT FAILURE RECURS ACROSS ARMS, and it is created by our own design.** `_recipe_health`
+resolves the snapshot from the checkpoint's **run_id** (`check_route_readiness.py:170-176`) and takes
+`snaps[-1]`, the LATEST. Because one training run now yields both arms in ONE run directory (§1), the
+two arms **share a run_id** — so an arm-A cell's recipe check reads arm B's final snapshot and reports
+arm B's coverage. Arm A promoted nothing; the number it prints is about a different arm, and the
+verdict stays right only by luck. **The arm must disambiguate the snapshot, not just the run.**
+
+**And an ABSENT library is `n/a`, not a failure** — `if not snaps: return None  # no dynamic library
+-> nothing to expand`. An arm-A SCENT cell therefore passes on the same path RGFN and RxnFlow take,
+and that is correct rather than lucky: with zero promotions its routes bottom out on the 418 base
+blocks, so there is nothing to expand and a chemist can act on every molecule. Entry 070's
+distinction is the operative one — **no recipes because logging was OFF while fragments were promoted
+is broken; no recipes because NOTHING was promoted is complete.**
+
 ### 6.4 One command answers 6.1–6.3
 ```
 python experiments/lsd_hubs/matrix16/check_route_readiness.py
