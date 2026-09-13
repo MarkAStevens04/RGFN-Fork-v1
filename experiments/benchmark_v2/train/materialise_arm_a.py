@@ -167,16 +167,34 @@ def main() -> int:
         shutil.copy2(p, dst_ckpt / name)
         copied.append(f"{p.name} -> {name}")
 
-    for side in (
+    # ⚠ THE CONFIG RECORD IS PART OF THE CELL, NOT DECORATION, and the three generators write it to
+    # THREE DIFFERENT PLACES. An arm-A directory without it cannot say which provider it ran under,
+    # and `measure_repeat_rate` resolves cache status -- which decides whether the budget is measured
+    # on distinct or on rows -- from exactly that file. Materialising without it returns `unknown`
+    # for every reaction-GFN arm-A cell, and `unknown` never passes, so the cell fails for having no
+    # record rather than for anything about its training.
+    #
+    # I originally listed `config.gin` / `operative_config.gin` from memory of SCENT's layout. RGFN
+    # writes `logs/operative_config.txt` -- a .txt, in a subdirectory -- so the copy silently carried
+    # nothing for RGFN and the materialised dir looked complete. Hence RELATIVE PATHS INCLUDING
+    # SUBDIRECTORIES below, and a positive report of what was found, so the next reader sees which
+    # record travelled rather than assuming one did.
+    CONFIG_RECORDS = (
         "arm_a.json",
         "timing.json",
-        "run_config.yaml",
-        "config.gin",
-        "operative_config.gin",
-    ):
+        "run_config.yaml",  # bridge generators (rxnflow, competitors)
+        "config.gin",  # scent
+        "operative_config.gin",  # scent, gin-resolved
+        "logs/config.txt",  # rgfn
+        "logs/operative_config.txt",  # rgfn, gin-resolved -- the one that names the proxy
+    )
+    carried = []
+    for side in CONFIG_RECORDS:
         s = src / side
         if s.is_file():
+            (dst / side).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(s, dst / side)
+            carried.append(side)
 
     prov = {
         "materialised": True,
@@ -185,6 +203,9 @@ def main() -> int:
         "budget_oracle_calls": a.budget,
         "trace": sliced,
         "artifacts": copied,
+        # Named rather than counted: "5 files" would not tell a reader whether the one that
+        # identifies the provider was among them.
+        "config_records_carried": carried,
         "note": (
             "Arm A was EXTRACTED from the arm-B run above, not trained separately: one trajectory, "
             "check-pointed on the way past the arm-A budget. The trace here is a genuine PREFIX of "
