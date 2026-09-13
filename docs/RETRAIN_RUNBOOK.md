@@ -914,6 +914,20 @@ same output lies: **a predicate too weak for its intent passes what it should ca
 strong for its evidence carries authority it did not earn.** Ask of any finding: *which part of this
 did I measure, and which part did I supply?*
 
+**THE SHAPE UNDERNEATH ALL OF THEM: a check that cannot distinguish what it is REPORTING from what
+actually HAPPENED.** Three on 2026-09-13 alone, each reporting with total confidence:
+
+| the check | what it reported | what had actually happened |
+|---|---|---|
+| `verify_cell`'s budget gate | "budget reached, 600/600" | 600 ROWS holding 500 distinct — 16.7% short, with the 500 printed on the line below |
+| the sign-seam detector | "the seam is present" | `self.sign` matched inside a COMMENT — the one written to be pasted into the next bridge |
+| `_read_config`'s error handler | "no `reward.type` in run_config.yaml" | the caller's interpreter had no PyYAML; the file plainly contains `type: drd2` |
+
+Each was correct about the thing it measured and wrong about the thing it was asked. **All three were
+found by accident and none by looking** — which is the argument for the question in §6.10 being asked
+routinely rather than when something seems off: *which part of this did I measure, and which part did
+I supply?*
+
 **Before recording any verification as passed, state its failing case.** If you cannot name an input
 that makes it fail, it is not a check — find one that distinguishes, or say plainly that the property
 is unverified. A negative result is worth stating only when a positive one was possible.
