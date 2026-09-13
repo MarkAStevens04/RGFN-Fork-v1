@@ -394,6 +394,41 @@ at the end), but the trace cannot carry a modes-vs-calls curve without re-runnin
 
 RGFN costs ~3.3× SCENT per oracle call at arm A.
 
+**13 - WHICH COUNTER THE BUDGET MEANS, and a gap of 24.7% on this cell.** The researcher ruled
+(2026-09-12) that the budget counts molecules that **reached the oracle** -- distinct -- not molecules
+presented. Measured on this pilot's own RGFN trace:
+
+| | at the arm-A crossing | at end of run |
+|---|---|---|
+| `n_scored` (presented, repeats counted) | 10,000 | 16,919 |
+| `n_distinct` (**reached** the oracle) | **7,533** | **12,114** |
+| duplicate rate | 24.7% | 28.4% |
+
+`BudgetCheckpointer` fires on a presented counter, not a distinct one: `n_train_scored += 1` runs on
+every training row regardless of novelty (`_trace.py:110-112`), and `_seen` -- which does track
+distinct -- is never consulted for the budget test. So **this cell's arm-A checkpoint sits at 7,533
+molecules that reached the oracle, 24.7% under a 10,000-distinct budget.**
+
+**Direction matters and it is the opposite of the earlier step-arithmetic error.** Placing the
+checkpoint by step count would have trained RGFN ~20% *past* the budget, flattering us. Counting
+presented rather than distinct places it ~25% *short*, which under-trains our side against
+competitors whose own budgets are declared in distinct molecules (Saturn runs
+`allow_oracle_repeats: false`, so its 10,020 are all distinct). The external head-to-head is the
+exhibit that cares.
+
+**What is NOT established here: whether the ruling reaches the training checkpoint at all.** It was
+made on a competitor-side measurement (six ClpP cells) about pool and oracle accounting. Applying it
+to `BudgetCheckpointer` is an inference, not something the ruling states, and the duplicate rate is
+generator-specific -- 24.7% for RGFN at the crossing, unmeasured for SCENT and RxnFlow. Two readings
+follow and only the researcher can choose:
+
+* if the budget means distinct **everywhere**, `BudgetCheckpointer` needs to test `len(_seen)` and
+  55 cells are about to be checkpointed short by a generator-specific amount;
+* if it means distinct only in competitor pool accounting, the checkpoint is correct as it stands.
+
+Either way one thing is free and correct under both: **any "at 10,000 oracle calls" phrasing must say
+which counter it means.** In this entry it means *presented* training rows.
+
 **12 - depth-0 reliance is a SCENT/library phenomenon, and effectively ABSENT in RGFN.** `depth_mix`
 on the same axis, same run, both arm-A cells (measured 2026-09-12 after the checker below was fixed):
 
