@@ -503,6 +503,14 @@ change which molecules are kept, leave the reward flat, and believe you are done
 `self.sign` in the `_value` mapping; `rxnflow/fixed_reward.py:160-172` documents the same hazard from
 the other side and is worth reading before touching any of the five.
 
+**THE FIVE SITES, verified on `Hub-Analysis` 2026-09-12** (`fraggfn:257`, `s3gfn:243`,
+`reinvent:237`, `saturn:236`, `synformer:353`; TANGO shares Saturn's runner, so five files cover six
+generators). **Cite line numbers from the MERGED branch, never from a worktree** — this project runs
+seven of them and two agents reported stale numbers as repo facts on the same day. `benchmark-v2-infra`
+holds a 375-line `synformer/fixed_reward.py` against the merged 477, so the same statement is at 263
+there and 353 here, and both greps are honest. A file-level check in a worktree is a check on the
+worktree.
+
 **And a banner did not prevent it.** `rxnflow_6td3b_docking_fixed_5k.yaml` carries a
 "⚠ LOAD-BEARING — DO NOT DELETE" warning describing precisely this catastrophe. The fix landed in the
 one generator whose header carries the warning; the five that needed the identical fix never got it,
