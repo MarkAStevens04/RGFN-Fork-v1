@@ -80,12 +80,17 @@ class BudgetReached(Exception):
     does not swallow it silently.
     """
 
-    def __init__(self, n_train_scored: int, budget: int, iteration: int) -> None:
+    def __init__(self, n_train_distinct: int, budget: int, iteration: int) -> None:
         super().__init__(
-            f"oracle-call budget reached: {n_train_scored:,} train calls >= {budget:,} "
-            f"at iteration {iteration}"
+            f"oracle-call budget reached: {n_train_distinct:,} DISTINCT training molecules "
+            f">= {budget:,} at iteration {iteration}"
         )
-        self.n_train_scored = n_train_scored
+        # NAMED FOR ITS UNIT. `n_train_scored` means PRESENTATIONS everywhere else in this codebase
+        # -- it is what TraceWriter increments per row -- so calling a distinct count by that name
+        # would mislead exactly the reader who came to this file to learn the difference. The same
+        # defect as the bare `n_scored_at_checkpoint` renamed on 2026-09-12, which had already cost
+        # one bug in the budget checkpointer.
+        self.n_train_distinct = n_train_distinct
         self.budget = budget
         self.iteration = iteration
 
@@ -172,14 +177,14 @@ class BudgetStopper:
             )
 
     @property
-    def total_train_scored(self) -> int:
+    def total_train_distinct(self) -> int:
         """Distinct training molecules this CELL has sent to the oracle, across all rounds."""
         return int(getattr(self.trace, "n_train_distinct", 0))
 
     def note_iteration(self, iteration_idx: int) -> None:
         if self.fired:
             return
-        total = self.total_train_scored
+        total = self.total_train_distinct
         if total < self.budget:
             return
         self.fired = True
@@ -197,7 +202,7 @@ class BudgetStopper:
             "budget_oracle_calls": self.budget,
             "fired": self.fired,
             # THE GATE: distinct molecules that reached the oracle, cell-wide.
-            "n_train_distinct_total": self.total_train_scored,
+            "n_train_distinct_total": self.total_train_distinct,
             "n_train_distinct_prior_rounds": self.n_prior,
             # Diagnostics. The gap between presentations and distinct is the repeat rate, which is a
             # real per-generator property (0.0% for the uncached competitors, 28.4% for RGFN), so it

@@ -56,10 +56,27 @@ def _find_artifacts(src: Path) -> tuple[Path | None, list[Path]]:
 
 
 def slice_trace(src_trace: Path, dst_trace: Path, budget: int) -> dict:
-    """Copy the prefix of ``src_trace`` ending at the ``budget``-th train row."""
+    """Copy the prefix of ``src_trace`` ending at the ``budget``-th DISTINCT train molecule.
+
+    ⚠ DISTINCT, NOT ROWS, AND THAT IS THE WHOLE POINT. ``BudgetCheckpointer`` fires when
+    ``n_train_distinct`` reaches the budget (_trace.py), because the researcher's ruling is that the
+    budget counts molecules that reached the oracle. Slicing by ROWS then ends the arm-A trace at a
+    DIFFERENT, EARLIER point than the checkpoint it accompanies: measured on the first real smoke
+    (job 76243, rgfn/seh/42 at a 600-call arm A), 600 rows held only **500 distinct**, 16.7% under
+    budget, while the checkpoint had correctly fired at 600 distinct. The checkpoint and its trace
+    disagreed about what the budget was, and the direction UNDER-trains our own generator.
+
+    Counting distinct makes the slice end on the same row the checkpoint fired on BY CONSTRUCTION
+    rather than by coincidence -- they are now two readings of one rule instead of two rules.
+
+    Eval rows are carried IN POSITION so the result is a genuine prefix of the run's history, and the
+    cumulative counters are left exactly as the run wrote them. A filtered copy would claim the cell
+    never evaluated and would place molecules at the wrong call counts on any modes-vs-calls curve.
+    """
     if not src_trace.is_file():
         return {"ok": False, "reason": f"{src_trace} does not exist"}
-    kept, train_seen, total = [], 0, 0
+    kept, train_rows, total = [], 0, 0
+    train_seen: set = set()
     with open(src_trace, newline="") as fh:
         reader = csv.DictReader(fh)
         fields = reader.fieldnames or []
@@ -67,18 +84,22 @@ def slice_trace(src_trace: Path, dst_trace: Path, budget: int) -> dict:
             total += 1
             kept.append(row)
             if (row.get("phase") or "") == "train":
-                train_seen += 1
-                if train_seen >= budget:
+                train_rows += 1
+                smi = row.get("smiles")
+                if smi:
+                    train_seen.add(smi)
+                if len(train_seen) >= budget:
                     break
-    if train_seen < budget:
+    if len(train_seen) < budget:
         return {
             "ok": False,
             "reason": (
-                f"only {train_seen:,} train rows in the source trace, short of the {budget:,} "
-                f"arm-A budget -- the arm-A checkpoint cannot have fired, so there is nothing to "
-                f"materialise"
+                f"only {len(train_seen):,} DISTINCT training molecules in the source trace "
+                f"({train_rows:,} rows), short of the {budget:,} arm-A budget -- the arm-A "
+                f"checkpoint cannot have fired, so there is nothing to materialise"
             ),
-            "n_train_rows": train_seen,
+            "n_train_rows": train_rows,
+            "n_train_distinct": len(train_seen),
         }
     dst_trace.parent.mkdir(parents=True, exist_ok=True)
     with open(dst_trace, "w", newline="") as fh:
@@ -88,8 +109,12 @@ def slice_trace(src_trace: Path, dst_trace: Path, budget: int) -> dict:
     return {
         "ok": True,
         "n_rows": len(kept),
-        "n_train_rows": train_seen,
-        "n_eval_rows_carried": len(kept) - train_seen,
+        # THE GATE: matches the budget the checkpoint fired on.
+        "n_train_distinct": len(train_seen),
+        # Diagnostics. The gap between rows and distinct is this cell's repeat rate -- 16.9% for RGFN
+        # on sEH in the first real smoke, so it is reported rather than thrown away.
+        "n_train_rows": train_rows,
+        "n_eval_rows_carried": len(kept) - train_rows,
     }
 
 
@@ -170,8 +195,9 @@ def main() -> int:
     (dst / "MATERIALISED.json").write_text(json.dumps(prov, indent=2))
     print(
         f"materialised arm A -> {dst}\n"
-        f"  trace  : {sliced['n_rows']:,} rows ({sliced['n_train_rows']:,} train + "
-        f"{sliced['n_eval_rows_carried']:,} eval carried in position)\n"
+        f"  trace  : {sliced['n_rows']:,} rows -- {sliced['n_train_distinct']:,} DISTINCT training "
+        f"molecules (the budget), from {sliced['n_train_rows']:,} train rows + "
+        f"{sliced['n_eval_rows_carried']:,} eval carried in position\n"
         f"  ckpt   : {len(copied)} artifact(s) from {ckpt_dir}"
     )
     return 0
