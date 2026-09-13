@@ -493,12 +493,30 @@ cells: **every one is on a CACHED path**, so (a) and (b) give the identical budg
 The three reaction-GFNs reach `CachedProxyBase` on every target, and the only competitor cells left to
 train are the 18 on 6TD3-B, which is docking and therefore cached.
 
-    competitor    6td3b   CACHED   18      reaction-GFN  clpp  CACHED   9
-    reaction-GFN  6td3b   CACHED    9      reaction-GFN  drd2  CACHED   9
-                                           reaction-GFN  seh   CACHED   9      uncached: 0
+    competitor    6td3b   CACHED   18      rgfn/scent  seh,drd2,clpp,6td3b  CACHED  24
+    rgfn/scent    6td3b   CACHED    6      rxnflow     clpp, 6td3b          CACHED   6
+                                           rxnflow     seh, drd2        NOT CACHED   6
 
-So the (a)/(b) question decides only **how many ALREADY-LANDED competitor cells are short** — 13 or 6
-— and nothing about what the re-run trains to. Do not hold the launch for it.
+**48 of 54 are cached and unaffected by the choice.** **⚠ SIX ARE NOT: `rxnflow` × {seh, drd2} × 3
+seeds.** RxnFlow is an external bridge in `validation/generators/`, not an upstream-proxy path, so it
+carries the same uncached `SEHFrozenReward` / `DRD2FrozenReward` the competitors do — verified at the
+class, `_cache=0` in both, against `_cache=7` in its `DockingBridgeReward`. **Do not classify RxnFlow
+with RGFN and SCENT from the taxonomy; its surrogate path is a competitor's.**
+
+**And on those six the choice is not bookkeeping, it is an OVERSHOOT.** `BudgetStopper` halts at
+`n_train_distinct >= budget` and calls that "molecules this cell has sent to the oracle" — true only
+where a repeat is withheld. Where nothing caches, every presentation was already a real invocation, so
+stopping at 320,000 *distinct* means the cell has made **more** than 320,000 real calls. Six cells at
+~89 GPU-h each, silently over budget.
+
+**THE FIX THAT COLLAPSES THE QUESTION: give the uncached paths the memo PMO's own harness has.** PMO
+canonicalises and memoises by SMILES — that is not incidental, it is *how* the budget is defined
+there. Adding it to `SEHFrozenReward` and `DRD2FrozenReward` makes reading (a) exactly right
+everywhere rather than approximately right in most places, removes the overshoot at its source rather
+than special-casing the stop, and leaves no uncached path for (a) and (b) to disagree about.
+
+For the other 48 the question decides only **how many ALREADY-LANDED competitor cells are short** —
+13 or 6 — and nothing about what the re-run trains to.
 
 **Nothing is lost either way**: both counters are written to every trace row and into `arm_meta`, and
 the gate is one property (`TraceWriter.n_train_distinct`) read in two places, so switching is a
