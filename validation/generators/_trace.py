@@ -55,7 +55,40 @@ import time
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
-FIELDS = ["n_scored", "n_distinct", "phase", "step", "smiles", "raw_score", "elapsed_s"]
+
+# THE SIBLING IS LOADED BY FILE PATH, and a bare `import _budget_stop` would be wrong in BOTH ways
+# this module is reached. Eight runners do `from validation.generators._trace import ...`, where the
+# package is `validation.generators` and a bare name does not resolve; SCENT loads THIS file with
+# `spec_from_file_location` (because its clone also ships a package called `rgfn`, so sys.path is
+# ambiguous), where a bare name does not resolve either. Going through __file__ works in both, and
+# never puts the repo root on sys.path -- which is the thing that would make `import rgfn` ambiguous
+# inside SCENT's environment.
+def _load_budget_stop():
+    import importlib.util as _ilu
+
+    _p = Path(__file__).resolve().parent / "_budget_stop.py"
+    _spec = _ilu.spec_from_file_location("_benchmark_v2_budget_stop", _p)
+    if _spec is None or _spec.loader is None:  # pragma: no cover - a broken checkout
+        raise ImportError(f"cannot load {_p}")
+    _mod = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    return _mod
+
+
+_budget_stop = _load_budget_stop()
+
+FIELDS = [
+    "n_scored",
+    "n_distinct",
+    "phase",
+    "step",
+    "smiles",
+    "raw_score",
+    "elapsed_s",
+    # APPENDED, never inserted, so readers that index positionally keep working and DictReader
+    # readers pick it up for free. See the header note on why this is not the same as n_distinct.
+    "n_train_distinct",
+]
 
 
 class TraceWriter:
@@ -82,6 +115,12 @@ class TraceWriter:
         # its max over train rows, or an actual COUNT of train rows. Only the count is immune, so
         # the count is what the arm-A budget gates on.
         self.n_train_scored = 0
+        # DISTINCT TRAINING MOLECULES -- the budget gate (researcher's ruling 2026-09-13).
+        # `_seen` above is NOT this: it is added to outside the train branch, so it spans train AND
+        # eval, exactly the contamination `n_scored` has and `n_train_scored` was added to avoid.
+        # The row counter got its phase guard; the distinct set never did. Kept as a SECOND set so
+        # `n_distinct` and its column keep their existing meaning for everything already reading them.
+        self._train_seen: set[str] = set()
         # NEVER CLOBBER AN EXISTING TRACE. Opening "w" truncates, and a runner is now re-invoked
         # routinely -- Stage 2 upsampling calls it with a larger --n-samples, and a resumed run calls
         # it again after a failure. On 2026-08-28 that destroyed s3gfn_seh/seed43's entire training
@@ -109,6 +148,7 @@ class TraceWriter:
         self.n_scored += 1
         if phase == "train":
             self.n_train_scored += 1
+            self._train_seen.add(smiles)
         self._seen.add(smiles)
         self._w.writerow(
             [
@@ -119,6 +159,7 @@ class TraceWriter:
                 smiles,
                 "" if raw_score is None else float(raw_score),
                 round(time.time() - self.t0, 3),
+                len(self._train_seen),
             ]
         )
 
@@ -138,7 +179,17 @@ class TraceWriter:
 
     @property
     def n_distinct(self) -> int:
+        """Distinct molecules across ALL phases. Unchanged; not the budget."""
         return len(self._seen)
+
+    @property
+    def n_train_distinct(self) -> int:
+        """Distinct TRAINING molecules -- what the arm budgets gate on.
+
+        A resumed run's BudgetStopper seeds this set with the earlier rounds' molecules, so it is a
+        CELL-level union rather than a per-process count.
+        """
+        return len(self._train_seen)
 
     def close(self) -> None:
         if not self._fh.closed:
@@ -429,6 +480,7 @@ class BudgetCheckpointer:
         self._save = save
         self.tag = tag
         self.fired = False
+        self.crossed_at_n_train_distinct: Optional[int] = None
         self.crossed_at_n_train_scored: Optional[int] = None
         self.crossed_at_n_scored: Optional[int] = None
         self.saved_at_iteration: Optional[int] = None
@@ -436,15 +488,26 @@ class BudgetCheckpointer:
     def note_iteration(self, iteration_idx: int) -> None:
         """Call at every training-iteration boundary. Saves when the budget has been reached.
 
-        GATES ON TRAINING-PHASE CALLS, not on the cumulative counter. Evaluation scored through the
-        same reward would otherwise count toward the budget and fire this EARLY -- an under-trained
-        arm-A checkpoint whose manifest reads a perfectly plausible number. Not hypothetical:
-        SCENT's periodic validation samples 1,000 trajectories through the same proxy, measured as
-        1,088 rows in one iteration against ~95 in its neighbours.
+        GATES ON DISTINCT TRAINING MOLECULES (researcher's ruling, 2026-09-13). Two contaminations
+        are excluded and they are different:
+
+        * EVALUATION. Scored through the same reward, it would count toward the budget and fire this
+          EARLY -- an under-trained arm-A checkpoint whose manifest reads a plausible number.
+          Measured: SCENT's periodic validation puts 1,088 rows in one iteration against ~95 in its
+          neighbours.
+        * REPEATS. A re-proposed molecule is answered from the reward's cache and never reaches the
+          oracle, so charging it spends budget that was never spent. Measured repeat rates run from
+          0.0% (the competitors with no cache) to 28.4% (RGFN) and 65.6% (S3-GFN), so counting rows
+          made "10,000 oracle calls" mean a different number of real evaluations per generator --
+          on the exhibit whose whole justification is cross-generator parity.
+
+        ``n_train_distinct`` is the only counter free of both. ``n_train_scored`` is kept in the
+        manifest as a diagnostic, because the gap between them IS the repeat rate.
         """
-        if self.fired or self.trace.n_train_scored < self.budget:
+        if self.fired or self.trace.n_train_distinct < self.budget:
             return
         self.fired = True
+        self.crossed_at_n_train_distinct = self.trace.n_train_distinct
         self.crossed_at_n_train_scored = self.trace.n_train_scored
         self.crossed_at_n_scored = self.trace.n_scored
         self.saved_at_iteration = int(iteration_idx)
@@ -452,8 +515,9 @@ class BudgetCheckpointer:
             self._save(int(iteration_idx))
             print(
                 f"[{self.tag}] ARM A: checkpointed at iteration {iteration_idx} "
-                f"(train calls={self.trace.n_train_scored} >= {self.budget}; "
-                f"total scored={self.trace.n_scored}, n_distinct={self.trace.n_distinct})",
+                f"(distinct train molecules={self.trace.n_train_distinct} >= {self.budget}; "
+                f"train presentations={self.trace.n_train_scored}, "
+                f"all-phase scored={self.trace.n_scored})",
                 flush=True,
             )
         except Exception as exc:  # noqa: BLE001 - never kill a training run over a checkpoint
@@ -464,7 +528,9 @@ class BudgetCheckpointer:
         return {
             "budget_oracle_calls": self.budget,
             "fired": self.fired,
-            # The gate. Counts phase=="train" rows only.
+            # THE GATE: distinct molecules that actually reached the oracle.
+            "crossed_at_n_train_distinct": self.crossed_at_n_train_distinct,
+            # Diagnostic: presentations including repeats. The gap to the gate is the repeat rate.
             "crossed_at_n_train_scored": self.crossed_at_n_train_scored,
             # Kept purely as a diagnostic: the gap between the two IS the evaluation contamination,
             # so a reader can see at a glance whether this cell scored outside its training loop.
@@ -627,12 +693,33 @@ def attach_proxy_trace(
 
         trainer.valid_step = _traced_valid_step
 
-    if budget_checkpointer is not None:
+    # THE ARM-B STOP. Built here from the environment rather than passed in, so the budget rule
+    # lives in ONE place instead of three per-runner copies -- which is why this module exists.
+    # BENCHMARK_V2_ARM_B_CALLS unset means NO stop, which is correct for arm-A-only cells and for
+    # every pre-existing config: a run cannot silently acquire a stop it was not launched with.
+    budget_stopper = None
+    _arm_b = _budget_stop.arm_b_budget()
+    if _arm_b is not None:
+        budget_stopper = _budget_stop.BudgetStopper(trace, _arm_b, trace.path, tag=f"{tag}-armB")
+        print(
+            f"[{tag}] arm-B stop armed at {_arm_b:,} distinct training molecules",
+            flush=True,
+        )
+
+    if budget_checkpointer is not None or budget_stopper is not None:
         inner_hook = proxy.on_end_sampling
 
         def _traced_on_end_sampling(iteration_idx, trajectories, recursive=True, _inner=inner_hook):
             out = _inner(iteration_idx, trajectories, recursive=recursive)
-            budget_checkpointer.note_iteration(iteration_idx)
+            if budget_checkpointer is not None:
+                budget_checkpointer.note_iteration(iteration_idx)
+            # LAST, and after the arm-A checkpoint: note_iteration RAISES BudgetReached, so anything
+            # sequenced after it on the crossing iteration would be skipped. Arm A can legitimately
+            # fire on the same boundary that ends the run -- a cell whose arm-A and arm-B budgets are
+            # close, or a smoke with an overridden arm-A budget -- and losing the arm-A checkpoint
+            # there would cost the whole arm.
+            if budget_stopper is not None:
+                budget_stopper.note_iteration(iteration_idx)
             return out
 
         proxy.on_end_sampling = _traced_on_end_sampling

@@ -288,7 +288,21 @@ class DockingBridgeReward:
     SMILES. ``raw_scores`` exposes the raw docking value for the mode gate. Docking is per-step
     expensive → docking targets train FEWER steps than the proxy targets."""
 
-    higher_is_better = True  # the recorded VALUE (clip(-raw/norm)) is higher-is-better
+    # ONE NAME, TWO MEANINGS -- THE SHADOWING BELOW IS AVOIDED DELIBERATELY.
+    # This attribute describes the OUTPUT: the recorded value is clip(sign*raw/norm), which is
+    # higher-is-better for every target, always True. The __init__ argument of the SAME NAME
+    # describes the RAW INPUT, and is False for dvina/Vina. They are not the same fact and they
+    # disagree on every existing docking config.
+    #
+    # So the constructor argument is stored as `self.sign`, NOT as `self.higher_is_better`. The
+    # obvious tidy-up -- assigning it to the matching name -- silently redefines this attribute
+    # from "the value is higher-better" to "the raw score is higher-better". Nothing in THIS
+    # generator reads it today (it is interface parity), so the tidy-up would look harmless here;
+    # the cost is visible in the closest twin of this class, where ScentFixedRewardRun.run reads
+    # it (validation/generators/scent/fixed_reward.py:103) and sorts top-k with
+    # `reverse=higher_is_better` (line 188) -- flipping it there keeps the WORST 100 molecules,
+    # with no exception and no nan. Do not "fix" the naming.
+    higher_is_better = True  # the recorded VALUE (clip(sign*raw/norm)) is higher-is-better
 
     def __init__(
         self,
@@ -297,6 +311,7 @@ class DockingBridgeReward:
         norm: float = 1.0,
         failed_score: float = 0.0,
         clip: float = 10.0,
+        higher_is_better: bool = False,
         conda_env: str = "rgfn",
         oracle_args: Optional[Dict] = None,
         workdir: Optional[str] = None,
@@ -306,6 +321,14 @@ class DockingBridgeReward:
         self.norm = float(norm)
         self.failed_score = float(failed_score)
         self.clip = float(clip)
+        # RAW ORIENTATION -- see the note on the class attribute above, and the twins in
+        # validation/generators/rxnflow/fixed_reward.py and scent/docking_bridge_proxy.py. The
+        # transform below negates the raw score, which is right for dvina/Vina and catastrophic
+        # for 6TD3-B: its reward is gnina's cnn_vs, HIGHER is better, roughly [0, 9], so an
+        # unconditional `max(-raw/norm, 0)` maps every molecule to exactly 0.0 and trains against
+        # a flat reward without raising anything. Default False keeps every existing config
+        # bit-identical; a higher-is-better target must SAY so.
+        self.sign = 1.0 if higher_is_better else -1.0
         self.conda_env = conda_env
         self.oracle_args = dict(oracle_args or {})
         self.workdir = Path(workdir) if workdir else (self.repo_root / "reward_bridge")
@@ -350,7 +373,7 @@ class DockingBridgeReward:
     def _value(self, raw: float) -> float:
         if raw is None or raw != raw:
             return self.failed_score
-        return max(-float(raw) / self.norm, 0.0)
+        return max(self.sign * float(raw) / self.norm, 0.0)
 
     def _dock(self, smiles: List[str]) -> List[float]:
         canons = [self._canonical(s) for s in smiles]

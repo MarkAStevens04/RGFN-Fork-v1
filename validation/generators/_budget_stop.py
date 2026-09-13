@@ -20,10 +20,18 @@ arm-B cell requeues two or three times on the docking targets, which at a declar
 train 640,000-960,000 calls with every artifact looking healthy and only a concatenation of the trace
 files telling the truth.
 
-⚠ AND IT MUST COUNT ROWS, NOT READ A COUNTER. One finished trace reads 12,048 / 11,048 / 10,048
-depending on whether you take the last ``n_scored``, its max over train rows, or an actual COUNT of
-train rows — S3-GFN interleaves a 2,000-molecule evaluation sample with training. Only the count is
-immune, so only the count is used here.
+⚠ AND IT COUNTS DISTINCT TRAINING MOLECULES, NOT ROWS AND NOT A COUNTER (researcher's ruling,
+2026-09-13). Three readings of one finished trace give 12,048 / 11,048 / 10,048 depending on whether
+you take the last ``n_scored``, its max over train rows, or a COUNT of train rows — S3-GFN
+interleaves a 2,000-molecule evaluation sample with training, so any counter absorbs evaluation. But
+the row count is not the budget either: several reward paths CACHE, so a re-proposed molecule never
+reaches the oracle and must not be charged. Upstream had already defined this —
+``CachedProxyBase.n_proxy_calls`` returns ``len(self.cache)``, a proxy call IS a distinct state —
+while our budget counted rows. Measured repeat rates: 0.0% for the four competitors whose surrogate
+rewards hold no cache, 5.6% FragGFN, up to 65.6% S3-GFN, 28.4% RGFN.
+
+So the gate is ``len(distinct training SMILES)``, taken as a UNION across rounds. Adding per-round
+distinct counts would double-charge exactly the molecules a resumed run is most likely to revisit.
 
 WHY SIBLINGS CAN BE SUMMED WITHOUT A SHAPE CHECK. Inside a v2 TRAINING directory a ``trace.csv.N``
 can only have come from a v2 requeue, which is always a continuation: ``copy_forward`` resolves v1's
@@ -32,9 +40,10 @@ re-invocation — the one case that produces an alternatives-shaped rotation —
 is frozen and writes to its own directory. So the prior rounds are disjoint earlier halves of this
 same run and add. Outside that setting, use ``best_trace(..., combine=...)``, which discriminates.
 
-COST. The siblings are immutable once rotated, so they are counted ONCE at construction; every
-subsequent check is ``prior + trace.n_train_scored``, i.e. O(1). Re-parsing a 320,000-row file at
-every iteration boundary would not be.
+COST. The siblings are immutable once rotated, so they are read ONCE at construction and their
+molecules are seeded into the writer's own train-distinct set. Every subsequent check is then
+``len(that set)`` — O(1), and correct as a union for free. Re-parsing a 320,000-row file, or
+unioning two large sets, at every iteration boundary would not be.
 """
 
 from __future__ import annotations
@@ -63,25 +72,44 @@ class BudgetReached(Exception):
         self.iteration = iteration
 
 
-def count_prior_train_rows(trace_path: Path | str) -> int:
-    """Train rows already recorded in ROTATED siblings of ``trace_path``.
+def prior_train_smiles(trace_path: Path | str) -> set:
+    """DISTINCT training SMILES already recorded in ROTATED siblings of ``trace_path``.
 
-    Counted once: a rotated file is never written again. ``trace.csv`` itself is deliberately NOT
-    counted -- that is the live file, and the live writer's own counter tracks it.
+    A SET, not a count, and that is load-bearing in two directions.
+
+    THE BUDGET COUNTS MOLECULES THAT REACHED THE ORACLE (researcher's ruling, 2026-09-13), not
+    molecules presented to the reward. Several reward paths cache -- the docking bridges all do, and
+    RGFN/SCENT go through ``SehMoleculeProxy``, a ``CachedProxyBase`` -- so a re-proposed molecule
+    costs nothing and must not be charged. Upstream had already settled this: ``n_proxy_calls``
+    returns ``len(self.cache)``, i.e. a proxy call IS a distinct state, while our budget was counting
+    rows. Measured gaps: RGFN 28.4% of presentations are repeats, s3gfn up to 65.6%, and the four
+    competitors with no cache 0.0%.
+
+    AND THE UNION MUST BE TAKEN ACROSS ROUNDS, NOT PER ROUND AND ADDED. A molecule sampled in round 1
+    and again in round 2 is ONE oracle call: it is already in the reward's cache when round 2 asks.
+    Adding per-round distinct counts double-charges exactly the molecules a resumed run is most
+    likely to revisit. This is the same trap ``best_trace`` hit when summing ``n_distinct``.
+
+    ``trace.csv`` itself is deliberately excluded -- that is the live file, and the live writer
+    tracks it.
     """
     p = Path(trace_path)
-    total = 0
+    seen: set = set()
     for sib in sorted(p.parent.glob(p.name + ".*")):
         try:
             with open(sib, newline="") as fh:
-                total += sum(1 for r in csv.DictReader(fh) if (r.get("phase") or "") == "train")
+                for r in csv.DictReader(fh):
+                    if (r.get("phase") or "") == "train":
+                        s = r.get("smiles")
+                        if s:
+                            seen.add(s)
         except Exception as exc:  # noqa: BLE001 - a damaged sibling must not kill a training run
             print(
-                f"[budget-stop] WARNING could not count {sib.name} ({exc}); its rows are NOT "
-                f"included, so this run may train PAST its budget rather than short of it",
+                f"[budget-stop] WARNING could not read {sib.name} ({exc}); its molecules are NOT "
+                f"counted, so this run may train PAST its budget rather than short of it",
                 flush=True,
             )
-    return total
+    return seen
 
 
 class BudgetStopper:
@@ -99,19 +127,36 @@ class BudgetStopper:
         self.trace = trace
         self.budget = int(budget)
         self.tag = tag
-        self.prior = count_prior_train_rows(trace_path)
         self.fired = False
-        if self.prior:
+
+        # SEEDED INTO THE WRITER'S OWN SET rather than kept beside it. The writer already adds every
+        # training molecule to `_train_seen`, so seeding it with the earlier rounds' molecules makes
+        # `len(_train_seen)` the CELL-level union, maintained incrementally and read in O(1). The
+        # alternative -- holding a second set here and unioning on every check -- is O(n) per
+        # iteration, which at 320,000 molecules over 5,000 iterations is not affordable. It is also
+        # the only way the union is correct: a molecule seen in an earlier round AND this one must
+        # count once, and that falls out of a shared set for free.
+        prior = prior_train_smiles(trace_path)
+        self.n_prior = len(prior)
+        if prior and hasattr(trace, "_train_seen"):
+            trace._train_seen |= prior
+        elif prior:
             print(
-                f"[{self.tag}] resuming with {self.prior:,} train calls already recorded in "
-                f"rotated trace siblings; budget {self.budget:,}",
+                f"[{self.tag}] WARNING trace has no _train_seen set; {len(prior):,} molecules from "
+                f"earlier rounds cannot be credited and this run will train PAST its budget",
+                flush=True,
+            )
+        if prior:
+            print(
+                f"[{self.tag}] resuming with {self.n_prior:,} DISTINCT training molecules already "
+                f"scored in rotated trace siblings; budget {self.budget:,}",
                 flush=True,
             )
 
     @property
     def total_train_scored(self) -> int:
-        """Calls spent by this CELL, not by this process."""
-        return self.prior + int(getattr(self.trace, "n_train_scored", 0))
+        """Distinct training molecules this CELL has sent to the oracle, across all rounds."""
+        return int(getattr(self.trace, "n_train_distinct", 0))
 
     def note_iteration(self, iteration_idx: int) -> None:
         if self.fired:
@@ -121,9 +166,10 @@ class BudgetStopper:
             return
         self.fired = True
         print(
-            f"[{self.tag}] budget reached at iteration {iteration_idx}: {total:,} train calls "
-            f"(this process {int(getattr(self.trace, 'n_train_scored', 0)):,} + "
-            f"{self.prior:,} from earlier rounds) >= {self.budget:,}",
+            f"[{self.tag}] budget reached at iteration {iteration_idx}: {total:,} DISTINCT training "
+            f"molecules ({self.n_prior:,} of them from earlier rounds; "
+            f"{int(getattr(self.trace, 'n_train_scored', 0)):,} presentations this process) "
+            f">= {self.budget:,}",
             flush=True,
         )
         raise BudgetReached(total, self.budget, iteration_idx)
@@ -132,9 +178,13 @@ class BudgetStopper:
         return {
             "budget_oracle_calls": self.budget,
             "fired": self.fired,
-            "n_train_scored_total": self.total_train_scored,
-            "n_train_scored_this_process": int(getattr(self.trace, "n_train_scored", 0)),
-            "n_train_scored_prior_rounds": self.prior,
+            # THE GATE: distinct molecules that reached the oracle, cell-wide.
+            "n_train_distinct_total": self.total_train_scored,
+            "n_train_distinct_prior_rounds": self.n_prior,
+            # Diagnostics. The gap between presentations and distinct is the repeat rate, which is a
+            # real per-generator property (0.0% for the uncached competitors, 28.4% for RGFN), so it
+            # is reported rather than discarded.
+            "n_train_presented_this_process": int(getattr(self.trace, "n_train_scored", 0)),
         }
 
 
