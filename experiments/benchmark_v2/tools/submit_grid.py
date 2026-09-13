@@ -331,6 +331,7 @@ def main() -> int:
             "done",
             "accept-pending",
             "refuse",
+            "odd-claim",
             "resample",
             "claimed",
             "skip",
@@ -343,11 +344,20 @@ def main() -> int:
     trainer_missing = not (REPO / TRAINER).is_file()
 
     for c in cells:
-        if c.tag in claims:
-            buckets["claimed"].append((c, f"already queued as job {claims[c.tag]}"))
-            continue
         action, why = decide(c, a.arm)
+        # THE CLAIM CHECK BELONGS HERE, NOT AHEAD OF THE DECISION. Checking it first was safe -- a
+        # claimed cell was never submitted either way -- but it MISREPORTED: an accepted, frozen
+        # cell that happened to be claimed printed "already queued", which reads as work in flight
+        # when the work is finished. Decision first, then claim, so each cell is described by what
+        # it actually is.
+        #
+        # The case the claim check exists for is exactly `submit`: a job is RUNNING and has not yet
+        # written any files, so the disk says not-started and a second submission would double-run
+        # it. That is the recorded "chains claim cells before files appear" failure.
         if action == "submit":
+            if c.tag in claims:
+                buckets["claimed"].append((c, f"already queued as job {claims[c.tag]}"))
+                continue
             broken = reward_orientation_broken(c)
             if broken:
                 buckets["refuse"].append((c, broken))
@@ -355,6 +365,14 @@ def main() -> int:
             if trainer_missing:
                 buckets["no-launcher"].append((c, f"{TRAINER} does not exist yet"))
                 continue
+        elif c.tag in claims:
+            # A claim on a cell that is NOT submittable is an anomaly, not a no-op: something has
+            # queued a job for a cell that is finished, refused, or awaiting acceptance. Surfaced
+            # rather than swallowed, because the previous ordering hid it behind "already queued".
+            buckets["odd-claim"].append(
+                (c, f"job {claims[c.tag]} is queued for this cell, but it reads {action!r} ({why})")
+            )
+            continue
         buckets[action].append((c, why))
 
     print(
@@ -385,6 +403,7 @@ def main() -> int:
 
     for name, label in (
         ("refuse", "REFUSED -- needs a human, not a resubmit"),
+        ("odd-claim", "QUEUED BUT NOT SUBMITTABLE -- investigate"),
         ("resample", "RE-SAMPLE, not a training"),
         ("no-launcher", "NO LAUNCHER WIRED"),
     ):
