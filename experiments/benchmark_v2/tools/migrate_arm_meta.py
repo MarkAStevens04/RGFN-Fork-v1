@@ -50,6 +50,14 @@ from inventory_v1_cells import best_trace  # noqa: E402
 LEGACY = "n_scored_at_checkpoint"
 TRAIN_KEY = "n_train_scored_at_checkpoint"
 TOTAL_KEY = "n_total_scored_at_checkpoint"
+COMBINE_KEY = "n_train_scored_combine"
+
+# THIS BRINGS arm_meta UP TO THE CURRENT SCHEMA; IT IS NOT A ONE-SHOT RENAME. The first version
+# checked only for TRAIN_KEY and called anything holding it "already migrated" -- so when
+# `n_train_scored_combine` was added to both writers hours later, all 54 landed cells reported done
+# while carrying none of it. A migration that defines "done" as "has the field I added" stops being
+# a migration the moment the schema moves again. It now reconciles against the full expected set, so
+# the next field costs an entry here and a re-run.
 
 
 def plan_one(cell, arm: str) -> tuple[str, str, dict | None]:
@@ -63,25 +71,28 @@ def plan_one(cell, arm: str) -> tuple[str, str, dict | None]:
     except Exception as e:
         return "PROBLEM", f"unparseable arm_meta.json: {e}", None
 
-    if TRAIN_KEY in meta:
-        return "done", "already migrated", None
-    if LEGACY not in meta:
+    if TRAIN_KEY not in meta and LEGACY not in meta:
         return "PROBLEM", f"neither {LEGACY} nor {TRAIN_KEY} present", None
 
+    # Re-derive rather than rename in place, and take the MODE FROM best_trace rather than asserting
+    # it. These are copied v1 cells, so the default (max over a cell's alternative trace files) is
+    # the right reading -- but reading it back out of the function is what keeps this honest if that
+    # default ever changes underneath us.
     t = best_trace(d) or {}
     train_rows = t.get("train_rows") or 0
     total = t.get("n_scored") or 0
+    combine = t.get("combined", "max")
     if not train_rows:
         return "PROBLEM", "no readable trace -- cannot re-derive the budget", None
 
-    recorded = meta[LEGACY]
+    recorded = meta.get(TRAIN_KEY, meta.get(LEGACY))
     if int(recorded) != int(train_rows):
         # Do NOT migrate a value we cannot reproduce. Renaming it would carry a wrong number across
         # under a name that asserts more precision than the old one did.
         return (
             "PROBLEM",
             (
-                f"recorded {LEGACY}={recorded:,} but the landed trace has "
+                f"recorded {int(recorded):,} but the landed trace has "
                 f"{train_rows:,} train rows -- refusing to migrate a value that does "
                 f"not reproduce"
             ),
@@ -89,12 +100,25 @@ def plan_one(cell, arm: str) -> tuple[str, str, dict | None]:
         )
 
     new = dict(meta)
-    new.pop(LEGACY)
+    new.pop(LEGACY, None)
     new[TRAIN_KEY] = int(train_rows)
     new[TOTAL_KEY] = int(total)
-    detail = f"{train_rows:,} train rows"
-    if total and total != train_rows:
-        detail += f" (counter reads {total:,}; {total - train_rows:,} non-train)"
+    # THE MODE TRAVELS WITH THE VALUE, on every cell and not just the ones written from now on.
+    # write_arm_meta sums a requeue's rotations; copy_forward takes the max of a v1 cell's
+    # alternatives. Both are right for their own shape, and they coincide on every landed cell today
+    # only because none has two non-empty traces -- an accident, which is exactly why the value must
+    # never appear without the mode beside it.
+    new[COMBINE_KEY] = combine
+
+    if new == meta:
+        return "done", "already at the current schema", None
+
+    added = sorted(set(new) - set(meta))
+    detail = f"{train_rows:,} train rows, combine={combine}"
+    if LEGACY in meta:
+        detail += f"; renamed {LEGACY}"
+    if added:
+        detail += f"; +{','.join(added)}"
     return "migrate", detail, new
 
 
