@@ -165,7 +165,23 @@ REWARD_SOURCE = {
     "scent": "validation/generators/scent/docking_bridge_proxy.py",
     "rgfn": "glue/proxies/oracle_reward_proxy.py",
 }
-_SEAM = re.compile(r"self\._?sign\b")
+# ⛔ TWO PATTERNS, BOTH REQUIRED, BECAUSE ONE OF THEM WAS SATISFIABLE BY A COMMENT.
+# The first version was `re.compile(r"self\._?sign\b")` against raw file text, which matches the
+# token inside PROSE -- and synformer/fixed_reward.py:297 is exactly that, a comment reading
+# "stored as `self.sign`". Worse, that comment is the shadowing warning C wrote TO BE COPIED
+# VERBATIM into every new bridge. So the most likely future path was the bad one: someone pastes
+# the warning into a sixth bridge, defers the three code lines, and this guard green-lights cells
+# that still train against a constant reward.
+#
+# A guard that the fix's own DOCUMENTATION can satisfy is worse than one that misses, because it
+# fails in the direction of RUNNING. Found by C, who demonstrated it on a synthetic class carrying
+# the comment and the unfixed `max(-float(raw) / self.norm, 0.0)` rather than arguing it.
+#
+# ASSIGN is the load-bearing half: a comment line begins with `#`, so `^\s*self` can never match
+# one. USE additionally requires the sign to reach the transform, so a stored-but-unused attribute
+# does not pass either. Strictly tighter over the same population -- all six real files still pass.
+_SEAM_ASSIGN = re.compile(r"^\s*self\._?sign\s*=", re.M)
+_SEAM_USE = re.compile(r"self\._?sign\s*\*")
 
 
 def reward_orientation_broken(cell) -> str | None:
@@ -237,7 +253,7 @@ def reward_orientation_broken(cell) -> str | None:
         src = p.read_text()
     except Exception as e:
         return f"cannot read {rel} to check the sign seam ({e}); refusing rather than assuming"
-    if _SEAM.search(src):
+    if _SEAM_ASSIGN.search(src) and _SEAM_USE.search(src):
         return None
     return (
         f"{cell.generator}'s docking reward ({rel}) hardcodes max(-raw/norm, 0) with no sign "
