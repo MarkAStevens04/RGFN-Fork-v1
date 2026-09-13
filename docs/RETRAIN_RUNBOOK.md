@@ -488,6 +488,18 @@ an implementation deviation from that convention, not a property of the generato
 Reading (b) is the literal reading of "reached the oracle" given OUR implementation, and it is our own
 invention rather than the literature's.
 
+**AND THE PENDING CHOICE DOES NOT BLOCK THE LAUNCH.** Checked 2026-09-12 across all 54 `generate`
+cells: **every one is on a CACHED path**, so (a) and (b) give the identical budget for all of them.
+The three reaction-GFNs reach `CachedProxyBase` on every target, and the only competitor cells left to
+train are the 18 on 6TD3-B, which is docking and therefore cached.
+
+    competitor    6td3b   CACHED   18      reaction-GFN  clpp  CACHED   9
+    reaction-GFN  6td3b   CACHED    9      reaction-GFN  drd2  CACHED   9
+                                           reaction-GFN  seh   CACHED   9      uncached: 0
+
+So the (a)/(b) question decides only **how many ALREADY-LANDED competitor cells are short** — 13 or 6
+— and nothing about what the re-run trains to. Do not hold the launch for it.
+
 **Nothing is lost either way**: both counters are written to every trace row and into `arm_meta`, and
 the gate is one property (`TraceWriter.n_train_distinct`) read in two places, so switching is a
 definition change rather than a hunt through call sites.
