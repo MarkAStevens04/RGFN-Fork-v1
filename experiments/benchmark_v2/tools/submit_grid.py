@@ -246,10 +246,23 @@ def reward_orientation_broken(cell) -> str | None:
     )
 
 
-# Markers that would indicate a trace-driven STOP exists. Broad on purpose, and named here so that
-# a stop landing under a different word is a one-line edit rather than a silent false refusal.
+# Markers that would indicate _trace.py CONSUMES a budget stop. Broad on purpose, and a deliberate
+# SUPERSET of the trainer's own check so the two guards can never retire at different moments.
+#
+# submit_train_v2.sh:134 greps the same file for `budget_stop\|BudgetStopper` and refuses arm B on
+# the same condition. Two guards on one fact is the right redundancy -- A's knows what it can honour,
+# this one knows what it is about to ask for -- but only while they AGREE. My first pattern matched
+# `budget_stop` and NOT a bare `BudgetStopper`, so a wiring written the second way would have retired
+# A's refusal and left mine firing forever: a false refusal, which is the failure mode that gets a
+# guard switched off. Divergence by one word, which is exactly what I warned C about an hour earlier.
+#
+# ⛔ IF YOU ADD A MARKER HERE, ADD IT THERE TOO. The names are `BudgetStopper` / `BudgetReached` /
+# `count_prior_train_rows` from validation/generators/_budget_stop.py, which EXISTS and is tested but
+# which _trace.py does not yet call -- that gap is the whole reason both guards are still firing.
 _STOP_MARKERS = re.compile(
-    r"BudgetExhausted|should_stop|def\s+stop\b|StopTraining|budget_stop|raise\s+\w*Budget", re.I
+    r"BudgetExhausted|should_stop|def\s+stop\b|StopTraining|budget_stop|BudgetStopper"
+    r"|BudgetReached|count_prior_train_rows|raise\s+\w*Budget",
+    re.I,
 )
 
 

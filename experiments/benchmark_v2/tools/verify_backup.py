@@ -34,6 +34,20 @@ THREE OUTCOMES, KEPT DISTINCT, because collapsing the last two loses the diagnos
     MISMATCH  present but the bytes differ            -> corruption
     MISSING   in the manifest, absent from the backup  -> payload loss
 
+⚠ RE-TRAINING A COPIED CELL MAKES THIS COMMAND REPORT "payload loss" ON A HEALTHY CELL, and the
+wording will read as corruption when nothing is wrong. ``.copy_manifest.json`` describes the files
+that were COPIED FROM v1; regenerate the cell and those files are legitimately gone, so every one of
+them comes back MISSING and the run exits 1. Six cells are candidates for exactly that re-train (the
+clpp cells short under the oracle-call ruling), so this is a live path rather than a hypothetical.
+
+A regenerated cell is no longer a copy, so it must not keep a copy's manifest: delete
+``.copy_manifest.json`` as part of the replacement and re-back-up from the new artifacts. Leave it in
+place and the next backup sweep reports payload loss on a cell whose payload is fine -- which is the
+same shape as freeze disabling the tooling that operates on the frozen tree, one step later and
+invisibly. Its ledger row needs the same treatment: PROVENANCE.csv is append-only and ``verify``
+selects ``origin == "copied"`` rows, so a stale copied row keeps re-hashing a v1 source that the
+cell no longer contains.
+
     python experiments/benchmark_v2/tools/verify_backup.py                    # whole tree
     python experiments/benchmark_v2/tools/verify_backup.py --cell saturn/seh/42
     python experiments/benchmark_v2/tools/verify_backup.py --sizes-only       # structure, NOT content
@@ -78,8 +92,7 @@ def _md5(p: Path, chunk: int = 1 << 20) -> str:
 def find_cells(root: Path):
     """Every backed-up cell dir holding a copy manifest, as (tag, arm_dir)."""
     return sorted(
-        (p.parent.parent.name + "/" + p.parent.name, p.parent)
-        for p in root.rglob(MANIFEST)
+        (p.parent.parent.name + "/" + p.parent.name, p.parent) for p in root.rglob(MANIFEST)
     )
 
 
@@ -89,8 +102,15 @@ def verify_cell(arm_dir: Path, sizes_only: bool = False) -> dict:
     try:
         manifest = json.loads(mp.read_text())
     except Exception as exc:
-        return {"dir": str(arm_dir), "error": f"unreadable {MANIFEST}: {exc}",
-                "n_expected": 0, "matched": 0, "mismatched": [], "missing": [], "extra": []}
+        return {
+            "dir": str(arm_dir),
+            "error": f"unreadable {MANIFEST}: {exc}",
+            "n_expected": 0,
+            "matched": 0,
+            "mismatched": [],
+            "missing": [],
+            "extra": [],
+        }
 
     files = manifest.get("files", {})
     matched, mismatched, missing = 0, [], []
@@ -121,8 +141,14 @@ def verify_cell(arm_dir: Path, sizes_only: bool = False) -> dict:
     }
     extra = sorted(on_disk - set(files))
 
-    return {"dir": str(arm_dir), "n_expected": len(files), "matched": matched,
-            "mismatched": mismatched, "missing": missing, "extra": extra}
+    return {
+        "dir": str(arm_dir),
+        "n_expected": len(files),
+        "matched": matched,
+        "mismatched": mismatched,
+        "missing": missing,
+        "extra": extra,
+    }
 
 
 def main():
@@ -149,8 +175,12 @@ def main():
 
     if a.cell:
         gen, tgt, seed = a.cell.split("/")
-        cells = [(f"{gen}_{tgt}_s{seed}/arm{a.arm}",
-                  a.backup_root / "train" / f"{gen}_{tgt}_s{seed}" / f"arm{a.arm}")]
+        cells = [
+            (
+                f"{gen}_{tgt}_s{seed}/arm{a.arm}",
+                a.backup_root / "train" / f"{gen}_{tgt}_s{seed}" / f"arm{a.arm}",
+            )
+        ]
         if not cells[0][1].is_dir():
             sys.exit(f"no such cell in the backup: {cells[0][1]}")
     else:
@@ -186,8 +216,10 @@ def main():
 
     # COVERAGE, asserted rather than assumed -- a verifier that only compares what it finds would
     # pass on a backup missing almost everything.
-    print(f"\nfiles verified: {tot_matched:,} of {tot_expected:,} recorded "
-          f"({100 * tot_matched / tot_expected if tot_expected else 0:.1f}%)")
+    print(
+        f"\nfiles verified: {tot_matched:,} of {tot_expected:,} recorded "
+        f"({100 * tot_matched / tot_expected if tot_expected else 0:.1f}%)"
+    )
     print(f"cells: {len(cells) - len(bad_cells)} ok, {len(bad_cells)} failing")
 
     if bad_cells:
@@ -196,8 +228,10 @@ def main():
         print("MISMATCH means corruption -- it landed and its bytes are not what we copied.")
         return 1
     if a.sizes_only:
-        print("\nStructure and sizes are intact. CONTENT WAS NOT CHECKED -- re-run without "
-              "--sizes-only before treating this backup as verified.")
+        print(
+            "\nStructure and sizes are intact. CONTENT WAS NOT CHECKED -- re-run without "
+            "--sizes-only before treating this backup as verified."
+        )
         print("exit 2: a structural pass is not a verification. 0 is reserved for content.")
         return 2
     print("\nEvery recorded file is present and its content matches the copy-time md5.")
