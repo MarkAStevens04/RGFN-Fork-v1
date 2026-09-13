@@ -1047,9 +1047,26 @@ the same way §6.8 freezes inputs for a comparative arm.
 RNG sidecar is captured inside the `make_checkpoint` wrapper, which fires part-way through an
 iteration's epilogue, while a resume re-enters at the TOP of the next iteration. Moving the write to
 the resume point is correct **whatever** later lands between those two, and tagging the sidecar with
-its iteration turns a stale one into a declared refusal rather than a silent wrong restore. **But it
-has NOT been shown to repair a defect that exists today**, and an earlier draft of this entry said it
-had. Measured: with the fix in, the restored value was IDENTICAL to the one the old placement
+its iteration turns a stale one into a declared refusal rather than a silent wrong restore. **For the RNG it has NOT been shown to repair a defect that exists today**, and an
+earlier draft of this entry said it had — but **applying the same reasoning to the LIBRARY sidecar
+found one that is demonstrated.** `make_checkpoint` fires inside the validation block
+(`trainer.py:359`) and the dynamic-library promotion runs **twenty-nine lines later, in the same
+iteration** (`on_update_fragments_library`, `trainer.py:388`). So a library sidecar written inside
+`make_checkpoint` captures the vocabulary as it stood BEFORE that iteration's promotion, and a resume
+from that checkpoint loses the batch. Proven from the harness's own artifacts: the run wrote
+`additional_fragments/fragments_2.json` — the promotion happened — while its sidecar recorded **0
+promoted**. In production `valid_every_n_iterations = 250` against `DynamicLibrary.every_n_iterations
+= 1000` means a kill between the i=1000 checkpoint and the i=1250 one resumes with a library missing
+that promotion: `n_new_fragments = 400`, so **up to 400 fragments silently dropped**, on the exact
+requeue that `library_io` exists to make safe. The RNG survived the same ordering only because the
+end-of-run capture happens after `train()` returns, i.e. after the promotion.
+
+**`_save_guidance_models()` must NOT move with it.** It pairs with `last_gfn.pt`'s weights, so
+capturing it later would make the sidecar describe a model state one promotion ahead of the
+checkpoint it accompanies. The library is safe to move because promotion changes only
+`current_fragments` and the embedding rows are preallocated, so the vocabulary restores independently
+of the weights. **Two sidecars in one loop, captured at different points, and only one of them was at
+the resume point** — which is why the rule is per-artifact and not per-file. Measured: with the fix in, the restored value was IDENTICAL to the one the old placement
 produced, because nothing between `make_checkpoint` and the end of the loop consumes randomness — the
 library promotion is the only thing there and it takes the `mean_reward` branch, which draws none. So
 record it as a defensible placement with a stated rationale, not as a fix for an observed production
