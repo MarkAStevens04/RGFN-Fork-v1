@@ -50,6 +50,19 @@ returned ``unknown`` for twelve cells of whichever one it missed, silently. Veri
 real v1 run dirs: rgfn seh/clpp/drd2 -> SehMoleculeProxy / OracleRewardProxy / DRD2Proxy, scent
 seh/6td3 -> SehMoleculeProxy / DockingBridgeProxy, every one ``cached=yes`` by AST.
 
+AND VERIFIED AGAINST THE MATERIALISED SHAPE, WHICH IS A DIFFERENT CLAIM. A trained run dir and a
+materialised arm-A dir are not the same artifact: the second carries only what the copier chose, so a
+resolver proven on five trained dirs has not been proven on the thing it is actually pointed at. That
+gap was real -- ``materialise_arm_a`` copied a hand-written file list matching SCENT's shape and the
+bridge shape and nothing RGFN writes, so a materialised RGFN cell carried NO config record and still
+looked complete. Tested here on a fixture holding ``logs/`` alone, with no run_config.yaml and no
+trace: resolves ``SehMoleculeProxy``, ``cached=yes``. And the negative, which is the pre-fix state:
+a cell carrying no config record at all resolves to ``None`` with its reason, never to a guess.
+
+Note what that separates. "Does this resolver read the shape" is answerable here; "does the copier
+deliver the shape" is not, and belongs to whoever owns the copier. Both were ``unknown`` for the same
+cell before, which is why they had to be pulled apart.
+
     python experiments/benchmark_v2/tools/measure_repeat_rate.py --arm a
     python experiments/benchmark_v2/tools/measure_repeat_rate.py --arm a --csv /tmp/repeat.csv
 """
