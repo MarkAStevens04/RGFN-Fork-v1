@@ -163,7 +163,7 @@ def main() -> int:
     )
     if not candidates:
         print(
-            f"WARNING: no stop point in 2..{a.iterations-1} satisfies (half-1) %% {v} == 0; "
+            f"WARNING: no stop point in 2..{a.iterations-1} satisfies (half-1) % {v} == 0; "
             f"falling back to {half}, and the RNG comparison will be INVALID -- run A and run B "
             f"will validate at different iterations. Raise --iterations or lower --valid-every.",
             flush=True,
