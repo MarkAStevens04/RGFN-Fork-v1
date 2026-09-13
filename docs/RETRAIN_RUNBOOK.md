@@ -463,64 +463,39 @@ presented.** So a cached repeat does not spend budget, and `n_distinct` — not 
 what a cell is measured against. This aligns our budget with `CachedProxyBase.n_proxy_calls`, which
 already returns `len(self.cache)`; the framework's definition and ours no longer disagree.
 
-**⚠ THE RULING HAS TWO READINGS AND THEY DIFFER BY 13 CELLS vs 6 — AWAITING CONFIRMATION.**
+**THE RULING IS ALREADY UNAMBIGUOUS; WHAT IS OPEN IS NARROWER.** "Reached the oracle" resolves
+per path, because that is what reaching means:
 
-* **(a) UNIFORM DISTINCT** — 10,000 distinct training molecules for every generator on every target.
-  **13 cells fail**, including all 8 landed S3-GFN cells; `s3gfn_drd2` would need ~29,000
-  presentations to reach 10,000 distinct, ~2.9× its current training.
-* **(b) PER-PATH** — distinct where the reward CACHES, rows where it does not, on the grounds that an
-  uncached repeat genuinely does re-invoke the model. **6 cells fail**, all ClpP.
+    cached path     a repeat is WITHHELD   -> reached = DISTINCT
+    uncached path   a repeat RE-INVOKES    -> reached = ROWS
 
-**THE EVIDENCE FAVOURS (a), from the convention arm A exists to match.** §1 defines arm A as "the PMO
-convention the competitors' own papers use". PMO's own harness
-(`external/s3gfn/experiments/pmo/main/optimizer.py:150-173`) canonicalises and then:
+So the ruling is satisfied by distinct on 48 of the 54 cells to be trained, and by **rows** on the
+other six (`rxnflow` × {seh, drd2} × 3 seeds, whose `SEHFrozenReward` / `DRD2FrozenReward` carry
+`_cache=0`). `BudgetStopper` gates on `n_train_distinct` everywhere, which implements the ruling on
+the 48 and **overshoots on the six** — stopping at 320,000 distinct there means the cell has already
+made more than 320,000 real invocations, at ~89 GPU-h each.
 
-    smi = Chem.MolToSmiles(mol)
-    if smi in self.mol_buffer:
-        pass                      # <- the evaluator is NOT called; a repeat is FREE
-    else:
-        self.mol_buffer[smi] = [float(self.evaluator(smi)), len(self.mol_buffer)+1]
+**"Distinct everywhere" is not a third reading of the budget — it is a description of the current
+code.** Adopting it would ratify that overshoot as policy rather than decide anything. Do not put it
+as a choice; the choice below is the real one.
 
-and its budget check is `len(self.mol_buffer) > self.max_oracle_calls` — a dict keyed by canonical
-SMILES. **So under the convention we claim to be matching, a repeat is free FOR EVERY GENERATOR,
-cached provider or not, and the budget is distinct molecules.** Our uncached surrogate rewards are
-an implementation deviation from that convention, not a property of the generator to charge it for.
-Reading (b) is the literal reading of "reached the oracle" given OUR implementation, and it is our own
-invention rather than the literature's.
+**THE OPEN QUESTION, for those six cells only:**
 
-**AND THE PENDING CHOICE DOES NOT BLOCK THE LAUNCH.** Checked 2026-09-12 across all 54 `generate`
-cells: **every one is on a CACHED path**, so (a) and (b) give the identical budget for all of them.
-The three reaction-GFNs reach `CachedProxyBase` on every target, and the only competitor cells left to
-train are the 18 on 6TD3-B, which is docking and therefore cached.
+* **gate on ROWS** — implements the ruling literally, no code change to the reward classes, and
+  rxnflow's surrogate cells stay measured the way the landed competitors were.
+* **ADD THE MEMO** — give `SEHFrozenReward` / `DRD2FrozenReward` the SMILES memoisation PMO's own
+  harness has (`optimizer.py:168-172`: a buffer hit skips the evaluator entirely). The six become
+  cached, distinct becomes correct for them, and the two rules coincide with no uncached path left.
 
-    competitor    6td3b   CACHED   18      rgfn/scent  seh,drd2,clpp,6td3b  CACHED  24
-    rgfn/scent    6td3b   CACHED    6      rxnflow     clpp, 6td3b          CACHED   6
-                                           rxnflow     seh, drd2        NOT CACHED   6
-
-**48 of 54 are cached and unaffected by the choice.** **⚠ SIX ARE NOT: `rxnflow` × {seh, drd2} × 3
-seeds.** RxnFlow is an external bridge in `validation/generators/`, not an upstream-proxy path, so it
-carries the same uncached `SEHFrozenReward` / `DRD2FrozenReward` the competitors do — verified at the
-class, `_cache=0` in both, against `_cache=7` in its `DockingBridgeReward`. **Do not classify RxnFlow
-with RGFN and SCENT from the taxonomy; its surrogate path is a competitor's.**
-
-**And on those six the choice is not bookkeeping, it is an OVERSHOOT.** `BudgetStopper` halts at
-`n_train_distinct >= budget` and calls that "molecules this cell has sent to the oracle" — true only
-where a repeat is withheld. Where nothing caches, every presentation was already a real invocation, so
-stopping at 320,000 *distinct* means the cell has made **more** than 320,000 real calls. Six cells at
-~89 GPU-h each, silently over budget.
-
-**THE FIX THAT COLLAPSES THE QUESTION: give the uncached paths the memo PMO's own harness has.** PMO
-canonicalises and memoises by SMILES — that is not incidental, it is *how* the budget is defined
-there. Adding it to `SEHFrozenReward` and `DRD2FrozenReward` makes reading (a) exactly right
-everywhere rather than approximately right in most places, removes the overshoot at its source rather
-than special-casing the stop, and leaves no uncached path for (a) and (b) to disagree about.
-
-For the other 48 the question decides only **how many ALREADY-LANDED competitor cells are short** —
-13 or 6 — and nothing about what the re-run trains to.
-
-**Nothing is lost either way**: both counters are written to every trace row and into `arm_meta`, and
-the gate is one property (`TraceWriter.n_train_distinct`) read in two places, so switching is a
-definition change rather than a hunt through call sites.
+**AND THE MEMO IS NOT A CLEAN EQUALISATION — declare this rather than discover it.** Those two classes
+are what **32 already-landed, frozen cells** ran on, uncached (`reinvent`, `saturn`, `tango`, `s3gfn`,
+`fraggfn` on seh/drd2, plus `synformer` drd2). Under the ruling those stay budget-matched on ORACLE
+CALLS, which is the declared axis, so parity is not broken. What changes is **molecules seen per
+call**: a cached rxnflow at 10,000 distinct has seen more than an uncached competitor at 10,000
+presentations. That is the advantage RGFN and SCENT already have — so the memo puts **rxnflow with its
+own family rather than with the competitors**, which is the opposite of "comparable to the competitors
+by construction", and the 32 frozen cells cannot be re-run to match. A permanent stated limitation
+either way; the choice decides which side rxnflow sits on.
 
 **THE COST UNDER (b) IS SIX CELLS, all on ClpP** — measured, not estimated:
 
