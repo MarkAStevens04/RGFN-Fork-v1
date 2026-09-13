@@ -31,6 +31,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from validation.generators._budget_stop import BudgetStopper, arm_b_budget
 from validation.generators._trace import (
     ARM_A_ORACLE_CALLS,
     BudgetCheckpointer,
@@ -240,11 +241,33 @@ def main() -> None:
 
     arm_a = BudgetCheckpointer(trace, ARM_A_ORACLE_CALLS, _save_arm_a, tag="RXN-FR")
 
+    # ARM B: the oracle-call STOP. Wired HERE and not inherited, because RxnFlow does not go through
+    # `attach_proxy_trace` -- it uses the TracedReward shape and drives the budget from this hook.
+    # Wiring the stop only into attach_proxy_trace therefore covered RGFN and SCENT and left
+    # RxnFlow's 12 arm-B cells with NO stop at all: they would have run to the config's 5,000 steps,
+    # roughly 155,000 calls against a declared 320,000, and the capability guards would have passed
+    # because the stop exists in _trace.py -- an existence check standing in for a capability check,
+    # one file over from where the same defect was fixed today.
+    _arm_b_calls = arm_b_budget()
+    arm_b = (
+        BudgetStopper(trace, _arm_b_calls, trace.path, tag="RXN-FR-armB")
+        if _arm_b_calls is not None
+        else None
+    )
+    if arm_b is not None:
+        print(
+            f"[RXN-FR] arm-B stop armed at {_arm_b_calls:,} distinct training molecules", flush=True
+        )
+
     def _on_iteration(it: int) -> None:
         # Stamp the NEXT iteration's rows before checking the budget: _train_steps calls this after
         # train_batch, so rows scored from here belong to it+1.
         reward.set_step(it + 1)
         arm_a.note_iteration(it)
+        # LAST, and after arm A: note_iteration RAISES, and arm A can legitimately fire on the same
+        # boundary that ends the run.
+        if arm_b is not None:
+            arm_b.note_iteration(it)
 
     remaining = n_train_steps - loop._it
     if remaining > 0:

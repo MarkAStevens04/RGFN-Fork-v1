@@ -16,8 +16,10 @@
 #   * The budget lives on the ORACLE-CALL axis, so both the arm-A checkpoint and the arm-B stop are
 #     placed by the TRACE COUNTER and never by arithmetic. Measured: RGFN crossed 10,000 calls at
 #     iteration 83, not the 100 that "100 trajectories/iteration" predicts (v2_pilot arm_a.json),
-#     and RxnFlow's dedup cache makes its effective rate ~31/iter against a nominal 64. Iteration
-#     counts would give 603,000 / 320,000 / 155,000 calls for one declared budget of 320,000.
+#     and RxnFlow reaches its reward with only ~31 of a nominal 64 per iteration (that is the VALID
+#     -molecule count, not a dedup -- measured 187 rows / 181 distinct, only 2 molecules repeated
+#     across iterations). Iteration counts would give 603,000 / 320,000 / 155,000 calls for one
+#     declared budget of 320,000.
 #   * A reaction-GFN cell trains ONCE, straight through to arm B, and arm A is EXTRACTED from the
 #     checkpoint taken on the way past. Two runs at one seed would not agree on a docking target --
 #     the reward is genuinely stochastic -- so extraction is the only way both arms describe one
@@ -131,12 +133,36 @@ if [ "$TRAIN_ARM" = b ]; then
   # able to train. It stopped being the same thing the moment arm B needed a hook in another file.
   # A guard that reads the other file is the only kind that notices. It deletes itself -- wire the
   # hook and it stops firing, for the one reason it should.
-  if ! grep -q "budget_stop\|BudgetStopper" validation/generators/_trace.py 2>/dev/null; then
-    echo "FATAL: arm B requested for $CELL_TAG, but validation/generators/_trace.py does not" >&2
-    echo "       consume the budget stop. validation/generators/_budget_stop.py exists and is" >&2
-    echo "       tested, but nothing calls it, so this run would train to WALLTIME rather than to" >&2
+  # THE CHECK IS PER-GENERATOR AND LOOKS FOR A CALL, NOT A MENTION. Two ways to get this wrong,
+  # both of which I did before writing it this way:
+  #
+  #   1. Grepping _trace.py alone is an EXISTENCE check standing in for a CAPABILITY check. The stop
+  #      lives there and is reached via attach_proxy_trace -- which RGFN and SCENT call and RXNFLOW
+  #      DOES NOT. RxnFlow drives the budget from its own _on_iteration hook, so it had no arm-B stop
+  #      at all while this guard passed, and its 12 cells would have run to ~155,000 calls against a
+  #      declared 320,000.
+  #   2. Grepping for the bare NAME matches prose. A comment reading "RxnFlow does not go through
+  #      attach_proxy_trace" satisfies a name-grep and reports the opposite of what it says.
+  #
+  # So: resolve the file that actually drives THIS generator, and require a CALL in it.
+  case "$GEN" in
+    rgfn)    _stop_src=glue/fixed_reward/pipeline.py ;;
+    scent)   _stop_src=validation/generators/scent/fixed_reward.py ;;
+    rxnflow) _stop_src=validation/generators/rxnflow/run_rxnflow_fixed.py ;;
+    *) echo "FATAL: arm B requested for '$GEN', whose arm-B wiring has never been verified." >&2
+       echo "       Only rgfn, scent and rxnflow have been checked. Add it here deliberately, after" >&2
+       echo "       confirming the stop is actually reached on that generator's path." >&2
+       exit 2 ;;
+  esac
+  if ! grep -qE "attach_proxy_trace\(|BudgetStopper\(" "$_stop_src" 2>/dev/null; then
+    echo "FATAL: arm B requested for $CELL_TAG, but $_stop_src neither calls attach_proxy_trace()" >&2
+    echo "       nor constructs a BudgetStopper(). This run would train to WALLTIME rather than to" >&2
     echo "       ${ARM_B_CALLS} oracle calls -- and would look completely healthy doing it." >&2
-    echo "       Wire BudgetStopper into _trace.py's on_end_sampling hook, then re-submit." >&2
+    exit 2
+  fi
+  if ! grep -qE "BudgetStopper\(" validation/generators/_budget_stop.py \
+          validation/generators/_trace.py "$_stop_src" 2>/dev/null; then
+    echo "FATAL: no BudgetStopper is constructed anywhere on $GEN's path." >&2
     exit 2
   fi
   export BENCHMARK_V2_ARM_B_CALLS="$ARM_B_CALLS"
