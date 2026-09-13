@@ -206,6 +206,8 @@ def verify_train(cell: Cell, arm: str) -> Result:
     phases = set()
     max_distinct = 0
     n_train_rows = 0
+    n_train_distinct = 0
+    train_smiles: set = set()
     try:
         with open(tp) as fh:
             rd = csv.DictReader(fh)
@@ -227,6 +229,13 @@ def verify_train(cell: Cell, arm: str) -> Result:
                 phases.add(ph)
                 if ph == "train":
                     n_train_rows += 1
+                    _smi = row.get("smiles")
+                    if _smi:
+                        train_smiles.add(_smi)
+                    try:
+                        n_train_distinct = max(n_train_distinct, int(row["n_train_distinct"]))
+                    except (TypeError, ValueError, KeyError):
+                        pass
                 try:
                     max_distinct = max(max_distinct, int(row.get("n_distinct") or 0))
                 except ValueError:
@@ -280,11 +289,74 @@ def verify_train(cell: Cell, arm: str) -> Result:
     # Only shown when the counter genuinely ran AHEAD of the training rows. On a corrupted
     # (non-monotone) trace the difference can go negative, and "-5,997 non-train rows" reads as
     # nonsense on top of the monotonicity failure that already explains it.
+    train_distinct = n_train_distinct or len(train_smiles)
     eval_pad = last_scored - n_train_rows
+
+    # ⛔ THE BUDGET IS MEASURED ON DISTINCT OR ON ROWS DEPENDING ON THE PROVIDER, and the old check
+    # here gated on ROWS unconditionally. Rows are always >= distinct, so it COULD NOT FAIL FOR THE
+    # RIGHT REASON: the first smoke's arm A held 600 train rows for 500 distinct against a 600
+    # budget -- 16.7% under -- and was ACCEPTED at "600 / 600 (100%)", with the number 500 printed
+    # on the `distinct <= scored` line directly below, a check asserting something trivially true.
+    # The evidence was on screen and the verdict came from elsewhere.
+    #
+    # But a NAIVE distinct gate is wrong the other way and fails 8 landed cells that are not short:
+    # SEHFrozenReward and DRD2FrozenReward hold no cache, so every presentation IS a real oracle
+    # invocation and a low unique% is MODE COLLAPSE to report, not a shortfall to repair. Applied
+    # that way s3gfn_drd2 (34-45% unique) reads as 60% short and three healthy cells are re-run for
+    # nothing.
+    #
+    # IMPORTED, NEVER RESTATED. measure_repeat_rate._verdict is three load-bearing branches; it
+    # resolves the provider from the cell's OWN config and reads cache status out of the class body
+    # by AST, so it cannot disagree with the code. `unknown` never passes.
+    verdict = basis = None
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from measure_repeat_rate import measure  # noqa: PLC0415
+
+        _row = measure(cell, arm)
+        verdict, basis = _row.get("verdict"), _row.get("basis")
+    except Exception as exc:  # noqa: BLE001
+        verdict, basis = "unknown", f"could not measure ({exc})"
+
+    # THE SPLIT: a cell the driver is about to TRAIN is gated; a cell already accepted and FROZEN is
+    # REPORTED. Failing a frozen cell either leaves it unverifiable -- the marker cannot be rewritten
+    # into a read-only directory -- or pressures someone into unfreezing artifacts to record a budget
+    # fact. SHORT is a property of the budget, not of the data, and the data is intact. Six accepted
+    # clpp cells are short under the ruling and the researcher has not yet ruled re-train vs report;
+    # this reports and pre-empts nothing.
+    # A FROZEN CELL REPORTS, WHATEVER THE VERDICT -- including `unknown`. The landed v1 cells were
+    # copied forward with a run_config.yaml that carries no `reward.type` and no gin binding under
+    # logs/, so the provider cannot be resolved for ANY of them and they all read `unknown`. Failing
+    # 53 accepted cells because their copied provenance predates the resolver is the same
+    # fails-everything defect as gating on rows was a passes-everything one: it would say nothing
+    # about any cell. The finding is still PRINTED in full, with the counts and the repeat rate.
+    _frozen = cell.frozen(arm)
     r.add(
-        "budget reached (train rows)",
-        n_train_rows >= budget * BUDGET_TOLERANCE,
-        f"{n_train_rows:,} / {budget:,} ({100*n_train_rows/max(budget,1):.0f}%)"
+        f"budget reached ({basis or 'unresolved'})"
+        + ("  [REPORTED, not gated: cell is frozen]" if _frozen and verdict != "ok" else ""),
+        verdict == "ok" or _frozen,
+        f"{basis or 'not measured'}"
+        + f"   [{n_train_rows:,} presented, {train_distinct:,} distinct, "
+        + f"{100*(1-train_distinct/max(n_train_rows,1)):.1f}% repeats]"
+        + (
+            (
+                "   -- SHORT under the 2026-09-13 ruling, left as a report because this cell is "
+                "already accepted and frozen; re-train vs report is the researcher's call"
+                if verdict == "SHORT"
+                else "   -- provider unresolvable from this cell's copied provenance, so it has "
+                "NOT been measured against the ruling; reported rather than failed because the "
+                "cell is frozen and the gap is in the record, not the training"
+            )
+            if _frozen and verdict != "ok"
+            else ""
+        ),
+    )
+    # Presentations reported, never gated: the right answer to "what did this run present", and the
+    # trace-continuity checks below need it.
+    r.add(
+        "train rows (presented, not the gate)",
+        True,
+        f"{n_train_rows:,}"
         + (
             f"   [counter reads {last_scored:,}; {eval_pad:,} of those are non-train]"
             if eval_pad > 0
@@ -457,18 +529,27 @@ def verify_campaign(cell: Cell, arm: str) -> Result:
             prov = s.get("depth_provenance")
             dm = (s.get("depth_mix") or {}).get("hub_batching") or {}
             if prov is None:
-                r.add("depth provenance", False,
-                      "summary.json predates the depth_provenance marker -- re-run the campaign "
-                      "stage so the required depth output is evidenced rather than assumed")
+                r.add(
+                    "depth provenance",
+                    False,
+                    "summary.json predates the depth_provenance marker -- re-run the campaign "
+                    "stage so the required depth output is evidenced rather than assumed",
+                )
             elif prov != "ok":
                 r.add("depth provenance", False, prov)
             elif s.get("walked_depth_hist") is None:
-                r.add("depth provenance", False,
-                      "depth_provenance says ok but walked_depth_hist is null -- contradictory")
+                r.add(
+                    "depth provenance",
+                    False,
+                    "depth_provenance says ok but walked_depth_hist is null -- contradictory",
+                )
             else:
-                r.add("depth provenance", True,
-                      f"walked {s['walked_depth_hist']}, "
-                      f"depth-0 modes {dm.get('depth0_mode_frac')}")
+                r.add(
+                    "depth provenance",
+                    True,
+                    f"walked {s['walked_depth_hist']}, "
+                    f"depth-0 modes {dm.get('depth0_mode_frac')}",
+                )
 
     # §6.3 recipes exist AND belong to this run.
     #
