@@ -96,10 +96,25 @@ So **max is correct for every v1 cell**, and spot-checking six copied cells conf
 took the right file in each (10,000 / 10,048 / 10,024 as expected, never a sum). No existing cell is
 short or inflated. The continuation rule is needed **prospectively only**, for v2 arm-B requeues.
 
-**The discriminator is the `step` column**: disjoint contiguous ranges → continuation → SUM;
-overlapping → alternatives → MAX; blank steps → fall back to MAX **and say so** rather than guess
-(SynFormer has no step values, and falling back is what makes its case come out right). One
-implementation, consumed by both the stop and the reporter — two copies of this rule will drift.
+**But the arm-B STOP does not need the discriminator at all** — `copy_forward` collapses v1's
+alternatives on the way in (it resolves the rotation and lands the real history as `trace.csv`, which
+is why no v2 cell has siblings). So a `trace.csv.N` inside a v2 TRAINING directory can only have come
+from a v2 requeue, which is always a continuation. Inside a training run, SUM. Stage 2's re-invocation
+does create an alternatives-shaped rotation, but that happens after the cell is frozen and writes to
+its own directory, so the stop never sees it.
+
+**Implemented 2026-09-12 as `best_trace(d, combine=...)`**, defaulting to `"max"` so every v1 path is
+bit-identical, with `write_arm_meta` passing `"sum"` because it runs inside the training run. Three
+details that are not obvious:
+
+* **`n_distinct` is NOT summable** — it is a per-round dedup, so adding two rounds double-counts every
+  molecule seen in both. It is recomputed as a true union over SMILES.
+* **The caller declares the shape; the function does not guess.** An auto-detector that silently picks
+  wrong is the failure this family keeps producing.
+* **Asking to sum files whose `step` ranges overlap RAISES** rather than double-counting — the check
+  that can fail (§6.10). Where steps are blank (SynFormer writes none) the overlap check cannot run,
+  so the result carries `sum_verified: false` rather than choosing silently: legitimate for an arm-A
+  requeue, wrong for a superseded partial, and indistinguishable from inside the function.
 
 **Consequence for scheduling, since a call budget is not an iteration budget:** at a true 320,000
 calls RGFN needs ~2,650 iterations, SCENT 5,000, RxnFlow ~10,300 — so RGFN roughly HALVES and RxnFlow

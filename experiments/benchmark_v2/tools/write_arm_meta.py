@@ -72,7 +72,11 @@ def build(
     job_id: str | None,
     launcher: str | None,
 ) -> dict:
-    t = best_trace(run_dir) or {}
+    # SUM, not max: this runs inside a TRAINING run, where a trace.csv.N can only have come from a
+    # requeue -- two disjoint halves of one run. copy_forward already collapsed v1's alternatives on
+    # the way in, so the ambiguous shape cannot reach here. max would record ONE round's budget and
+    # fail the cell's own budget gate while it is genuinely complete (SCENT arm B requeues 2-3x).
+    t = best_trace(run_dir, combine="sum") or {}
     # DEDUPLICATED: the per-generator glob lists OVERLAP by design. S3-GFN's are
     # ["*/model_state*.pt", "*/*.pt", ...], so any file matching the first also matches the second
     # and a naive `+=` would report n_checkpoints twice its true value -- a count that later reads
