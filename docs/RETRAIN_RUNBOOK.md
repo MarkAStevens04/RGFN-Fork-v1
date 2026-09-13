@@ -881,6 +881,22 @@ The third is the sharpest: **a guard its own fix's documentation can satisfy fai
 running.** All three were repaired by asking for the thing rather than a proxy for it — a capability
 probe, a superset pattern that says it is one, and an anchored assignment plus a use.
 
+**AND THE MATCHED PAIR: conclusions too strong for their evidence.** The three above are predicates too
+WEAK for their intent. The same day produced three of the opposite kind, from three different people:
+
+| the evidence | correct? | the step after it |
+|---|---|---|
+| "rxnflow scores 64 then 19–33 per step" | yes | attributed to a CACHE; it is `valid_smis` dropping invalid molecules — no cache exists in that path |
+| "`self.sign` appears nowhere in the repo" | yes, **of the tree swept** | stated as a fact about the repo; that branch predated the commit adding it |
+| "`rxnflow SEHFrozenReward _cache=0`" | yes, and printed | classified past from the class hierarchy — RxnFlow is an external bridge, not an upstream-proxy path |
+
+**Nothing in the output distinguishes "measured and verified" from "measured and explained."** In each
+case the measurement was right, the confidence came from having measured, and the conclusion came from
+somewhere else — a mechanism assumed, a scope assumed, a taxonomy assumed. These are the two ways the
+same output lies: **a predicate too weak for its intent passes what it should catch; a conclusion too
+strong for its evidence carries authority it did not earn.** Ask of any finding: *which part of this
+did I measure, and which part did I supply?*
+
 **Before recording any verification as passed, state its failing case.** If you cannot name an input
 that makes it fail, it is not a check — find one that distinguishes, or say plainly that the property
 is unverified. A negative result is worth stating only when a positive one was possible.
