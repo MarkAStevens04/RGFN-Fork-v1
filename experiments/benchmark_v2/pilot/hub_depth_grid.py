@@ -54,9 +54,22 @@ LOWER_IS_BETTER = {"6td3", "clpp"}
 
 def run_pick(records: Path, out: Path, higher: bool) -> Path:
     out.parent.mkdir(parents=True, exist_ok=True)
-    cmd = [sys.executable, str(PICK), "--records", str(records), "--out", str(out),
-           "--pool", "all", "--order", "flow_desc", "--n-hubs", "200",
-           "--higher-is-better", "true" if higher else "false"]
+    cmd = [
+        sys.executable,
+        str(PICK),
+        "--records",
+        str(records),
+        "--out",
+        str(out),
+        "--pool",
+        "all",
+        "--order",
+        "flow_desc",
+        "--n-hubs",
+        "200",
+        "--higher-is-better",
+        "true" if higher else "false",
+    ]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(f"pick_hubs failed for {records}: {r.stderr[-400:]}")
@@ -95,22 +108,35 @@ def main():
             cap = CAPS.get(gen)
             deepest = max(hist) if hist else None
             mode_depth = max(hist, key=hist.get) if hist else None
-            results.append({
-                "cell": cell, "generator": gen, "target": tgt, "seed": seed,
-                "cap": cap, "has_library": gen in HAS_LIBRARY,
-                "n_ranked": n, "top_depth_hist": hist,
-                "modal_depth": mode_depth,
-                "modal_is_cap_minus_1": (cap is not None and mode_depth == cap - 1),
-            })
+            results.append(
+                {
+                    "cell": cell,
+                    "generator": gen,
+                    "target": tgt,
+                    "seed": seed,
+                    "cap": cap,
+                    "has_library": gen in HAS_LIBRARY,
+                    "n_ranked": n,
+                    "top_depth_hist": hist,
+                    "modal_depth": mode_depth,
+                    "modal_is_cap_minus_1": (cap is not None and mode_depth == cap - 1),
+                }
+            )
 
-    print(f"{'cell':<16} {'seed':>4} {'cap':>4} {'lib':>4} {'modal':>6} {'=cap-1':>7}  top{a.top_n} depth histogram")
+    print(
+        f"{'cell':<16} {'seed':>4} {'cap':>4} {'lib':>4} {'modal':>6} {'=cap-1':>7}  top{a.top_n} depth histogram"
+    )
     print("-" * 96)
-    for r in sorted(results, key=lambda x: (x.get("generator", ""), x.get("target", ""), x["seed"])):
+    for r in sorted(
+        results, key=lambda x: (x.get("generator", ""), x.get("target", ""), x["seed"])
+    ):
         if "error" in r:
             print(f"{r['cell']:<16} {r['seed']:>4}  ERROR {r['error']}")
             continue
-        print(f"{r['cell']:<16} {r['seed']:>4} {str(r['cap']):>4} {('yes' if r['has_library'] else 'no'):>4} "
-              f"{str(r['modal_depth']):>6} {str(r['modal_is_cap_minus_1']):>7}  {r['top_depth_hist']}")
+        print(
+            f"{r['cell']:<16} {r['seed']:>4} {str(r['cap']):>4} {('yes' if r['has_library'] else 'no'):>4} "
+            f"{str(r['modal_depth']):>6} {str(r['modal_is_cap_minus_1']):>7}  {r['top_depth_hist']}"
+        )
 
     testable = [r for r in results if "error" not in r and r.get("cap")]
     lib_less = [r for r in testable if not r["has_library"]]

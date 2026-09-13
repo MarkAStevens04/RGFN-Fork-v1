@@ -18,8 +18,10 @@ def main():
     ap.add_argument("--results", type=Path, required=True)
     a = ap.parse_args()
 
-    print(f"{'arm':<6} {'msd':>4} | {'HB modes@100':>12} {'hubs':>5} {'hub depths':>16} "
-          f"{'modes by depth':>20} {'depth-0 share':>13} | {'BC modes@100':>12} {'BC unjoined':>11}")
+    print(
+        f"{'arm':<6} {'msd':>4} | {'HB modes@100':>12} {'hubs':>5} {'hub depths':>16} "
+        f"{'modes by depth':>20} {'depth-0 share':>13} | {'BC modes@100':>12} {'BC unjoined':>11}"
+    )
     print("-" * 122)
     for name, _label in ARMS:
         p = a.results / f"depthmix_{name}.json"
@@ -42,10 +44,16 @@ def main():
     base = a.results / "depthmix_base.json"
     if base.exists():
         d = json.loads(base.read_text())
-        print(f"full enumerated hub set ({d.get('n_hubs_in_hubs_csv')} hubs), depth histogram: "
-              f"{d.get('depth_of_full_hub_set')}")
-        print("NOTE: this is the v1 REWARD-PRE-FILTERED hub set (TOPK=1000), not `--pool all`, and it")
-        print("      runs on a 320,000-call checkpoint. It answers the DEPTH question, not viability.")
+        print(
+            f"full enumerated hub set ({d.get('n_hubs_in_hubs_csv')} hubs), depth histogram: "
+            f"{d.get('depth_of_full_hub_set')}"
+        )
+        print(
+            "NOTE: this is the v1 REWARD-PRE-FILTERED hub set (TOPK=1000), not `--pool all`, and it"
+        )
+        print(
+            "      runs on a 320,000-call checkpoint. It answers the DEPTH question, not viability."
+        )
 
 
 if __name__ == "__main__":
