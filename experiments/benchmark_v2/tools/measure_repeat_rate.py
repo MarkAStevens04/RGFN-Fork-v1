@@ -36,14 +36,19 @@ EVERY CELL GETS A ROW, including the 100%-unique ones. An absent row means "not 
 gap" -- the two must not look the same, which is the same rule the project applies to FragGFN's
 empty routes.json and SCENT's zero promoted fragments.
 
-⚠ OUR OWN GENERATORS RESOLVE TO ``unknown`` TODAY, AND THAT IS DELIBERATE RATHER THAN AN OVERSIGHT.
-RGFN and SCENT are gin-configured, so their run dirs do not carry the ``reward.type`` /
-``reward.subprocess`` keys this dispatch reads, and no cell of either exists yet to read. Their
-providers ARE cached -- ``SehMoleculeProxy`` and ``DRD2Proxy`` both subclass ``CachedProxyBase``, and
-``OracleRewardProxy`` does too -- but wiring that resolution now would mean inventing the config
-shape before a single cell has produced one, which is how a lookup ends up confidently pointing at
-the wrong class. Wire it against the first landed RGFN/SCENT cell, from what that cell actually
-writes. Until then the rows say ``unknown`` with the reason, which is the honest state.
+OUR OWN GENERATORS RESOLVE THROUGH A SECOND CONFIG SHAPE, and both shapes were found by reading a
+real run rather than by being told. RGFN and SCENT are gin-configured and write no ``reward.type``,
+so their proxy is read from the gin scope binding the run itself recorded:
+
+    rgfn   logs/operative_config.txt   proxy/singleton.constructor = @SehMoleculeProxy
+    scent  operative_config.gin        proxy/singleton.constructor = @DockingBridgeProxy
+
+Note those are DIFFERENT FILENAMES IN DIFFERENT PLACES -- a ``.txt`` under ``logs/`` versus a ``.gin``
+in the run root. I was told "config.gin / operative_config.gin in the run dir", which is exactly
+right for SCENT and exactly wrong for RGFN, so a resolver built on that description alone would have
+returned ``unknown`` for twelve cells of whichever one it missed, silently. Verified against five
+real v1 run dirs: rgfn seh/clpp/drd2 -> SehMoleculeProxy / OracleRewardProxy / DRD2Proxy, scent
+seh/6td3 -> SehMoleculeProxy / DockingBridgeProxy, every one ``cached=yes`` by AST.
 
     python experiments/benchmark_v2/tools/measure_repeat_rate.py --arm a
     python experiments/benchmark_v2/tools/measure_repeat_rate.py --arm a --csv /tmp/repeat.csv
@@ -53,6 +58,7 @@ from __future__ import annotations
 import argparse
 import ast
 import csv
+import re
 import sys
 from pathlib import Path
 
@@ -77,21 +83,92 @@ PROVIDER_SOURCE["scent"] = "validation/generators/scent/docking_bridge_proxy.py"
 PROVIDER_SOURCE["rgfn"] = None  # upstream proxies; resolved separately
 
 
-def _resolve_provider(cfg: dict) -> tuple[str | None, str]:
-    """(class name, why). Mirrors build_provider's dispatch, driven by the cell's own config."""
+# RGFN's proxy is bound by gin scope, and the run records it. Read from a REAL run rather than
+# assumed: /scratch/.../rgfn_seh_5k/seed42/logs/operative_config.txt carries
+#     proxy/singleton.constructor = @SehMoleculeProxy
+# The file is `logs/operative_config.txt` -- a .txt under logs/, NOT a `config.gin` in the run root,
+# which is what it was described to me as. A resolver built on the described name would have found
+# nothing and returned `unknown` for every RGFN cell, silently, which is the failure this whole
+# resolver exists to avoid.
+#
+# TWO GIN SHAPES, BOTH FOUND BY LOOKING RATHER THAN BY BEING TOLD. RGFN writes .txt files under
+# logs/; SCENT writes .gin files in the run ROOT. I was told "config.gin / operative_config.gin in
+# the run dir", which is exactly right for SCENT and exactly wrong for RGFN -- so a resolver built on
+# either description alone would have silently returned `unknown` for twelve cells of the other.
+#     rgfn   logs/operative_config.txt   proxy/singleton.constructor = @SehMoleculeProxy
+#     scent  operative_config.gin        proxy/singleton.constructor = @DockingBridgeProxy
+#
+# The `^\s*proxy/` anchor is load-bearing: SCENT's config also binds
+# `path_cost_proxy/singleton.constructor = @PathCostProxy` four lines earlier, and an unanchored
+# match would take the path-cost proxy as the reward proxy.
+_GIN_PROXY = re.compile(r"^\s*proxy/singleton\.constructor\s*=\s*@(\w+)", re.M)
+_GIN_FILES = (
+    "logs/operative_config.txt",  # rgfn
+    "logs/config.txt",
+    "operative_config.gin",  # scent
+    "config.gin",
+)
+# Where an RGFN proxy class may be defined. DIRECTORIES, not a class->file map: the class name comes
+# from the run's own config and the file is found by searching, so adding a fifth proxy needs no edit.
+_PROXY_DIRS = (
+    "glue/proxies",
+    "rgfn/gfns/reaction_gfn/proxies",
+    "validation/generators",  # SCENT's DockingBridgeProxy lives with its bridge, not with ours
+)
+
+
+def _find_class_file(cls: str) -> Path | None:
+    for d in _PROXY_DIRS:
+        for p in sorted((REPO / d).rglob("*.py")):
+            try:
+                if re.search(rf"^class\s+{re.escape(cls)}\b", p.read_text(), re.M):
+                    return p
+            except Exception:
+                continue
+    return None
+
+
+def _resolve_provider(d: Path, cfg: dict) -> tuple[str | None, Path | None, str]:
+    """(class name, defining file, why). Driven by the CELL's own config, never by its target name.
+
+    TWO CONFIG SHAPES, BECAUSE THE PROJECT HAS TWO. The bridge generators write a YAML
+    ``run_config.yaml`` and this mirrors ``build_provider``'s dispatch over ``reward.type``; RGFN is
+    gin-configured and writes no such key, so its proxy is read from the gin scope binding the run
+    itself recorded. Both are the cell telling us what it used, which is the only authority that
+    cannot drift from what ran.
+    """
     reward = (cfg or {}).get("reward") or {}
     rtype = str(reward.get("type", "")).strip()
-    if not rtype:
-        return None, "run_config.yaml has no reward.type"
-    if rtype == "drd2":
-        return "DRD2FrozenReward", "reward.type=drd2"
-    if rtype == "seh_proxy":
-        if bool(reward.get("subprocess")):
-            return "SEHBridgeReward", "reward.type=seh_proxy, reward.subprocess=true"
-        return "SEHFrozenReward", "reward.type=seh_proxy, in-process"
-    if rtype == "docking":
-        return "DockingBridgeReward", "reward.type=docking"
-    return None, f"unrecognised reward.type={rtype!r}"
+    if rtype:
+        if rtype == "drd2":
+            cls, why = "DRD2FrozenReward", "reward.type=drd2"
+        elif rtype == "seh_proxy":
+            cls, why = (
+                ("SEHBridgeReward", "reward.type=seh_proxy, reward.subprocess=true")
+                if bool(reward.get("subprocess"))
+                else ("SEHFrozenReward", "reward.type=seh_proxy, in-process")
+            )
+        elif rtype == "docking":
+            cls, why = "DockingBridgeReward", "reward.type=docking"
+        else:
+            return None, None, f"unrecognised reward.type={rtype!r}"
+        return cls, None, why
+
+    for rel in _GIN_FILES:
+        p = d / rel
+        if not p.is_file():
+            continue
+        try:
+            m = _GIN_PROXY.search(p.read_text())
+        except Exception:
+            continue
+        if m:
+            cls = m.group(1)
+            f = _find_class_file(cls)
+            if f is None:
+                return None, None, f"{rel} binds @{cls}, but no file defines it"
+            return cls, f, f"{rel}: proxy/singleton.constructor = @{cls}"
+    return None, None, "no reward.type in run_config.yaml and no gin proxy binding in logs/"
 
 
 def _class_caches(src_path: Path, class_name: str) -> tuple[bool | None, str]:
@@ -185,16 +262,19 @@ def measure(cell, arm: str) -> dict:
     row["distinct"] = len(seen)
     row["unique_pct"] = f"{100*len(seen)/n:.1f}" if n else ""
 
-    cls, why = _resolve_provider(_read_config(d))
-    rel = PROVIDER_SOURCE.get(cell.generator)
+    cls, src, why = _resolve_provider(d, _read_config(d))
     if cls is None:
         row["evidence"] = f"provider unresolved: {why}"
         return row
     row["provider"] = cls
-    if rel is None:
-        row["evidence"] = f"{why}; ours, upstream proxy source not mapped here"
-        return row
-    cached, ev = _class_caches(REPO / rel, cls)
+    # A gin-resolved proxy carries its own defining file; a bridge provider is looked up by generator.
+    if src is None:
+        rel = PROVIDER_SOURCE.get(cell.generator)
+        if rel is None:
+            row["evidence"] = f"{why}; no provider source mapped for {cell.generator}"
+            return row
+        src = REPO / rel
+    cached, ev = _class_caches(src, cls)
     row["cached"] = {True: "yes", False: "no", None: "unknown"}[cached]
     row["evidence"] = ev
     row["verdict"], row["basis"] = _verdict(row, cell.arm_calls(arm) or 0)
