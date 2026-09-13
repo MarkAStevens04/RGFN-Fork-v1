@@ -7,11 +7,29 @@ count, and an iteration count is not a call budget for two of the three reaction
     RGFN     ~120.6 calls/iter -> 5,000 iters = ~603,000   (1.9x OVER a declared 320,000)
     SCENT      64.0 calls/iter -> 5,000 iters =  320,000   (exact -- it is SCENT's own arithmetic)
     RxnFlow    ~31   calls/iter -> 5,000 iters = ~155,000   (0.48x UNDER, and unreachable)
+               -- and that ~31 is the VALID-molecule count, not a dedup effect. See below.
 
 A 4x spread on the axis the campaign says it controls is not a budget. RGFN's figure is measured from
 its own pilot (``arm_a.json``: 10,007 calls at iteration 83), not derived from a nominal batch size —
-which is the point, since its nominal batch is 100 and RxnFlow's measured rate is half ITS nominal 64
-because a dedup cache absorbs re-proposed molecules.
+which is the point, since its nominal batch is 100 while RxnFlow's measured rate is half ITS nominal
+64.
+
+CORRECTION (2026-09-13): I first attributed RxnFlow's ~31/iter to a dedup cache absorbing
+re-proposed molecules. That was WRONG, and the trace says so: of 187 training rows across six
+iterations, 181 were distinct, only 2 molecules appeared in more than one iteration, and the
+per-iteration repeat count was 2/0/0/0/0/2. A dedup would have produced that pattern; so does simply
+not repeating. The real cause is `valid_smis` -- rxnflow/task.py:73 passes the batch with INVALID
+molecules dropped, so ~31 of 64 sampled molecules reach the reward. RxnFlow's seh/drd2 path holds no
+cache at all (SEHFrozenReward / DRD2FrozenReward have no `_cache`); only its docking bridge does.
+
+CONSEQUENCE FOR THE STOP ON THOSE SIX CELLS (rxnflow x {seh, drd2} x 3 seeds): with no cache, every
+presentation IS a real oracle invocation, so halting at 320,000 DISTINCT means the cell has already
+made distinct/(1 - repeat_rate) real calls. At the measured 3.2% repeat rate that is ~330,600, a
+~3.3% overshoot -- bounded and small, but real, and in the direction that flatters us. The clean fix
+is to give those two reward classes the memoisation PMO's own harness has
+(optimizer.py:150-173, a dict keyed by canonical SMILES), which makes distinct == invocations
+everywhere instead of almost everywhere. Not done here: it changes competitor-shared reward classes
+and is the researcher's call.
 
 ⚠ THE COUNT MUST SURVIVE A REQUEUE, AND THE LIVE COUNTER DOES NOT. ``TraceWriter.__init__`` sets
 ``n_scored`` and ``n_train_scored`` to 0 and THEN rotates the previous file to ``trace.csv.N``, with
