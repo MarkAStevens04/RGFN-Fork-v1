@@ -95,6 +95,13 @@ def build(
         "budget_calls": budget,
         # train ROWS -- see the module docstring. Never max(n_scored).
         "n_train_scored_at_checkpoint": t.get("train_rows") or t.get("n_scored"),
+        # THE MODE TRAVELS WITH THE VALUE. This writer sums across a requeue's rotations while
+        # copy_forward takes the max of a v1 cell's alternatives -- both correct for their own shape,
+        # and the same number meaning two things is exactly the ambiguity renaming this field was
+        # meant to kill. They coincide today only because no landed cell has two non-empty traces;
+        # the first requeued generated cell breaks the tie. Never compare the value without this.
+        "n_train_scored_combine": t.get("combined", "sum"),
+        "n_train_scored_sum_verified": t.get("sum_verified"),
         # the cumulative counter, kept as a DIAGNOSTIC so the gap between them stays visible.
         "n_total_scored_at_checkpoint": t.get("n_scored"),
         "checkpoint": _final_checkpoint(rels),
