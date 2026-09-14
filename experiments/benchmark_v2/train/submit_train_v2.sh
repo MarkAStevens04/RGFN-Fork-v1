@@ -196,6 +196,28 @@ if [ "$REWARD_TYPE" = docking ]; then
   trap '[ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null' EXIT
 fi
 
+# ---- WARM THE EDITABLE-INSTALL PATHS BEFORE ANY conda run ----------------------------------------
+# MEASURED 2026-09-14, not defensive. rxnflow/seh failed FOUR times in a row at 9-13 s with
+# `ModuleNotFoundError: No module named gflownet`, from run_rxnflow_fixed -> al_loop -> rxnflow/proxy
+# -> fraggfn/proxy. The module was NOT missing: the same import succeeded on the same node, in the
+# same env, under the same exports, in a batch job -- and rxnflow/clpp trained fine concurrently on
+# the identical chain.
+#
+# The env reaches `gflownet` through an editable install whose .pth appends
+# external/RxnFlow/src, which lives on $HOME -- networked and read-only from a compute node. Cold,
+# `site` processes the .pth and finds nothing, so the package is simply absent; warm, it imports.
+# Isolated by bisection: a bare `conda run python -c "pass"` first made it work, and then so did a
+# plain `ls` of the .pth and its target -- no conda, no python. So it is the FILESYSTEM, not conda.
+#
+# Two runs each way. This is a symptom fix for a layer we do not control, and it is recorded as one.
+for _pth in "$(dirname "$(dirname "$(command -v conda)")")"/envs/"$CONDA_ENV"/lib/python*/site-packages/__editable__*.pth; do
+  [ -f "$_pth" ] || continue
+  ls -l "$_pth" >/dev/null 2>&1
+  while read -r _line; do
+    case "$_line" in /*) ls -l "$_line" >/dev/null 2>&1 ;; esac
+  done < "$_pth"
+done
+
 # ---- train ---------------------------------------------------------------------------------------
 # THE "HOW MUCH TRAINING" FLAG IS NOT UNIFORM, and passing the wrong one is an argparse exit 2 nine
 # seconds in. Three of the nine do not count steps at all -- saturn/tango/synformer take --budget in
