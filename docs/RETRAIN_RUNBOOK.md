@@ -761,6 +761,39 @@ which is the thing `build_grid.py:13` exists to prevent — I proposed exactly t
 
 ---
 
+### 4.2 What the end-to-end verification actually proved — and the six shapes it did not
+
+Job 76253 (2026-09-13) took `rgfn/seh/42` through the repaired trainer end to end and passed all five
+checks: exit 0 with the stop's normal-ending message; arm A sliced to 600 DISTINCT with a train row
+last; `logs/operative_config.txt` present; the config resolving to `SehMoleculeProxy`/cached=yes; and
+the repaired gate ACCEPTING it. Two agents read the artifact independently and agreed on all five.
+
+**That is one shape of seven, covering 6 of the 54 cells to be trained:**
+
+| reward | generator | cells | exercised |
+|---|---|---|---|
+| surrogate | **rgfn** | **6** | **YES** |
+| surrogate | rxnflow | 6 | no |
+| surrogate | scent | 6 | no |
+| docking | rgfn | 6 | no |
+| docking | rxnflow | 6 | no |
+| docking | scent | 6 | no |
+| docking | competitor (×6 generators) | 18 | no |
+
+**What it therefore did NOT exercise:** any docking target, the persistent docking server, SCENT's
+library and RNG paths, RxnFlow's separate stop wiring (`run_rxnflow_fixed.py:257`, a different file
+from the other two), the arm-B requeue path, or the 6TD3-B reward at all. **The first docking cell is
+its own first time**, and after a night in which five defects were found and none was visible to any
+static check, that is worth planning for rather than discovering.
+
+**The mitigation that makes a wide launch reasonable anyway:** the budget gate can now FAIL, proven
+against a real defective artifact. A short or malformed cell is rejected rather than accepted and
+frozen — which is exactly what would NOT have been true twelve hours earlier. So the exposure of
+launching an unexercised shape is wasted GPU on that cell, not a corrupted cell entering the tree.
+**Read the first completion of each shape before the shape's siblings finish.**
+
+---
+
 ## 5. Order of operations, per cell
 
 Cells run concurrently and independently. Nothing waits for a phase to complete across all cells.
