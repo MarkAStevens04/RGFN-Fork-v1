@@ -210,13 +210,22 @@ fi
 # plain `ls` of the .pth and its target -- no conda, no python. So it is the FILESYSTEM, not conda.
 #
 # Two runs each way. This is a symptom fix for a layer we do not control, and it is recorded as one.
-for _pth in "$(dirname "$(dirname "$(command -v conda)")")"/envs/"$CONDA_ENV"/lib/python*/site-packages/__editable__*.pth; do
+# $CONDA_EXE, not `command -v conda`: after sourcing conda.sh, conda is a shell FUNCTION, so
+# `command -v conda` prints "conda" and dirname twice gives ".". The glob then matched nothing and
+# this whole block silently did nothing -- which is how it shipped once and failed a fifth time.
+_CONDA_ROOT="$(dirname "$(dirname "${CONDA_EXE:-/home/markymoo/miniconda3/bin/conda}")")"
+_WARMED=0
+for _pth in "$_CONDA_ROOT"/envs/"$CONDA_ENV"/lib/python*/site-packages/__editable__*.pth; do
   [ -f "$_pth" ] || continue
   ls -l "$_pth" >/dev/null 2>&1
   while read -r _line; do
     case "$_line" in /*) ls -l "$_line" >/dev/null 2>&1 ;; esac
   done < "$_pth"
+  _WARMED=$((_WARMED+1))
 done
+# SAY whether it did anything. A warm-up that silently matches nothing is indistinguishable from one
+# that worked, which is exactly how the first version of this passed review and failed the job.
+echo "[v2train] editable-path warm: $_WARMED .pth file(s) under $_CONDA_ROOT/envs/$CONDA_ENV"
 
 # ---- train ---------------------------------------------------------------------------------------
 # THE "HOW MUCH TRAINING" FLAG IS NOT UNIFORM, and passing the wrong one is an argparse exit 2 nine
