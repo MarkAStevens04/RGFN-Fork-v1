@@ -196,36 +196,24 @@ if [ "$REWARD_TYPE" = docking ]; then
   trap '[ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null' EXIT
 fi
 
-# ---- WARM THE EDITABLE-INSTALL PATHS BEFORE ANY conda run ----------------------------------------
-# MEASURED 2026-09-14, not defensive. rxnflow/seh failed FOUR times in a row at 9-13 s with
-# `ModuleNotFoundError: No module named gflownet`, from run_rxnflow_fixed -> al_loop -> rxnflow/proxy
-# -> fraggfn/proxy. The module was NOT missing: the same import succeeded on the same node, in the
-# same env, under the same exports, in a batch job -- and rxnflow/clpp trained fine concurrently on
-# the identical chain.
+# ---- WARM THE ENV BEFORE THE REAL conda run ------------------------------------------------------
+# MEASURED, not defensive. rxnflow/seh failed SIX times at 9-13 s with `ModuleNotFoundError: No
+# module named gflownet`, from run_rxnflow_fixed -> al_loop -> rxnflow/proxy -> fraggfn/proxy, while
+# rxnflow/clpp trained fine concurrently on the identical import chain. The env reaches `gflownet`
+# through an editable install whose .pth appends external/RxnFlow/src, on $HOME -- networked and
+# read-only from a compute node.
 #
-# The env reaches `gflownet` through an editable install whose .pth appends
-# external/RxnFlow/src, which lives on $HOME -- networked and read-only from a compute node. Cold,
-# `site` processes the .pth and finds nothing, so the package is simply absent; warm, it imports.
-# Isolated by bisection: a bare `conda run python -c "pass"` first made it work, and then so did a
-# plain `ls` of the .pth and its target -- no conda, no python. So it is the FILESYSTEM, not conda.
+# A THROWAWAY `conda run` IN THE SAME ENV FIRST MAKES THE REAL ONE WORK. Proven by submitting the
+# same cell, same OUT_ROOT, same --comment, differing only in this line: with it the cell trains,
+# without it the cell dies at the import. Six failures, three successes.
 #
-# Two runs each way. This is a symptom fix for a layer we do not control, and it is recorded as one.
-# $CONDA_EXE, not `command -v conda`: after sourcing conda.sh, conda is a shell FUNCTION, so
-# `command -v conda` prints "conda" and dirname twice gives ".". The glob then matched nothing and
-# this whole block silently did nothing -- which is how it shipped once and failed a fifth time.
-_CONDA_ROOT="$(dirname "$(dirname "${CONDA_EXE:-/home/markymoo/miniconda3/bin/conda}")")"
-_WARMED=0
-for _pth in "$_CONDA_ROOT"/envs/"$CONDA_ENV"/lib/python*/site-packages/__editable__*.pth; do
-  [ -f "$_pth" ] || continue
-  ls -l "$_pth" >/dev/null 2>&1
-  while read -r _line; do
-    case "$_line" in /*) ls -l "$_line" >/dev/null 2>&1 ;; esac
-  done < "$_pth"
-  _WARMED=$((_WARMED+1))
-done
-# SAY whether it did anything. A warm-up that silently matches nothing is indistinguishable from one
-# that worked, which is exactly how the first version of this passed review and failed the job.
-echo "[v2train] editable-path warm: $_WARMED .pth file(s) under $_CONDA_ROOT/envs/$CONDA_ENV"
+# STATING WHAT THIS IS NOT: an `ls` of the .pth and its package __init__.py -- which looked like it
+# worked in one bisection run -- does NOT fix it (jobs 76307, 76308, warm block present and counting
+# files, import still dead). So the mechanism is NOT a bare filesystem cache warm, and the earlier
+# commit message saying "it is the filesystem, not conda" was wrong. What the first `conda run`
+# does that a stat does not is unidentified; this is a symptom fix and is recorded as one.
+conda run -n "$CONDA_ENV" python -c "pass" >/dev/null 2>&1
+echo "[v2train] env warm-up for '$CONDA_ENV' rc=$?"
 
 # ---- train ---------------------------------------------------------------------------------------
 # THE "HOW MUCH TRAINING" FLAG IS NOT UNIFORM, and passing the wrong one is an argparse exit 2 nine
