@@ -431,21 +431,63 @@ def decide(cell, arm: str) -> tuple[str, str]:
     return "refuse", f"unrecognised status {st!r}"
 
 
+# WALLTIMES PER CELL -- how many 3-day links a cell needs, measured from live rates on 2026-09-14
+# against the 320,000 arm-B budget:
+#
+#     rxnflow/seh  57,015 distinct/h -> 0.2 d      rxnflow/clpp  3,602/h -> 3.7 d
+#     rxnflow/drd2 45,790/h          -> 0.3 d      scent/clpp    3,097/h -> 4.3 d
+#     scent/seh    29,586/h          -> 0.5 d      rgfn/clpp     2,673/h -> 5.0 d
+#                                                  rgfn/6td3b    2,271/h -> 5.9 d
+#
+# Docking is 13-25x slower per molecule. Surrogate cells finish inside ONE walltime; docking cells
+# need two or three. The 3-day limit is hard (sinfo) and these jobs carry Requeue=0, so a docking
+# cell without extra walltimes is simply killed at 72 h at 50-80% of budget.
+#
+# DELIVERED AS A JOB ARRAY WITH %1, NOT AS afterany LINKS. `--array=0-N%1` runs the tasks strictly
+# one at a time and collapses to a single squeue line. VERIFIED 2026-09-14 on array 76382, whose
+# task 0 was deliberately killed at its walltime:
+#     76382_0 TIMEOUT 3:15  (killed, never reached its own END line)
+#     76382_1 COMPLETED     started 20:41:34, AFTER task 0 died ~20:41:30
+#     76382_2 COMPLETED     started 20:42:04, AFTER task 1 ended 20:41:59
+# No overlap. Held tasks show `PENDING (JobArrayTaskLimit)`, which is %1 doing the holding.
+#
+# ⛔ THE %1 IS LOAD-BEARING. Without it the tasks run CONCURRENTLY -- several processes training the
+# same cell into one run dir, rotating each other's traces. That is not hypothetical: two jobs landed
+# in one tree earlier the same day and the second rotated the first's trace out from under its open
+# file handle, so the first trained perfectly and then materialised arm A from an empty trace.
+#
+# Safe to run a cell's tasks in sequence because all three runners RESUME (rxnflow at
+# `remaining = n_train_steps - loop._it`, scent from its checkpoint into the same run dir, rgfn via
+# start_iteration) and the arm-B stop counts distinct train molecules across trace.csv AND its
+# rotated .N siblings. A task on an already-finished cell stops immediately.
+WALLTIMES = {"clpp": 2, "6td3b": 2}  # surrogate targets default to 1
+
+
+def walltimes_for(cell) -> int:
+    return WALLTIMES.get(cell.target_name, 1)
+
+
 def submit_cmd(cell, out_root: str) -> list[str]:
     # target_name, NOT target: `Cell.target` resolves to a Target dataclass whose repr carries the
     # whole gate definition. Interpolating it would hand the launcher an argument that is not a
     # target name and would not fail early -- it would just build a path nothing lives at. Cost me
     # one failed migration run before I read the dataclass.
-    return [
+    n = walltimes_for(cell)
+    cmd = [
         "sbatch",
         f"--job-name=v2_{cell.tag}",
         f"--comment={CLAIM_PREFIX}{cell.tag}",
         f"--export=ALL,OUT_ROOT={out_root}",
+    ]
+    if n > 1:
+        cmd.append(f"--array=0-{n - 1}%1")
+    cmd += [
         TRAINER,
         cell.generator,
         cell.target_name,
         str(cell.seed),
     ]
+    return cmd
 
 
 def main() -> int:
