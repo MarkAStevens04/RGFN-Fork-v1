@@ -214,8 +214,23 @@ def main() -> None:
             norm=float(reward_c.get("norm", 1.0)),
             failed_score=float(reward_c.get("failed_score", 0.0)),
             clip=float(reward_c.get("clip", 10.0)),
+            # ⚠ LOAD-BEARING, AND THE CONFIG IS THE ONLY PLACE THAT CAN SAY IT. This bridge
+            # negates the raw score by default -- right for dvina/Vina, catastrophic for 6TD3-B,
+            # whose cnn_vs reward is HIGHER-is-better in roughly [0, 9]. The default
+            # `max(-raw/norm, 0)` maps EVERY molecule to exactly 0.0: a flat reward that does not
+            # raise, does not produce a nan, and does not show up in the logs. The cross-env bridge
+            # cannot see the oracle class or targets.py, so it cannot infer the orientation.
+            higher_is_better=bool(reward_c.get("higher_is_better", False)),
             oracle_args=dict(reward_c.get("oracle_args", {})),
             workdir=str(run_dir / "reward_bridge"),
+        )
+        # Echoed so the orientation is VISIBLE at startup rather than inferred from the config.
+        # A flat reward is silent; this line is the only cheap way to catch a missing/blank
+        # `higher_is_better` before a 6TD3-B run burns its docking budget against a constant.
+        print(
+            f"[FGFN-FR] docking oracle={reward.oracle} "
+            f"higher_is_better={reward.sign > 0} (sign={reward.sign:+.0f})",
+            flush=True,
         )
     else:
         reward = SEHFrozenReward(

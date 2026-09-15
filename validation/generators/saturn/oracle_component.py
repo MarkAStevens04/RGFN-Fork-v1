@@ -85,6 +85,10 @@ class GlueSurrogateOracle(OracleComponent):
             oracle=(sp.get("oracle") or "").strip() or None,
             repo_root=str(_REPO_ROOT),
             norm=float(sp.get("norm", 1.0)),
+            # THE TRAINING PATH. Saturn's agent scores through this component, so an orientation
+            # that reaches only the rescoring call in run_saturn_fixed.py would leave TRAINING on
+            # sign=-1 -- a flat 0.0 reward for 6TD3-B, with correct-looking final candidates.
+            higher_is_better=bool(sp.get("higher_is_better", False)),
             oracle_args=dict(sp.get("oracle_args") or {}),
             workdir=(sp.get("workdir") or "").strip() or None,
         )

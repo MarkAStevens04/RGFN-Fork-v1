@@ -216,6 +216,10 @@ def main() -> None:
             # Docking-only; ignored by build_provider for the surrogate targets.
             "oracle": reward_c.get("oracle", ""),
             "norm": float(reward_c.get("norm", 1.0)),
+            # Carried into the component so the TRAINING reward gets the raw orientation. Saturn's
+            # agent scores through oracle_component.py, NOT through the rescoring call below, so an
+            # orientation that reached only that call would leave training on a flat 0.0 for 6TD3-B.
+            "higher_is_better": bool(reward_c.get("higher_is_better", False)),
             "oracle_args": dict(reward_c.get("oracle_args") or {}),
             "workdir": str(run_dir / "reward_bridge"),
         },
@@ -404,9 +408,16 @@ def main() -> None:
         repo_root=str(_REPO_ROOT),
         norm=float(reward_c.get("norm", 1.0)),
         failed_score=float(reward_c.get("failed_score", 0.0)),
+        higher_is_better=bool(reward_c.get("higher_is_better", False)),
         oracle_args=dict(reward_c.get("oracle_args") or {}),
         workdir=str(run_dir / "reward_bridge"),
     )
+    if getattr(provider, "sign", None) is not None:
+        print(
+            f"[SAT-FR] docking oracle={provider.oracle} "
+            f"higher_is_better={provider.sign > 0} (sign={provider.sign:+.0f})",
+            flush=True,
+        )
     scores = provider.predict(pool)
 
     out_dir = run_dir / "fixed_reward"

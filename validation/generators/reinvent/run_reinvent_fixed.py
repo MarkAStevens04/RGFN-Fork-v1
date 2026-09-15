@@ -156,6 +156,10 @@ def _write_training_toml(
         f'params.oracle = "{reward_c.get("oracle", "")}"',
         f'params.workdir = "{run_dir / "reward_bridge"}"',
         f'params.norm = {float(reward_c.get("norm", 1.0))!r}',
+        # LOWERCASE, because this is TOML and not Python: `{True!r}` emits `True`, which TOML
+        # rejects, and the run would die at config parse rather than train on the wrong sign.
+        f"params.higher_is_better = "
+        f'{str(bool(reward_c.get("higher_is_better", False))).lower()}',
         "",
     ]
     # No transform block when the reward is already on [0, 1] (DRD2 is a probability). Emitting an
@@ -390,9 +394,16 @@ def main() -> None:
         repo_root=str(_REPO_ROOT),
         norm=float(reward_c.get("norm", 1.0)),
         failed_score=float(reward_c.get("failed_score", 0.0)),
+        higher_is_better=bool(reward_c.get("higher_is_better", False)),
         oracle_args=dict(reward_c.get("oracle_args") or {}),
         workdir=str(run_dir / "reward_bridge"),
     )
+    if getattr(provider, "sign", None) is not None:
+        print(
+            f"[RNV-FR] docking oracle={provider.oracle} "
+            f"higher_is_better={provider.sign > 0} (sign={provider.sign:+.0f})",
+            flush=True,
+        )
     scores = provider.predict(pool)
 
     out_dir = run_dir / "fixed_reward"

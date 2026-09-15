@@ -86,6 +86,10 @@ class Parameters:
     oracle: List[str] = ("",)
     workdir: List[str] = ("",)
     norm: List[float] = (1.0,)
+    # RAW ORIENTATION. Optional and default-False so every existing surrogate and ClpP config is
+    # bit-identical; a HIGHER-is-better raw score (6TD3-B's cnn_vs) must say so explicitly, because
+    # this cross-env bridge cannot see the oracle class or targets.py to infer it.
+    higher_is_better: List[bool] = (False,)
 
 
 @add_tag("__component")
@@ -107,6 +111,9 @@ class GlueSurrogate:
             oracle=(params.oracle[0] or "").strip() or None,
             repo_root=str(_REPO_ROOT),
             norm=float(params.norm[0]),
+            # THE TRAINING PATH for this entrant: REINVENT scores through this component, so the
+            # orientation must arrive here and not only at the rescoring call in the runner.
+            higher_is_better=bool(params.higher_is_better[0]),
             workdir=(params.workdir[0] or "").strip() or None,
         )
         self.reward_type = reward_type

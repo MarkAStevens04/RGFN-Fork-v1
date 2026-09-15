@@ -706,6 +706,7 @@ def main() -> None:
         repo_root=str(_REPO_ROOT),
         norm=float(reward_c.get("norm", 1.0)),
         failed_score=float(reward_c.get("failed_score", 0.0)),
+        higher_is_better=bool(reward_c.get("higher_is_better", False)),
         oracle_args=dict(reward_c.get("oracle_args") or {}),
         workdir=str(run_dir / "reward_bridge"),
         # sEH ONLY, and only for THIS entrant. Job 75080 (entry [074]) showed that loading the

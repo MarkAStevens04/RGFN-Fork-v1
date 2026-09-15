@@ -330,6 +330,12 @@ def build_provider(
     repo_root: Optional[str] = None,
     norm: float = 1.0,
     failed_score: float = 0.0,
+    # RAW ORIENTATION, THREADED FROM THE CONFIG. DockingBridgeReward's constructor has accepted
+    # this since the sign seam landed, but nothing forwarded it: this factory neither took it nor
+    # passed it, so the seam was unreachable and every docking cell silently got sign=-1. Correct
+    # for dvina/Vina, catastrophic for 6TD3-B (cnn_vs is HIGHER-is-better in roughly [0, 9], so
+    # `max(-raw/norm, 0)` maps every molecule to exactly 0.0 -- a flat reward that never raises).
+    higher_is_better: bool = False,
     oracle_args: Optional[Dict] = None,
     workdir: Optional[str] = None,
 ):
@@ -351,6 +357,7 @@ def build_provider(
             norm=norm,
             failed_score=failed_score,
             clip=clip,
+            higher_is_better=higher_is_better,
             oracle_args=dict(oracle_args or {}),
             workdir=str(workdir) if workdir else None,
         )
