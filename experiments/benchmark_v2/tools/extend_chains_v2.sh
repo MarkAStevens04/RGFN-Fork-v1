@@ -107,13 +107,22 @@ while read -r tag gen tgt seed budget; do
   done
 done < <(python - <<'PY'
 import csv
+rows=[]
 for r in csv.DictReader(open("experiments/benchmark_v2/grid.csv")):
     if (r.get("train_plan") or "").strip()!="generate": continue
     if r["generator"] not in ("rgfn","rxnflow","scent"): continue      # only these carry an arm B
+    # DOCKING ONLY. The surrogate cells finish inside one walltime (measured: rxnflow/seh 0.2 d,
+    # rxnflow/drd2 0.3 d, scent/seh 0.5 d), so a link on them is a no-op that spends a submit slot a
+    # docking cell needs. scale5k/extend_chains.sh says exactly this and I chained them anyway on the
+    # first run -- 11 wasted links, cancelled.
+    if r["target"] not in ("clpp","6td3b"): continue
     b=(r.get("arm_b_calls") or "").strip()
     if not b.isdigit(): continue
     tag=f'{r["generator"]}_{r["target"]}_s{r["seed"]}'
-    print(tag, r["generator"], r["target"], r["seed"], b)
+    rows.append((0 if r["target"]=="6td3b" else 1, 0 if r["generator"]=="rgfn" else 1,
+                 tag, r["generator"], r["target"], r["seed"], b))
+for _,_,tag,g,t,sd,b in sorted(rows):   # LONGEST POLE FIRST: 6td3b before clpp, rgfn before others
+    print(tag, g, t, sd, b)
 PY
 )
 echo "appended $APPENDED link(s)"
