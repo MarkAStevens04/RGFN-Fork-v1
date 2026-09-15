@@ -456,11 +456,31 @@ def decide(cell, arm: str) -> tuple[str, str]:
 # in one tree earlier the same day and the second rotated the first's trace out from under its open
 # file handle, so the first trained perfectly and then materialised arm A from an empty trace.
 #
-# Safe to run a cell's tasks in sequence because all three runners RESUME (rxnflow at
-# `remaining = n_train_steps - loop._it`, scent from its checkpoint into the same run dir, rgfn via
-# start_iteration) and the arm-B stop counts distinct train molecules across trace.csv AND its
-# rotated .N siblings. A task on an already-finished cell stops immediately.
-WALLTIMES = {"clpp": 2, "6td3b": 2}  # surrogate targets default to 1
+# Safe to run a cell's tasks in sequence because each task RESUMES the last one's checkpoint and the
+# arm-B stop counts distinct train molecules across trace.csv AND its rotated .N siblings.
+#
+# ⚠ BOTH HALVES OF THAT WERE ASSERTED HERE BEFORE THEY WERE TRUE, and the assertion is what made
+# them easy to miss -- it reads like a verified property. What the array smoke actually proved was
+# SERIALISATION; it ran a toy script, so it could not have caught either of these:
+#   * "all three runners resume" was true of the RUNNERS and false of the LAUNCHER. rxnflow resumes
+#     at `remaining = n_train_steps - loop._it` and scent sets Trainer.resume_path from its run dir,
+#     both inside their own runners -- but rgfn's resume lives in the launcher, and submit_train_v2.sh
+#     passed --run-name without --resume-from, so task 1 trained a RANDOM INIT while the budget
+#     union credited it the earlier round's molecules. Fixed + verified (job 76425): "Loaded
+#     checkpoint from 21 iteration".
+#   * "a task on an already-finished cell stops immediately" was simply not implemented. Such a task
+#     resumed, trained one more iteration (the stop fires at a BOUNDARY, not before the first one),
+#     then re-sampled and overwrote candidates.csv. submit_train_v2.sh now no-ops on
+#     TRAIN_DONE.json with exit_code 0 -- checked against a walltime kill, which leaves no such file
+#     and therefore correctly does NOT look finished.
+# Because that no-op is real now, an UNUSED walltime costs nothing, so these are sized for the worst
+# case rather than the expected one.
+#
+# 6td3b gets THREE. Two would be 6 days against a measured 5.9 -- under 2% headroom on an estimate
+# taken from an early, fast stretch of a run whose rate DEGRADES as molecules grow: rgfn/clpp was
+# observed going 90.96 -> 94.17 -> 100.90 -> 111.28 s/iteration over its first four iterations.
+# clpp keeps two: its live projection is 3.9 d against 6, which absorbs the same degradation.
+WALLTIMES = {"clpp": 2, "6td3b": 3}  # surrogate targets default to 1
 
 
 def walltimes_for(cell) -> int:

@@ -101,6 +101,34 @@ fi
 RUN_DIR="$ROOT/train/$CELL_TAG/arm$TRAIN_ARM"
 mkdir -p "$RUN_DIR"
 
+# ---- NO-OP IF THIS CELL IS ALREADY FINISHED -------------------------------------------------------
+# THE OTHER HALF OF "resume-or-no-op". scale5k/extend_chains.sh had both: its links resumed, and a
+# link whose cell had already emitted candidates.csv exited immediately. v2 had NEITHER until now,
+# and the array makes the missing half matter: a docking cell is submitted with enough walltimes to
+# cover its WORST case, so the common case is that the last task starts against a cell that finished
+# in the previous one. Without this it is not a harmless no-op -- it resumes the final checkpoint,
+# trains one more iteration (the arm-B stop fires at a BOUNDARY, not before the first one), and then
+# re-samples and re-emits, overwriting candidates.csv with a second draw from the same model and
+# rotating the trace one more time. The cell stays scientifically valid and its provenance stops
+# being legible.
+#
+# Keyed on TRAIN_DONE.json with exit_code 0, which is written only after the runner RETURNS: a
+# walltime kill never reaches it, so an interrupted task correctly does NOT look finished here. This
+# is the launcher's own completion signal, not an acceptance -- verify/freeze still run outside.
+if [ -f "$RUN_DIR/TRAIN_DONE.json" ]; then
+  _done_rc=$(python -c "
+import json,sys
+try: print(json.load(open('$RUN_DIR/TRAIN_DONE.json')).get('exit_code'))
+except Exception: print('unreadable')" 2>/dev/null)
+  if [ "$_done_rc" = "0" ]; then
+    echo "[v2train] $CELL_TAG already finished (TRAIN_DONE.json exit_code=0). Nothing to do."
+    echo "[v2train] This is the expected end of an over-provisioned array: the cell reached its"
+    echo "[v2train] budget in an earlier task, so this one exits without touching its artifacts."
+    exit 0
+  fi
+  echo "[v2train] TRAIN_DONE.json present but exit_code=$_done_rc; continuing (not a clean finish)" >&2
+fi
+
 # ---- environment ---------------------------------------------------------------------------------
 module load cuda/11.8.0
 export PYTHONUNBUFFERED=1
