@@ -466,8 +466,10 @@ def _print_table(cells: List[Cell], arm: str) -> None:
     awaiting = sum(1 for c in cells if c.status(arm) == "verified")
     print(f"\n{done}/{n} ACCEPTED (backed up, verified and frozen) on arm {arm}")
     if awaiting:
-        print(f"{awaiting} verified but NOT accepted -- checks pass, awaiting backup + freeze. "
-              f"Run: experiments/benchmark_v2/tools/accept_cell.sh --all --arm {arm}  (login node)")
+        print(
+            f"{awaiting} verified but NOT accepted -- checks pass, awaiting backup + freeze. "
+            f"Run: experiments/benchmark_v2/tools/accept_cell.sh --all --arm {arm}  (login node)"
+        )
 
 
 def main() -> int:
@@ -515,18 +517,43 @@ def main() -> int:
             ok = (root / rel).exists()
             bad += 0 if ok else 1
             print(f"  {'ok ' if ok else 'MISSING'}  {gen:<8} {tgt:<6} {rel}")
+        # WALK THE GRID, NOT THE MAP -- and every ROLE of it. This loop used to read
+        # `select(role="hub_batching")`, which silently excluded every competitor cell. The effect
+        # was a readiness check that could not fail on the thing that was actually missing: the 18
+        # competitor 6TD3-B cells have NO _CFG entry at all, so iterating the map never reaches them
+        # and the role filter stopped the grid walk from reaching them either. It printed
+        # "PASS: 0 problem(s)" across 48 examined cells while 18 of the 108 could not launch.
+        # A check whose scope is the set of things that already work is not a check.
         print("\ncells with train_plan=generate that must resolve a config:")
-        for c in select(role="hub_batching"):
+        unregistered = []
+        for c in select():
             if c.train_plan != "generate":
                 continue
             try:
                 rel = c.cfg
-                ok = (root / rel).exists()
-                bad += 0 if ok else 1
-                print(f"  {'ok ' if ok else 'MISSING'}  {c.tag:<22} -> {rel}")
-            except KeyError as e:
+            except KeyError:
+                # Distinguished from MISSING on purpose: MISSING is a registered config whose file
+                # is gone (a path defect), UNREGISTERED is a cell nothing has ever been written for
+                # (a build item). Collapsing them would report a known gap as a broken path.
+                unregistered.append(c.tag)
                 bad += 1
-                print(f"  UNRESOLVED  {c.tag:<22} -> {e}")
+                continue
+            ok = (root / rel).exists()
+            bad += 0 if ok else 1
+            print(f"  {'ok ' if ok else 'MISSING'}  {c.tag:<22} -> {rel}")
+        if unregistered:
+            gens = sorted({t.rsplit("_", 2)[0].split("_")[0] for t in unregistered})
+            print(
+                f"\n  UNREGISTERED -- no _CFG entry, so these CANNOT launch: "
+                f"{len(unregistered)} cell(s) across {len(gens)} generator(s)"
+            )
+            for t in unregistered:
+                print(f"    {t}")
+            print(
+                "    Each needs a training config AND a _CFG entry. submit_train_v2.sh already\n"
+                "    refuses them (it keys on the EMPTY cfg value), so this is a build item, not a\n"
+                "    live hazard -- but it is 18 cells of the grid and must not read as PASS."
+            )
         print(f"\n{'FAIL' if bad else 'PASS'}: {bad} problem(s)")
         return 1 if bad else 0
 
