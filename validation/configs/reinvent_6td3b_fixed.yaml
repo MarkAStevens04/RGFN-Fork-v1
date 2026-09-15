@@ -1,0 +1,92 @@
+# REINVENT on 6TD3-B — the CNN_VS structure-based cell, docking against 6TD3 (CDK12/cyclin K/CR8).
+#
+# Same entrant, same budget, same everything as `reinvent_clpp_fixed.yaml`; ONLY THE REWARD DIFFERS. That is the
+# point: any ClpP-vs-6TD3-B difference is the objective, not the setup.
+#
+# ⚠ THE `higher_is_better` LINE BELOW IS LOAD-BEARING — DO NOT DELETE IT.
+# DockingBridgeReward negates the raw score by default, which is correct for dvina/Vina and
+# catastrophic here. cnn_vs is HIGHER-is-better in roughly [0, 9], so the default
+# `max(-raw/norm, 0)` maps EVERY molecule to exactly 0.0: a perfectly flat reward. It does not
+# raise, does not produce a nan, and does not show up in the logs — the run would burn its full
+# docking budget training against a constant and finish looking healthy. This cross-env bridge has
+# no access to the oracle class or to targets.py, so the config is the ONLY place that can say it.
+# run_reinvent_fixed.py echoes the resolved orientation at startup
+# ("[RNV-FR] docking oracle=docking_6td3b_gpu higher_is_better=True (sign=+1)") — check that line
+# before letting a 6TD3-B run past its first few steps.
+#
+# ⚠ USE THE PRODUCT, NEVER THE AFFINITY HEAD ALONE. `cnnaff_t2` on its own is BLIND to exactly the
+# failure this reward exists to fix: AUROC 0.521 — a coin flip — separating real glues from our own
+# reward-optimised candidates (gnina's affinity head is hinge-trained on high-RMSD poses, penalised
+# only for over-predicting). `cnn_vs` gives 0.917 vs property-matched decoys and 0.946 vs our
+# candidates. Repointing the oracle at the affinity term would produce a model optimising a coin
+# flip — and the reward would NOT be flat, so it would look like it was working.
+#
+# ⚠ THE MODE GATE IS cnn_vs ≥ 6.718 (the 5%-FPR point). Unlike ClpP and 6TD3, the gate reads the
+# SAME column as the training reward — the reward IS cnn_vs — so there is no raw-vs-score split
+# here and nothing should gate on a negated column.
+#
+# ⚠ ANY JOB THAT DOCKS MUST `source ~/bin/rgfn-smoke-env.sh` (CLAUDE.md): QuickVina2-GPU links
+# against boost libs outside the conda env, and omitting them looks exactly like a degraded GPU.
+#
+# NORM / CLIP UNCHANGED FROM THE ClpP SIBLING — a decision, not copied lines. The value the model
+# sees spans roughly [0, 9] for cnn_vs against roughly [0, 8] for clip(-vina): too small a
+# difference to justify re-tuning an inverse temperature matched to the docking benchmark, and
+# keeping them equal is what makes this cell comparable to the ClpP one. norm = 1.0 is "no
+# rescaling"; clip = 10.0 is an upper bound that binds in NEITHER case.
+#
+# `reward_name: 6td3b` matches matrix16/targets.py (gate 6.718) rather than the ClpP sibling's
+# `clpp_docking`, which predates the convention and does not match targets.py's "clpp" either.
+# Nothing keys on the literal — it is the metadata label written into the candidate dataset — so
+# the new cells follow the canonical name rather than inherit the mismatch.
+
+run:
+  name: fixed_reward/reinvent_6td3b        # run dir: <root>/fixed_reward/reinvent_6td3b/<timestamp>
+  root_dir: experiments                  # overridden by --root-dir on Balam ($SCRATCH)
+  seed: 42
+
+fixed_reward:
+  system: 6td3b
+  reward_name: 6td3b
+  n_samples: 2000                        # unique valid molecules to emit — matches S3-GFN's pool
+  sample_oversample: 6.0                 # draws requested from the trained agent to reach n_samples
+  score_units: "cnn_vs = CNNaffinity x CNNscore (higher is better; raw cnn_vs in raw_score column)"
+
+reward:
+  type: docking
+  oracle: docking_6td3b_gpu                  # scripts/score_batch.py ORACLES key
+  higher_is_better: true   # cnn_vs: LOAD-BEARING, see the warning above
+  norm: 1.0
+  clip: 10.0
+  failed_score: 0.0                     # an undockable molecule scores 0, not NaN
+  # NO reward_shaping/transform: DockingBridgeReward.predict already returns a
+  # bounded higher-is-better value, and stacking a sigmoid on top would double-shape it.
+
+reinvent:
+  device: cuda:0
+  prior_file: ""                         # default: external/reinvent/priors/reinvent.prior
+  batch_size: 64                         # AUTHORS' value (configs/toml/staged_learning.toml)
+  # ORACLE BUDGET — a REPORTED asymmetry, not an equalized one (the project's standing convention;
+  # cf. Logs/056's "surrogate calls ~500 vs 155,764"). 1000 steps x 128 = ~128,000 reward calls,
+  # the same order as S3-GFN's 5,000 steps x 64. REINVENT is often benchmarked at PMO's 10,000-call
+  # budget instead; that is ~13x less than every other entrant here gets, so we run it at the
+  # generous end. If a reviewer asks, the answer is that the baseline was over-fed, not starved.
+  max_steps: 157                         # 157 x 64 = 10,048 scored -- the PMO budget.
+                                         # WAS 1000 x 128 = 128,000, a 12.4x advantage over
+                                         # Saturn's 10,020 (audit 2026-08-20). REINVENT has no
+                                         # budget field: steps x batch IS the budget.
+  checkpoint_every_steps: 16             # ~1,024 scored molecules per checkpoint (16 x 64).
+                                         # Implemented as REINVENT's OWN multi-stage mechanism
+                                         # (10 stages summing to 157), not an upstream patch: its
+                                         # RL loop has no save hook. purge_memories=false and a
+                                         # top-level diversity filter mean nothing resets between
+                                         # stages, so training is unchanged.
+  sigma: 128                             # DAP reward-function sigma (REINVENT's documented default)
+  learning_rate: 0.0001
+  # ON BY DESIGN. REINVENT's RL is reward-maximizing and collapses onto one scaffold without this;
+  # a collapsed pool cannot reach the 100-mode deliverable and we would only find out after paying
+  # ~2.25 h of route discovery on it. This is also the charitable setting.
+  diversity_filter:
+    type: IdenticalMurckoScaffold
+    bucket_size: 25
+    minscore: 0.4
+    minsimilarity: 0.4

@@ -1,0 +1,96 @@
+# SynFormer on 6TD3-B — the CNN_VS structure-based cell, docking against 6TD3 (CDK12/cyclin K/CR8).
+#
+# Same entrant, same budget, same everything as `synformer_clpp_fixed.yaml`; ONLY THE REWARD DIFFERS. That is the
+# point: any ClpP-vs-6TD3-B difference is the objective, not the setup.
+#
+# ⚠ THE `higher_is_better` LINE BELOW IS LOAD-BEARING — DO NOT DELETE IT.
+# DockingBridgeReward negates the raw score by default, which is correct for dvina/Vina and
+# catastrophic here. cnn_vs is HIGHER-is-better in roughly [0, 9], so the default
+# `max(-raw/norm, 0)` maps EVERY molecule to exactly 0.0: a perfectly flat reward. It does not
+# raise, does not produce a nan, and does not show up in the logs — the run would burn its full
+# docking budget training against a constant and finish looking healthy. This cross-env bridge has
+# no access to the oracle class or to targets.py, so the config is the ONLY place that can say it.
+# run_synformer_fixed.py echoes the resolved orientation at startup
+# ("[SF-FR] docking oracle=docking_6td3b_gpu higher_is_better=True (sign=+1)") — check that line
+# before letting a 6TD3-B run past its first few steps.
+#
+# ⚠ USE THE PRODUCT, NEVER THE AFFINITY HEAD ALONE. `cnnaff_t2` on its own is BLIND to exactly the
+# failure this reward exists to fix: AUROC 0.521 — a coin flip — separating real glues from our own
+# reward-optimised candidates (gnina's affinity head is hinge-trained on high-RMSD poses, penalised
+# only for over-predicting). `cnn_vs` gives 0.917 vs property-matched decoys and 0.946 vs our
+# candidates. Repointing the oracle at the affinity term would produce a model optimising a coin
+# flip — and the reward would NOT be flat, so it would look like it was working.
+#
+# ⚠ THE MODE GATE IS cnn_vs ≥ 6.718 (the 5%-FPR point). Unlike ClpP and 6TD3, the gate reads the
+# SAME column as the training reward — the reward IS cnn_vs — so there is no raw-vs-score split
+# here and nothing should gate on a negated column.
+#
+# ⚠ ANY JOB THAT DOCKS MUST `source ~/bin/rgfn-smoke-env.sh` (CLAUDE.md): QuickVina2-GPU links
+# against boost libs outside the conda env, and omitting them looks exactly like a degraded GPU.
+#
+# NORM / CLIP UNCHANGED FROM THE ClpP SIBLING — a decision, not copied lines. The value the model
+# sees spans roughly [0, 9] for cnn_vs against roughly [0, 8] for clip(-vina): too small a
+# difference to justify re-tuning an inverse temperature matched to the docking benchmark, and
+# keeping them equal is what makes this cell comparable to the ClpP one. norm = 1.0 is "no
+# rescaling"; clip = 10.0 is an upper bound that binds in NEITHER case.
+#
+# `reward_name: 6td3b` matches matrix16/targets.py (gate 6.718) rather than the ClpP sibling's
+# `clpp_docking`, which predates the convention and does not match targets.py's "clpp" either.
+# Nothing keys on the literal — it is the metadata label written into the candidate dataset — so
+# the new cells follow the canonical name rather than inherit the mismatch.
+
+run:
+  name: fixed_reward/synformer_6td3b
+  root_dir: experiments
+  seed: 42
+
+fixed_reward:
+  system: 6td3b
+  reward_name: 6td3b
+  # Upstream's Oracle defaults to max_oracle_calls = 10000 — the PMO convention, and the same budget
+  # Saturn's reference config uses. Counted over DISTINCT molecules, as their buffer does.
+  budget: 10000
+  n_samples: 2000                        # pool size to emit — matches the other entrants
+  score_units: "cnn_vs = CNNaffinity x CNNscore (higher is better; raw cnn_vs in raw_score column)"
+
+reward:
+  type: docking
+  oracle: docking_6td3b_gpu                  # scripts/score_batch.py ORACLES key
+  higher_is_better: true   # cnn_vs: LOAD-BEARING, see the warning above
+  norm: 1.0
+  clip: 10.0
+  failed_score: 0.0                     # an undockable molecule scores 0, not NaN
+  # NO reward_shaping/transform: DockingBridgeReward.predict already returns a
+  # bounded higher-is-better value, and stacking a sigmoid on top would double-shape it.
+
+synformer:
+  model_path: ""                         # default: external/synformer/data/trained_weights/sf_ed_default.ckpt
+  starting_population: ""                # default: the clone's own data/chembl_filtered_1k.txt
+                                         # Their bundled ChEMBL set, not TDC's ZINC: it needs no
+                                         # external download, and ChEMBL matches REINVENT's and
+                                         # Saturn's priors so the entrants start from comparable space.
+  # GA settings — upstream's own (experiments/graphga_sf_opt.py `config` dict).
+  population_size: 100
+  offspring_size: 100
+  mutation_rate: 0.1
+  # Projection settings — upstream's own `projection()` defaults.
+  search_width: 24
+  exhaustiveness: 64
+  time_limit: 180
+  num_gpus: -1                           # -1 = all visible; a 1-GPU allocation gives 1
+  # 2 = the library default for run_parallel_sampling_return_smiles. Upstream's graphga_sf_opt.py
+  # passes 1, but that is a WALL-CLOCK choice with no algorithmic content: each worker runs the same
+  # per-molecule StatePool/evolve loop, two are simply in flight at once. Raised to 2 so the full
+  # 10,000-call budget is affordable. Each worker holds its own copy of the 4 GB index, so watch host
+  # RAM if this is raised much further.
+  num_workers_per_gpu: 2
+  # UPSTREAM'S CADENCE. graphga_sf_opt.py builds a WorkerPool per projection() call and end()s it,
+  # so a worker never outlives one generation. Holding the pool open was OUR divergence and it is
+  # what let the workers reach ~260 GiB and get OOM-killed. Measured 2026-08-27 on the control:
+  # after each teardown the children return to 0.0-0.1 GiB, so this bounds the leak completely.
+  # Only viable since the parent was made fork-clean -- see fixed_reward.py's lazy bengio2021flow
+  # import; with a CUDA context in the parent every rebuilt worker dies at .to("cuda").
+  recycle_workers_every_gens: 1
+  backend: parallel                      # parallel = upstream's WorkerPool | inprocess = fallback
+  max_evolve_steps: 12                   # upstream's run_sampling_one_cpu default
+  max_results: 100

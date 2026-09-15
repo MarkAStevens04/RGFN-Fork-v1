@@ -482,9 +482,34 @@ def decide(cell, arm: str) -> tuple[str, str]:
 # clpp keeps two: its live projection is 3.9 d against 6, which absorbs the same degradation.
 WALLTIMES = {"clpp": 2, "6td3b": 3}  # surrogate targets default to 1
 
+# ...BUT THE TARGET ALONE DOES NOT DETERMINE THE LENGTH; THE BUDGET DOES. The numbers above are for
+# the arm-B cells, which train to 320,000 DISTINCT molecules. The competitor cells train to arm A's
+# 10,000 -- thirty-two times less docking -- and sizing them off the target name alone asked for
+# three walltimes each, which for the eighteen competitor 6TD3-B cells is 54 of the 60-task QOS cap
+# spent almost entirely on tasks that would no-op immediately.
+#
+# `has_arm("b")` is the discriminator rather than a generator list, so a cell is sized by what it
+# actually trains to.
+#
+# MEASURED, from the frozen ClpP siblings of exactly these cells (timing.json, arm A, 10,000 calls,
+# the same cross-env GPU docking bridge) -- total wall-clock against a 72 h walltime:
+#     s3gfn 0.03-0.05 h   fraggfn 2.1 h   reinvent 2.8-3.1 h   saturn 2.9-5.6 h
+#     synformer 20-21 h   tango 31.6-35.0 h
+# So one walltime covers every entrant with room to spare -- except synformer and tango, whose
+# margin is thin enough to matter if 6TD3-B is slower per molecule than ClpP, which it may well be:
+# 6TD3-B docks with QV2-GPU and then rescores the poses with gnina's CNN, where ClpP stops after
+# the Vina score. Tango at 35 h has only a 2x margin, and a 2x slowdown is not a wild guess for an
+# extra CNN pass. They get two; the rest get one. Costing nothing when unused is what makes this
+# the cheap side of the trade -- submit_train_v2.sh no-ops on a finished cell.
+SHORT_DOCKING_WALLTIMES = {"synformer": 2, "tango": 2}
+
 
 def walltimes_for(cell) -> int:
-    return WALLTIMES.get(cell.target_name, 1)
+    if cell.target_name not in WALLTIMES:
+        return 1  # surrogate target: finishes inside one walltime on either arm
+    if not cell.has_arm("b"):
+        return SHORT_DOCKING_WALLTIMES.get(cell.generator, 1)
+    return WALLTIMES[cell.target_name]
 
 
 def submit_cmd(cell, out_root: str) -> list[str]:

@@ -129,6 +129,23 @@ _CFG = {
     ("rxnflow", "drd2"): "validation/configs/rxnflow_drd2_fixed_stdlib_5k.yaml",
     ("rxnflow", "clpp"): "validation/configs/rxnflow_clpp_docking_fixed_5k.yaml",
     ("rxnflow", "6td3b"): "validation/configs/rxnflow_6td3b_docking_fixed_5k.yaml",
+    # THE SIX COMPETITOR 6TD3-B CELLS (phase 2, arm A, 10,000 calls). Registered here is what makes
+    # them launchable at all: submit_train_v2.sh refuses a cell whose cfg resolves EMPTY, which is
+    # how these eighteen cells were held back while their configs did not exist.
+    #
+    # Each is its own ClpP sibling with ONLY the reward changed -- verified key-by-key, six keys
+    # differ and they are exactly run.name, system, reward_name, score_units, reward.oracle and
+    # reward.higher_is_better. Same budget, same hyperparameters, same everything else, so a
+    # ClpP-vs-6TD3-B difference is the objective rather than the setup.
+    #
+    # TANGO IS SATURN'S AGENT PLUS A SECOND ORACLE COMPONENT, not a seventh generator, so it has its
+    # own config but shares saturn's runner and reward bridge.
+    ("fraggfn", "6td3b"): "validation/configs/fraggfn_6td3b_docking_fixed.yaml",
+    ("s3gfn", "6td3b"): "validation/configs/s3gfn_6td3b_fixed.yaml",
+    ("saturn", "6td3b"): "validation/configs/saturn_6td3b_fixed.yaml",
+    ("synformer", "6td3b"): "validation/configs/synformer_6td3b_fixed.yaml",
+    ("tango", "6td3b"): "validation/configs/tango_6td3b_fixed.yaml",
+    ("reinvent", "6td3b"): "validation/configs/reinvent_6td3b_fixed.yaml",
 }
 
 

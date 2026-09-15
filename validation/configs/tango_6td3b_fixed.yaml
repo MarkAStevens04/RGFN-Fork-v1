@@ -1,0 +1,139 @@
+# TANGO on 6TD3-B — the CNN_VS structure-based cell, docking against 6TD3 (CDK12/cyclin K/CR8).
+#
+# Same entrant, same budget, same everything as `tango_clpp_fixed.yaml`; ONLY THE REWARD DIFFERS. That is the
+# point: any ClpP-vs-6TD3-B difference is the objective, not the setup.
+#
+# ⚠ THE `higher_is_better` LINE BELOW IS LOAD-BEARING — DO NOT DELETE IT.
+# DockingBridgeReward negates the raw score by default, which is correct for dvina/Vina and
+# catastrophic here. cnn_vs is HIGHER-is-better in roughly [0, 9], so the default
+# `max(-raw/norm, 0)` maps EVERY molecule to exactly 0.0: a perfectly flat reward. It does not
+# raise, does not produce a nan, and does not show up in the logs — the run would burn its full
+# docking budget training against a constant and finish looking healthy. This cross-env bridge has
+# no access to the oracle class or to targets.py, so the config is the ONLY place that can say it.
+# run_saturn_fixed.py echoes the resolved orientation at startup
+# ("[SAT-FR] docking oracle=docking_6td3b_gpu higher_is_better=True (sign=+1)") — check that line
+# before letting a 6TD3-B run past its first few steps.
+#
+# ⚠ USE THE PRODUCT, NEVER THE AFFINITY HEAD ALONE. `cnnaff_t2` on its own is BLIND to exactly the
+# failure this reward exists to fix: AUROC 0.521 — a coin flip — separating real glues from our own
+# reward-optimised candidates (gnina's affinity head is hinge-trained on high-RMSD poses, penalised
+# only for over-predicting). `cnn_vs` gives 0.917 vs property-matched decoys and 0.946 vs our
+# candidates. Repointing the oracle at the affinity term would produce a model optimising a coin
+# flip — and the reward would NOT be flat, so it would look like it was working.
+#
+# ⚠ THE MODE GATE IS cnn_vs ≥ 6.718 (the 5%-FPR point). Unlike ClpP and 6TD3, the gate reads the
+# SAME column as the training reward — the reward IS cnn_vs — so there is no raw-vs-score split
+# here and nothing should gate on a negated column.
+#
+# ⚠ ANY JOB THAT DOCKS MUST `source ~/bin/rgfn-smoke-env.sh` (CLAUDE.md): QuickVina2-GPU links
+# against boost libs outside the conda env, and omitting them looks exactly like a degraded GPU.
+#
+# NORM / CLIP UNCHANGED FROM THE ClpP SIBLING — a decision, not copied lines. The value the model
+# sees spans roughly [0, 9] for cnn_vs against roughly [0, 8] for clip(-vina): too small a
+# difference to justify re-tuning an inverse temperature matched to the docking benchmark, and
+# keeping them equal is what makes this cell comparable to the ClpP one. norm = 1.0 is "no
+# rescaling"; clip = 10.0 is an upper bound that binds in NEITHER case.
+#
+# `reward_name: 6td3b` matches matrix16/targets.py (gate 6.718) rather than the ClpP sibling's
+# `clpp_docking`, which predates the convention and does not match targets.py's "clpp" either.
+# Nothing keys on the literal — it is the metadata label written into the candidate dataset — so
+# the new cells follow the canonical name rather than inherit the mismatch.
+
+run:
+  name: fixed_reward/tango_6td3b
+  root_dir: experiments
+  seed: 42
+
+fixed_reward:
+  system: 6td3b
+  reward_name: 6td3b
+  # THE STOPPING CONDITION. Saturn runs `while not oracle.budget_exceeded()` — there is no step
+  # count. 10,000 is its published default, an order of magnitude below REINVENT's ~128,000 and
+  # S3-GFN's ~320,000. All three are their authors' defaults; the benchmark REPORTS that asymmetry
+  # rather than forcing a parity that would misrepresent a method whose entire claim is efficiency.
+  budget: 10000
+  allow_oracle_repeats: false
+  aggregator: product
+  n_samples: 2000                        # unique valid molecules to emit — matches S3-GFN/REINVENT
+  sample_batch_size: 256
+  max_sample_batches: 4000
+  score_units: "cnn_vs = CNNaffinity x CNNscore (higher is better; raw cnn_vs in raw_score column)"
+
+reward:
+  type: docking
+  oracle: docking_6td3b_gpu                  # scripts/score_batch.py ORACLES key
+  higher_is_better: true   # cnn_vs: LOAD-BEARING, see the warning above
+  norm: 1.0
+  clip: 10.0
+  failed_score: 0.0                     # an undockable molecule scores 0, not NaN
+  # NO reward_shaping/transform: DockingBridgeReward.predict already returns a
+  # bounded higher-is-better value, and stacking a sigmoid on top would double-shape it.
+
+saturn:
+  device: cuda
+  logging_frequency: 1000               # checkpoint every 1,000 ORACLE CALLS (Saturn's own unit).
+                                        # Authors use 5000; this is logging cadence only -- the branch at
+                                        # reinforcement_learning.py:198 does write_out_results + agent.save and
+                                        # nothing else, so it cannot affect training.
+  model_architecture: mamba              # rnn | decoder | mamba — Mamba is the paper's contribution
+  prior: ""                              # default: external/saturn/.../chembl-33-mamba-epoch-18.prior
+                                         # ChEMBL-33 chosen over zinc-250k: it is the same training
+                                         # corpus family as REINVENT's prior, so the two route-less
+                                         # entrants start from comparable chemical space.
+  reinforcement_learning:
+    batch_size: 64
+    learning_rate: 0.0001
+    sigma: 128.0
+    augmented_memory: true
+    augmentation_rounds: 2
+    selective_memory_purge: true
+  experience_replay:
+    memory_size: 100
+    sample_size: 10
+  # ON by design and by the authors' default. Saturn's RL is reward-maximizing; a collapsed pool
+  # cannot reach the 100-mode deliverable, and we would only find out after ~2.25 h of route
+  # discovery. Also the charitable setting.
+  diversity_filter:
+    name: IdenticalMurckoScaffold
+    bucket_size: 10
+  # Both OFF, matching the authors' reference config. Beam enumeration additionally carries a
+  # `patience` early-stop that would end a run before the oracle budget was spent, which would make
+  # the training budget vary between seeds and targets.
+  hallucinated_memory:
+    execute_hallucinated_memory: false
+  beam_enumeration:
+    execute_beam_enumeration: false
+
+  # ---- TANGO ---------------------------------------------------------------------------------
+  tango:
+    enabled: true
+    env_name: syntheseus                  # `conda run -n syntheseus`; /scratch/markymoo/conda_envs
+                                          # is registered in envs_dirs so the NAME resolves.
+    reaction_model: megan                 # THE AUTHORS' choice in their reproduction config.
+    # The authors' own general stock, published with the paper (figshare 27225483): 17,721,980
+    # purchasable SMILES. NOT ZINCFrag — that is a combinatorial FRAGMENT set for assembling
+    # molecules, and holds only 4 of 11 probe commodity reagents (no bromobenzene, no acetyl
+    # chloride), which made every one of 50 test molecules unsolvable. This stock holds 11/11.
+    building_blocks_file: /scratch/markymoo/tango/authors_stock/frag-reac-zinc-stock.smi
+    # THE ENFORCED SET IS NOT OPTIONAL. TANGO's dense reward IS the constrained-synthesizability
+    # signal: `node_rewards` is only ever written inside `if self.enforce_blocks and solved`
+    # (syntheseus.py:252), so with enforce_blocks=false the component returns 0 for EVERY molecule --
+    # and with the authors' `product` aggregator that zeroes the whole objective, silently. Running
+    # TANGO without an enforced set is not "unconstrained TANGO", it is a broken run.
+    # This is the authors' own published constraint set (figshare 27225483), 99 blocks, the one their
+    # headline arm uses. The chemistry-homogenized arm swaps in our 418 glue blocks and changes
+    # nothing else.
+    enforced_building_blocks_file: /scratch/markymoo/tango/authors_stock/enforced_stock_100.smi
+    enforce_blocks: true
+    enforce_start: false
+    use_dense_reward: true
+    reward_type: tango_fms
+    tango_weights:
+      tanimoto: 0.5
+      fg: 0.5
+      fms: 0.5
+    time_limit_s: 180                     # the authors' per-molecule search cap
+    parallelize: false                    # the authors' value
+    max_workers: 4
+    num_top_results: 5                    # OUR DEVIATION, measured: upstream hardcodes 1, which
+                                          # solved 10/50 molecules; 5 solves 47/50. Disclosed.

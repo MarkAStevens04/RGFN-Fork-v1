@@ -1,0 +1,101 @@
+# S3-GFN on 6TD3-B — the CNN_VS structure-based cell, docking against 6TD3 (CDK12/cyclin K/CR8).
+#
+# Same entrant, same budget, same everything as `s3gfn_clpp_fixed.yaml`; ONLY THE REWARD DIFFERS. That is the
+# point: any ClpP-vs-6TD3-B difference is the objective, not the setup.
+#
+# ⚠ THE `higher_is_better` LINE BELOW IS LOAD-BEARING — DO NOT DELETE IT.
+# DockingBridgeReward negates the raw score by default, which is correct for dvina/Vina and
+# catastrophic here. cnn_vs is HIGHER-is-better in roughly [0, 9], so the default
+# `max(-raw/norm, 0)` maps EVERY molecule to exactly 0.0: a perfectly flat reward. It does not
+# raise, does not produce a nan, and does not show up in the logs — the run would burn its full
+# docking budget training against a constant and finish looking healthy. This cross-env bridge has
+# no access to the oracle class or to targets.py, so the config is the ONLY place that can say it.
+# run_s3gfn_fixed.py echoes the resolved orientation at startup
+# ("[S3-FR] docking oracle=docking_6td3b_gpu higher_is_better=True (sign=+1)") — check that line
+# before letting a 6TD3-B run past its first few steps.
+#
+# ⚠ USE THE PRODUCT, NEVER THE AFFINITY HEAD ALONE. `cnnaff_t2` on its own is BLIND to exactly the
+# failure this reward exists to fix: AUROC 0.521 — a coin flip — separating real glues from our own
+# reward-optimised candidates (gnina's affinity head is hinge-trained on high-RMSD poses, penalised
+# only for over-predicting). `cnn_vs` gives 0.917 vs property-matched decoys and 0.946 vs our
+# candidates. Repointing the oracle at the affinity term would produce a model optimising a coin
+# flip — and the reward would NOT be flat, so it would look like it was working.
+#
+# ⚠ THE MODE GATE IS cnn_vs ≥ 6.718 (the 5%-FPR point). Unlike ClpP and 6TD3, the gate reads the
+# SAME column as the training reward — the reward IS cnn_vs — so there is no raw-vs-score split
+# here and nothing should gate on a negated column.
+#
+# ⚠ ANY JOB THAT DOCKS MUST `source ~/bin/rgfn-smoke-env.sh` (CLAUDE.md): QuickVina2-GPU links
+# against boost libs outside the conda env, and omitting them looks exactly like a degraded GPU.
+#
+# NORM / CLIP UNCHANGED FROM THE ClpP SIBLING — a decision, not copied lines. The value the model
+# sees spans roughly [0, 9] for cnn_vs against roughly [0, 8] for clip(-vina): too small a
+# difference to justify re-tuning an inverse temperature matched to the docking benchmark, and
+# keeping them equal is what makes this cell comparable to the ClpP one. norm = 1.0 is "no
+# rescaling"; clip = 10.0 is an upper bound that binds in NEITHER case.
+#
+# `reward_name: 6td3b` matches matrix16/targets.py (gate 6.718) rather than the ClpP sibling's
+# `clpp_docking`, which predates the convention and does not match targets.py's "clpp" either.
+# Nothing keys on the literal — it is the metadata label written into the candidate dataset — so
+# the new cells follow the canonical name rather than inherit the mismatch.
+
+run:
+  name: fixed_reward/s3gfn_6td3b          # run dir: <root>/fixed_reward/s3gfn_6td3b/<timestamp>
+  root_dir: experiments                 # overridden by --root-dir on Balam ($SCRATCH)
+  seed: 42
+
+fixed_reward:
+  system: 6td3b                          # target system (provenance + mode gate)
+  reward_name: 6td3b             # fixed reward generator name (manifest 'oracle' field)
+  n_train_steps: 157                    # 157 x 64 = 10,048 scored -- their PMO max_oracle_calls.
+                                        # WAS 5000 (=320,000), matched to OUR generators rather than
+                                        # to their paper; a ~32x advantage (audit 2026-08-20).
+  n_samples: 2000                       # unique valid molecules to emit as candidates
+  sample_oversample: 6.0                # oversample factor for the final pool sampling
+  max_sample_batches: 4000              # hard cap on generate() batches (degeneration guard)
+  score_units: "cnn_vs = CNNaffinity x CNNscore (higher is better; raw cnn_vs in raw_score column)"
+
+# Frozen reward provider. type: seh_proxy | drd2 | docking (only seh_proxy implemented; the others
+# are the modular seam — same interface, injected identically). See fixed_reward.py.
+reward:
+  type: docking
+  oracle: docking_6td3b_gpu                  # scripts/score_batch.py ORACLES key
+  higher_is_better: true   # cnn_vs: LOAD-BEARING, see the warning above
+  norm: 1.0
+  clip: 10.0
+  failed_score: 0.0                     # an undockable molecule scores 0, not NaN
+  # NO reward_shaping/transform: DockingBridgeReward.predict already returns a
+  # bounded higher-is-better value, and stacking a sigmoid on top would double-shape it.
+
+# S3-GFN generator hyperparams (defaults mirror src/s3gfn/train.py argparse; the paper's sEH run).
+s3gfn:
+  device: null                          # auto: cuda:0 if available
+  batch_size: 64                        # on-policy samples per step
+  replay_batch_size: 64
+  buffer_size: 6400
+  num_warmup_steps: 100
+  learning_rate: 1.0e-4
+  log_z_learning_rate: 1.0e-3
+  beta: 50.0                            # RTB reward coefficient (train.py default)
+  sampling_temperature: 1.0
+  eval_sampling_temperature: 1.0
+  training_mode: s3gfn                  # s3gfn | reward_shaping | rtb
+  use_retrosynthesis: true             # the SOFT-synthesizability signal (retro-solvability)
+  # retro_env: the training-time synthesizability library (data/envs/<env>/{building_block.smi,
+  # template.txt}). WE USE zincfrag_hb105 = ZINCFrag blocks (~178k, public) + hb.txt (105 templates).
+  # WHY NOT the paper's stock_hb (Enamine stock + 71-template hb_edited)? Enamine is vendor-gated
+  # (not in repo); ZINCFrag is S3-GFN's public alternative AND is in AiZynth's ZINC stock (aligns
+  # with our post-hoc referee). ZINCFrag fragments are small, so the paper's 71 templates give only
+  # 0.8% starting synth_ratio (won't bootstrap); the fuller 105-template set gives 4.7% -> climbs to
+  # 90%+. Full rationale + build: experiments/lsd_hubs/campaign/build_s3gfn_retro_env.sh + Logs/.
+  retro_env: zincfrag_hb105
+  retro_steps: 3
+  sa_threshold: 4.0
+  aux_coefficient: 0.001                # AUTHORS' value (experiments/pmo/main/s3gfn/hparams_default.yaml).
+                                        # WAS 0.0001 with no rationale recorded anywhere -- a 10x slip.
+  eval_samples: 1000                    # built-in final eval sample count
+  eval_every: 100000                    # >n_train_steps => no periodic eval (we sample our own pool)
+  save_periodic_every: 16               # ~every 1,024 scored molecules at batch 64. Unit is STEPS
+                                        # (train.py:617). NOTE each checkpoint is ~561 MB.
+  catalog: ""                           # optional chemical-filter catalog (off)
+  property_rule: none
