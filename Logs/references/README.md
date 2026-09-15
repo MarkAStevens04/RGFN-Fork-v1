@@ -67,9 +67,9 @@ When extending the model, "does this match RGFN?" is answered here.
 single **global** scalar `Z = F(s0)` (the `logZ` parameter) by matching, over each complete
 trajectory, `Z·∏P_F = R(x)·∏P_B` (their Eq. 13; Prop. 1 proves a global minimizer samples ∝ reward).
 Crucially it learns **no per-state flow `F(s)`** — unlike flow-matching/detailed-balance — which is why
-`glue/analysis/` estimates a hub's flow by forward-sampling visit count *and* recovers it from the
-balance condition as `F(h)=R(x)·P_B(h|x)/P_F(x|h)` (`glue/analysis/tb_flow.py`; the two are the
-`Z·∏P_F` and `R·∏P_B` sides of the TB loss, so their agreement is a training-quality check).
+per-state flow must be recovered *post-hoc*: as a forward-sampling visit count, *or* from the balance
+condition as `F(h)=R(x)·P_B(h|x)/P_F(x|h)` (the two are the `Z·∏P_F` and `R·∏P_B` sides of the TB loss,
+so their agreement is a training-quality check).
 &nbsp;`pdfs/malkin2022trajectorybalance.pdf` · arXiv:2201.13259
 
 ---
@@ -113,9 +113,55 @@ synthesizable (`has_route=1`, `routes.jsonl`). Heavy upstream code installed via
 `external/setup_scent.sh` (not vendored); thin adapter in
 `validation/generators/scent/`. &nbsp;`pdfs/gainski2025scent.pdf` · arXiv:2506.19865
 
+### `[kim2026s3gfn]` — S3-GFN: Synthesizable Molecular Generation via Soft-constrained GFlowNets (2026)
+The **marquee foil** for the LSD-Flow *library-efficiency* benchmark (`docs/LSD_FLOW_BENCHMARK_PLAN.md`
+T3.1–T3.2). Unlike every other baseline here, S3-GFN is **not reaction-grounded**: it is a
+**sequence (SMILES) GFlowNet** that induces synthesizability **softly** — off-policy replay training
+with a **contrastive signal** from separate buffers of synthesizable vs. unsynthesizable samples,
+plus rich priors from large SMILES corpora — rather than by construction from reaction templates. It
+reports **>95% per-molecule synthesizability** with higher rewards, and argues you therefore *don't
+need* a reaction-based decision process. Our benchmark concedes the per-molecule point and targets the
+part it misses: **library** economics. S3-GFN's molecules carry **no shared-route structure**, so
+assembling a *library* from them requires recovering shared intermediates **post-hoc** (AiZynth →
+SPARROW, `has_route=0`, routes found not by-construction). The headline figure shows S3-GFN + the best
+batch planner still loses to a reaction-GFN + hub-batching on **reactions-per-mode** — the
+"MDP-necessary-for-library-economics" result. Mila/Bengio lineage (same as `[bengio2021gflownet]`).
+Runs in its own conda env (`external/setup_s3gfn.sh`); pool ingested via
+`scripts/ingest_candidates.py` (`has_route=0`) and routed by T1.3. &nbsp;`pdfs/kim2026s3gfn.pdf` ·
+arXiv:2602.04119
+
+### `[malik2023batchgfn]` — BatchGFN: Generative Flow Networks for Batch Active Learning (ICML 2023 workshop)
+Where the **joint mutual information (JMI)** batch objective enters our world. A GFlowNet whose
+*state* is the query batch under construction and whose *actions* add pool points, trained to sample
+batches proportional to `exp(JMI/T)` — JMI being BatchBALD's `I[y₁:B, θ | x₁:B, D]`, closed-form
+under an exact GP. Read it for the objective, not the results: it is a **10-page workshop paper
+evaluated only on toy 1D regression** (pool 2000, query 10). **The line that matters for us** is
+their §4.2–4.3: BatchGFN is *"on par with BatchBALD"* and beats BALD/random — its contribution is
+**amortizing** the greedy objective, not improving it. Hence greedy BatchBALD **upper-bounds** it,
+which is why `docs/LSD_FLOW_BENCHMARK_PLAN.md` §11 implements greedy BatchBALD rather than a
+GFlowNet over subsets. Note it has **no cost model** — every pool point costs the same to label,
+which is precisely the axis LSD-Flow owns. &nbsp;`pdfs/malik2023batchgfn.pdf` · arXiv:2306.15058 ·
+[code](https://github.com/s-a-malik/batchgfn)
+
+### `[zhang2025baldgfn]` — BALD-GFlowNet: Why Pool When You Can Flow? (2025)
+The **stronger of the two information-theoretic benchmark targets** (`LSD_FLOW_BENCHMARK_PLAN.md`
+§11) — the *generative* successor to pool-based acquisition, and the one actually run on molecules.
+It swaps "which pool point is most informative?" for "what does an informative sample **look**
+like?": a GFlowNet is trained to sample proportional to the BALD reward, so acquisition cost becomes
+**independent of pool size**. Three details we build on: (1) it uses **single-point BALD**
+`I(y; ω | x, D)` over an **ensemble**, *not* BatchBALD's joint MI — so it inherits BALD's
+batch-redundancy weakness and offsets it with GFlowNet diversity; (2) its reward is
+**multiplicative** — `MI · TPSA · QED · SAS · Rings` — our precedent for giving the information
+baseline a quality term rather than beating a pure-exploration strawman (§11.2 decision 7); (3) the
+ensemble surrogate is why our `M` becomes an ensemble (§11.2 decision 3). Results: comparable F1 to
+the BALD baseline at a fraction of the oracle cost, 12.5% runtime reduction at a 12M library, more
+diverse molecules (JAK2 / Enamine REAL, atom-level graph-Transformer GFlowNet). Its generator is
+**atom-level with no reaction grounding and no synthesis cost** — the same library-economics blind
+spot as `[kim2026s3gfn]`. &nbsp;`pdfs/zhang2025baldgfn.pdf` · arXiv:2509.00704
+
 ---
 
-## Evaluation — synthesizability metrics
+## Evaluation — synthesizability metrics & synthesis-cost tooling
 
 ### `[genheden2020aizynth]` — AiZynthFinder: a fast, robust retrosynthesis tool
 The retrosynthesis engine behind the **synthesizability metric we report on every
@@ -134,6 +180,95 @@ is a *post-hoc validation* metric, never an in-loop reward. Installed in its own
 The cheap, RDKit-native companion to AiZynth that the same papers also report (a 1 = easy
 … 10 = hard heuristic from fragment contributions + complexity penalties). We compute it
 alongside the AiZynth verdict in the same evaluator. &nbsp;DOI:10.1186/1758-2946-1-8
+
+### `[fromer2024sparrow]` — SPARROW: synthetic cost-aware decision making in molecular design (Nat Comput Sci 2024)
+The **cost model everything in the library benchmark is ultimately priced against**, and the one
+paper to read before touching a reactions/mode number. SPARROW ("Synthesis Planning And
+Rewards-based Route Optimization Workflow", [`coleygroup/sparrow`](https://github.com/coleygroup/sparrow))
+is a **mixed-integer linear program over a merged retrosynthetic graph** that jointly picks *which*
+candidates to make and *which routes* to make them by, trading three scalarized terms: cumulative
+reward of the selected candidates (maximized) against starting-material cost and a per-reaction
+penalty inversely proportional to success probability (minimized). Compounds are deduplicated by
+canonical SMILES, so **shared intermediates collapse to one node and amortize automatically** —
+which is exactly why it can price a hub-batched library fairly.
+
+**Read this next bit before citing it, because we use SPARROW for two opposite jobs** and
+conflating them is the easiest way to misread a result (convention adopted 2026-08-04; see
+`docs/RESEARCH_CONTEXT.md`, "How library cost is measured"):
+- **SPARROW-Verifier (SV)** — *independent auditor.* Hand it a library we already chose plus its
+  recipes and ask for the cheapest way to make **all** of it (`constrain_all_targets=True`, reward
+  weight 0). We *expect* agreement; this is the source of "our count-once estimate is within
+  0.0–3.1% of provably optimal, and hub-batching is closer to the optimum than the baseline"
+  (`Logs/042` gate, `Logs/049`).
+- **SPARROW-Batching (SB)** — *a genuine competitor.* Hand it a pool + a hard reaction budget and
+  it chooses **which** molecules to make (`constrain_all_targets=False`, reward-bearing objective,
+  `--max-rxns`). The competitor's selector in the headline (`Logs/056`) and in the BC-SB /
+  BC-Enum-SB arms (`Logs/059`). Always name the pool with it.
+
+**The single most load-bearing fact:** the objective has **no diversity term**, and the authors say
+so themselves — *"SPARROW currently does not consider marginal information gain related to
+molecular diversity and matched molecular pairs."* Quote them, not our source-code reading, when
+the paper needs it. That limitation is the mechanism behind `Logs/059`: a cost-only optimizer
+concentrates its picks on a handful of intermediates (78% from one at the tightest budget), so the
+distinctness of an SB selection is always **measured, never assumed**. Sign convention verified
+against `LinearSelector.set_objective` — it *minimizes*
+`-w₀·Σ(reward×selected) + w₁·Σ(SM cost) + w₂·Σ(reaction penalty)`, so `weights=[1,0,0,0,0]` plus a
+hard `max_rxns` maximizes selected reward under a reaction budget. The MILP is superlinear in pool
+size (~1 s per budget point at 500 targets, >110 s at 2,000), so a pool that fails to solve is
+itself a reportable datapoint. Own `sparrow` conda env (`external/setup_sparrow.sh`) + PuLP/CBC,
+crossed by subprocess via `validation/lsdflow/adapters/workers/sparrow_worker.py`.
+&nbsp;DOI:10.1038/s43588-024-00639-y · arXiv:2311.02187 · `pdfs/fromer2024sparrow.pdf`
+
+
+### `[fromer2025diversity]` — SPARROW v2: optimal downselection for diversity and parallel chemistry (JCIM 2025)
+The **same group's follow-up to [fromer2024sparrow]**, and the paper that answers the sharpest
+objection to our competitor arms: that we only ever raced against a *diversity-blind* optimizer
+(Logs/059 — handed our own enumerated children, SPARROW took 98 candidates off 3 hubs and produced
+2 distinct molecules). Three additions, all already present in our clone:
+
+1. **Expected cumulative reward.** Instead of a linear weighted sum, maximize
+   `Σ_t U_t·c_t·Π_i L_i^(u_i,t)` — discount each candidate's reward by the success probability of
+   *every step in its route*. A risky reaction is then penalized **once per route that uses it**
+   rather than once globally. This is **nonlinear**; the authors state it needs **Gurobi**, is not
+   guaranteed to reach a global optimum, and they therefore use the **linear** formulation (with an
+   iterative `λ_rew` scheme, SI S1.3) for all of their own analysis. We run **PuLP/CBC with no
+   Gurobi licence**, so the linear path is the one available to us — which is also the one they
+   recommend.
+2. **Cluster diversity.** Add `λ_div ×(number of clusters represented)` to the scalarized objective,
+   or impose clusters-represented as a *constraint*. Clusters are deliberately arbitrary: they use
+   Butina on count-Morgan at 0.8, but note they can be scaffolds, predicted protein interactions, or
+   any project-specific criterion — so **our own τ-mode definition can be dropped in directly**,
+   making the comparison like-for-like on our metric rather than on theirs.
+3. **Parallel chemistry.** An inequality constraint capping the number of distinct **reaction
+   classes** selected, so the batch can be run in parallel.
+
+Their Fig. 3C result matters for how we should expect our arms to move: raising `λ_div` *reduced*
+the number of selected reactions and *raised* mean reaction score — in their case study diversity
+was **not** bought with extra steps. They caution this does not hold on every candidate set (SI S4).
+
+**Status in this repo: no upgrade needed.** `external/sparrow` is already at this version (clone
+dated 2025-06-30; `selector/{linear,nonlinear,bayesian}`), and `LinearSelector` already exposes
+`clusters` / `N_per_cluster` / `rxn_classes` / `max_rxn_classes` with
+`weights = [reward, start_cost, reaction, diversity, class]`. Our worker simply hardcodes the last
+two weights to zero and never passes clusters — so enabling this is **configuration, not
+re-implementation**.
+&nbsp;DOI:10.1021/acs.jcim.5c00606 · `pdfs/fromer2025diversity.pdf`
+
+### `[ianez2026multiaiz]` — MultiAiZ: joint synthesis planning by leveraging common intermediates
+The **second competitor route-planner** for the LSD-Flow library benchmark (T4.1), a smarter
+alternative to plain AiZynth→SPARROW. Where AiZynth routes each target *independently*,
+MultiAiZ ([`MolecularAI/multiaiz`](https://github.com/MolecularAI/multiaiz)) plans over a
+**set** of targets: it runs AiZynthFinder for `n_iters` **cycles** (paper: **5**), and after
+each cycle **appends the discovered intermediates to the stock** so later targets route
+*through* them → convergent routes that reuse shared intermediates. It ranks intermediates by a
+novel **"intermediate score"** (amortized subtree cost × reaction-class utility). We use it as a
+per-pool pricer: run MultiAiZ on *one* acquisition function's accepted-mode pool in **isolation**
+(sharing found within a pool is **not** leaked to other pools), feed the resulting route trees to
+the same SPARROW MILP over the base ZINC stock (so a shared intermediate is **built once and
+amortized**, not free), and ask whether smarter discovery lowers **reactions-per-mode** vs plain
+AiZynth→SPARROW, or SPARROW's MILP already captures the sharing. Own `multiaiz` conda env
+(`external/setup_multiaiz.sh`); Molecular AI / AstraZeneca, same group as AiZynthFinder.
+&nbsp;DOI:10.1016/j.ailsci.2026.100175 · `pdfs/ianez2026multiaiz.pdf`
 
 ---
 

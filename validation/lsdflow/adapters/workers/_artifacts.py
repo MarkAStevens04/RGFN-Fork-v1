@@ -1,0 +1,464 @@
+"""Shared, stdlib-only artifact writers for the per-env LSD-Flow workers.
+
+Every cross-env worker (SCENT/FragGFN/RxnFlow) must emit the SAME on-disk contract so everything
+downstream — ``pick_hubs.py``, the harness DAG loader, ``run_campaign.py``/``sweep_campaign.py`` —
+is model-agnostic. ``scent_worker.py`` predates this module and inlines the same logic; the newer
+workers import THIS so the format can never drift between generators (and a future 5th generator
+gets it for free).
+
+**Import contract:** pure stdlib (``csv``/``json``/``math``) so it loads unchanged in every conda
+env. A worker run as a script imports it via a ``sys.path`` insert of its own directory::
+
+    import sys; from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import _artifacts
+
+The record-row shape is a dict keyed by :data:`REC_COLS`; that mirrors the
+:class:`glue.samplers.lsdflow.records.FlowRecord` fields and is what ``records.csv`` /
+``enumerated_records.csv`` persist. How a worker *computes* those values is model-specific (that is
+the flow-extraction recipe); this module only serializes them.
+"""
+
+from __future__ import annotations
+
+import csv
+import json
+import math
+import time
+from contextlib import contextmanager
+from typing import Dict, List, Optional, Sequence, Tuple
+
+# records.csv / enumerated_records.csv columns — MUST match scent_worker._REC_COLS and the
+# FlowRecord fields the harness/adapters read back (validation/lsdflow/adapters/*_adapter.py).
+REC_COLS = [
+    "hub_key",
+    "child_key",
+    "reward",
+    "log_reward",
+    "log_pf_move",
+    "log_pb_move",
+    "log_pf_stop",
+    "hub_depth",
+    "hub_stereo_key",
+    "child_stereo_key",
+]
+
+
+def log_flow(rec: Dict) -> float:
+    """The §2 single-child log-flow estimate ``log F_hat(h;x) = logR + logP_B(move) -
+    logP_F(move) - logP_F(stop)`` from one record's log-terms."""
+    return (
+        float(rec["log_reward"])
+        + float(rec["log_pb_move"])
+        - float(rec["log_pf_move"])
+        - float(rec["log_pf_stop"])
+    )
+
+
+def hub_uncertainty(recs: Sequence[Dict]) -> Tuple[float, int]:
+    """``U(h)`` = population variance of a hub's children's ``log F_hat`` (§2 flow-matching
+    residual), plus ``n_effective`` (count of finite estimates). ``U = NaN`` for < 2 finite
+    estimates (variance undefined). Matches ``scent_worker._hub_uncertainty``."""
+    xs = [log_flow(r) for r in recs]
+    xs = [x for x in xs if math.isfinite(x)]
+    n = len(xs)
+    if n < 2:
+        return float("nan"), n
+    mean = sum(xs) / n
+    var = sum((x - mean) ** 2 for x in xs) / n  # population variance
+    return var, n
+
+
+def write_records(path, rows: Sequence[Dict]) -> None:
+    """Write records.csv / enumerated_records.csv (DictWriter over :data:`REC_COLS`).
+
+    ``extrasaction="ignore"`` so a row may carry additional keys (e.g. the Z-anchored prefix terms,
+    written separately by :func:`write_prefix_terms`) without changing this file's schema — every
+    downstream reader parses records.csv by column NAME, so the contract stays fixed."""
+    with open(path, "w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=REC_COLS, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(rows)
+
+
+PREFIX_COLS = ["child_key", "child_stereo_key", "hub_stereo_key", "log_pf_prefix", "log_pb_prefix"]
+
+
+def write_prefix_terms(path, rows: Sequence[Dict]) -> None:
+    """Write prefix_terms.csv — the source->hub half of the trajectory, for the Z-ANCHORED flow
+    reconstruction.
+
+    Chaining detailed balance forward from the source (``F(s_0) = Z``) gives an exact second estimate
+    of a hub's flow that shares no terms with the R-anchored one we ship:
+
+        log F_prefix(h) = log Z + sum_{t<=k} [ logP_F(s_t|s_{t-1}) - logP_B(s_{t-1}|s_t) ]
+
+    Multiplying it by the suffix (R-anchored) estimate reproduces trajectory balance exactly, so the
+    two agree **iff** TB holds on that trajectory — their log-difference IS the per-trajectory TB
+    residual, with no frequency/visitation estimate anywhere. ``log Z`` is already persisted in
+    ``meta.json``.
+
+    Kept in a SIDECAR rather than added to ``REC_COLS`` so records.csv's schema (and every existing
+    reader) is untouched. Join on ``child_stereo_key`` + ``hub_stereo_key``.
+
+    NOTE (FragGFN): its prefix ends at the last-AddNode *skeleton* state, which is also what its
+    suffix estimator is anchored at — so the prefix-vs-suffix comparison is self-consistent, even
+    though neither refers to the reconstructed hub *molecule*."""
+    rows = [r for r in rows if r]
+    if not rows:
+        return
+    with open(path, "w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=PREFIX_COLS, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(rows)
+
+
+# The step schema lives in glue/ because the enumeration path (glue) and these artifact writers
+# (validation) must emit the SAME one, and validation may import from glue but never the reverse.
+#
+# But it must be loaded BY PATH, not as `from glue...`. These writers run INSIDE each generator's own
+# conda env, where the `glue` PACKAGE is not importable: `import glue` executes glue/__init__.py ->
+# glue.registry -> gin/torch/rgfn, and in the scent env `rgfn` resolves to SCENT's own fork, not ours.
+# That is exactly why this module's stated contract is stdlib-only. A plain package import here made
+# EVERY scent/rxnflow/fraggfn enumerate job die at startup with `ModuleNotFoundError: No module named
+# 'glue'` (6 SCENT recaps, jobs 74424-74429, failed in 7 s each). route_steps.py is deliberately
+# dependency-free, so loading the file itself keeps one source of truth with no package side effects.
+import importlib.util as _ilu  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+
+_rs_path = _Path(__file__).resolve().parents[4] / "glue" / "samplers" / "lsdflow" / "route_steps.py"
+_rs_spec = _ilu.spec_from_file_location("_lsdflow_route_steps", _rs_path)
+if _rs_spec is None or _rs_spec.loader is None:  # pragma: no cover
+    raise ImportError(f"cannot load the canonical route-step schema from {_rs_path}")
+_rs_mod = _ilu.module_from_spec(_rs_spec)
+_rs_spec.loader.exec_module(_rs_mod)
+reaction_id, reaction_step = _rs_mod.reaction_id, _rs_mod.reaction_step  # noqa: F401
+
+
+def build_enum_hub(
+    *,
+    hub_input: str,
+    hub_key: str,
+    depth: int,
+    recs: Sequence[Dict],
+    added_by_child: Optional[Dict[str, List[str]]] = None,
+    reaction_by_child: Optional[Dict[str, list]] = None,
+    promoted_filter: Optional[set] = None,
+) -> Dict:
+    """One ``enum_children.json`` hub entry from a hub's enumerated child records.
+
+    ``recs`` are record-dicts (:data:`REC_COLS`) for the hub's one-step children. ``added_by_child``
+    / ``reaction_by_child`` (keyed by the child's stereo key) carry the fragment added + the final
+    reaction step(s) for the ``free_frag`` child policy + route reconstruction; both empty is fine
+    for models with no promoted fragments (the ``reward`` child policy ignores them). Mirrors the
+    ``scent_worker`` enumerate output so ``run_campaign.EnumeratedHub`` loads it unchanged."""
+    added_by_child = added_by_child or {}
+    reaction_by_child = reaction_by_child or {}
+    children = []
+    for r in recs:
+        skey = r.get("child_stereo_key") or r["child_key"]
+        added = added_by_child.get(skey, [])
+        if promoted_filter is not None:
+            added = [f for f in added if f in promoted_filter]
+        children.append(
+            {
+                "smiles": r["child_key"],
+                "reward": r["reward"],
+                "added_promoted": added,
+                "reaction": reaction_by_child.get(skey, []),
+            }
+        )
+    u_h, n_eff = hub_uncertainty(recs)
+    return {
+        "hub_input": hub_input,
+        "hub_key": hub_key,
+        "depth": int(depth),
+        "uncertainty": None if u_h != u_h else u_h,  # NaN -> null
+        "n_effective": n_eff,
+        "children": children,
+    }
+
+
+def write_enum_children(path, enum_hubs: Sequence[Dict]) -> None:
+    """Write enum_children.json = ``{"hubs": [...]}`` (the campaign's EnumeratedHub list)."""
+    json.dump({"hubs": list(enum_hubs)}, open(path, "w"))
+
+
+class PartialFlusher:
+    """Periodically persist an in-progress enumeration so a walltime kill is not a total loss.
+
+    WHY THIS IS SHARED AND NOT PER-WORKER: ``rgfn_worker`` grew a hand-rolled ``if (i+1) % 10``
+    flush after its sEH cell timed out; the other three workers never got one. That was survivable
+    while enumeration was a fast surrogate call, but a DOCKING enumeration is 6-10 GPU-hours per hub
+    slice, so an unflushed timeout throws away most of a day of A100 time. It cost exactly that once
+    (rxnflow_clpp slices 72248-72253, cancelled with nothing on disk) before being lifted here.
+
+    Also flushes the timing sidecar, so a partial enumeration still carries the measured compute for
+    the hubs it DID finish — otherwise the surviving children look free.
+
+    Downstream already tolerates a partial file: ``tau_curve_all_generators`` and
+    ``surface_all_generators`` reject a cell whose enumeration covers <90% of its ``hubs.csv``, and
+    ``merge_docking_slices`` refuses to publish an incomplete slice set. So a flushed partial is
+    usable evidence, never silently mistaken for a complete cell.
+
+        flusher = PartialFlusher(out_dir, every=10, timing_meta=dict(...))
+        for i, hub in enumerate(hubs):
+            ...
+            flusher.maybe(i, enum_hubs, hub_timings)
+        flusher.final(enum_hubs, hub_timings)
+    """
+
+    def __init__(
+        self,
+        out_dir,
+        *,
+        every: int = 10,
+        timing_meta: Optional[Dict] = None,
+        n_hubs: Optional[int] = None,
+    ):
+        """``n_hubs`` (the slice's hub count) shrinks ``every`` so a SMALL slice still flushes.
+
+        ``every=10`` was chosen for 200-hub slices, where it bounds the JSON rewrite cost. But a
+        re-enumeration slice can carry 2-3 hubs (scent_clpp's capped-hub top-up: 25 hubs over 10
+        slices), and then the interval never elapses -- the flusher writes nothing until ``final()``,
+        so a walltime kill discards the entire slice. That is the precise failure this class exists to
+        prevent, reappearing as soon as slices got small. Clamping to ``n_hubs // 4`` guarantees at
+        least ~4 flushes regardless of slice size, and leaves the 200-hub behaviour unchanged.
+        """
+        from pathlib import Path
+
+        self.out_dir = Path(out_dir)
+        every = int(every)
+        if n_hubs:
+            every = min(every, max(1, int(n_hubs) // 4))
+        self.every = max(1, every)
+        self.timing_meta = dict(timing_meta or {})
+        self.n_flushes = 0
+
+    def _write(self, enum_hubs, hub_timings) -> None:
+        write_enum_children(self.out_dir / "enum_children.json", enum_hubs)
+        if hub_timings:
+            write_enum_timings(
+                self.out_dir / "enum_timings.json", per_hub=hub_timings, **self.timing_meta
+            )
+        self.n_flushes += 1
+
+    def maybe(self, i: int, enum_hubs, hub_timings=None) -> bool:
+        """Flush if ``i`` (0-based hub index) lands on the interval. Returns whether it wrote."""
+        if (i + 1) % self.every:
+            return False
+        self._write(enum_hubs, hub_timings)
+        print(
+            f"[partial-flush] {len(enum_hubs)} hubs persisted to {self.out_dir}/enum_children.json",
+            flush=True,
+        )
+        return True
+
+    def final(self, enum_hubs, hub_timings=None) -> None:
+        self._write(enum_hubs, hub_timings)
+
+
+def compositions_from_records(records: Sequence[Dict]) -> Dict[str, dict]:
+    """Build compositions.json for a generator with NO promoted fragments (RGFN/FragGFN/RxnFlow).
+
+    SCENT populates compositions with each molecule's fully-nested ``num_reactions`` (its dynamic
+    library builds). The reaction/fragment baselines have no promotion, so without this the campaign
+    falls back to ``num_reactions=1`` per molecule — which under-charges best-candidate and makes the
+    count-once comparison meaningless. Here we charge each molecule its FLAT build depth: a terminal
+    child is ``hub_depth + 1`` reactions, a hub is ``hub_depth``. Keyed by the cross-model SMILES key;
+    keeps the cheapest depth seen (a molecule reachable by a shorter route costs the shorter one).
+    ``promoted`` is always empty (no dynamic-library fragments to nest)."""
+    comps: Dict[str, dict] = {}
+
+    def put(key: str, nr: int) -> None:
+        if key and (key not in comps or nr < comps[key]["num_reactions"]):
+            comps[key] = {"num_reactions": int(nr), "promoted": []}
+
+    for r in records:
+        put(r["child_key"], int(r["hub_depth"]) + 1)
+        put(r["hub_key"], int(r["hub_depth"]))
+    return comps
+
+
+def write_json(path, obj) -> None:
+    json.dump(obj, open(path, "w"), indent=2)
+
+
+# ===================================================== measured compute time (Logs/039)
+# The paper's third cost axis is MEASURED wall-clock, differentiated per component, not a model
+# (see the lsdflow-compute-time-measured-not-modeled note). ``scent_worker`` inlined this first;
+# these two helpers are the portable version so every generator emits the SAME enum_timings.json
+# that ``validation/lsdflow/metrics/cost/compute_time.EnumTimings`` reads back.
+
+TIMING_COMPONENTS = ("enumeration_s", "reward_gen_s", "flow_extract_s", "unattributed_s")
+
+
+class ComponentTimer:
+    """Accumulates per-hub wall-clock split across the enumeration pipeline's components.
+
+    The three real components are the ones a strategy's compute is attributed to:
+
+      * ``enumeration_s``  — building the hub's one-step children (RDKit/graph ops, CPU),
+      * ``reward_gen_s``   — the reward generator scoring them (proxy now, docking oracle later —
+                             the axis that explodes for docking because it *actually* takes longer),
+      * ``flow_extract_s`` — the policy forward/backward passes giving P_F / P_B (mostly GPU).
+
+    ``unattributed_s`` is the honest escape hatch for a generator whose enumeration is a single
+    opaque call (RGFN goes through ``glue/samplers/lsdflow/rgfn_enumerate``): the total is still
+    measured correctly, but we refuse to invent a split. It plots as its own labelled segment.
+
+    ``sync`` is a no-arg callable invoked at both ends of every tracked block — pass
+    ``torch.cuda.synchronize`` on GPU so async kernel time lands on the component that launched it,
+    and ``None`` on CPU. Without it, GPU work drifts onto whichever component next forces a sync.
+
+    Usage::
+
+        t = ComponentTimer(sync=torch.cuda.synchronize if cuda else None)
+        with t.track("enumeration_s"):
+            children = build(hub)
+        with t.track("reward_gen_s"):
+            rewards = proxy.predict(children)
+        per_hub.append({..., **t.snapshot()})   # then t.reset() for the next hub
+    """
+
+    KEYS = TIMING_COMPONENTS
+
+    def __init__(self, sync=None):
+        self._sync = sync if callable(sync) else (lambda: None)
+        self.totals: Dict[str, float] = {k: 0.0 for k in self.KEYS}
+
+    @contextmanager
+    def track(self, key: str):
+        if key not in self.totals:
+            raise KeyError(f"unknown timing component {key!r}; expected one of {self.KEYS}")
+        self._sync()
+        t0 = time.perf_counter()
+        try:
+            yield
+        finally:
+            self._sync()
+            self.totals[key] += time.perf_counter() - t0
+
+    def add(self, key: str, seconds: float) -> None:
+        """Fold in a duration measured elsewhere (e.g. inside a helper that already timed itself)."""
+        self.totals[key] = self.totals.get(key, 0.0) + float(seconds)
+
+    def merge(self, other: Dict[str, float]) -> None:
+        for k, v in (other or {}).items():
+            if k in self.totals:
+                self.totals[k] += float(v)
+
+    def snapshot(self) -> Dict[str, float]:
+        """The accumulated components, rounded — drops always-zero keys so a fully-attributed
+        generator's file has no confusing empty ``unattributed_s`` column."""
+        return {k: round(v, 6) for k, v in self.totals.items() if v}
+
+    def reset(self) -> None:
+        for k in self.totals:
+            self.totals[k] = 0.0
+
+
+# Sample-stage components. `sampling_s` is trajectory generation INCLUDING the reward the sampler
+# computes along the way -- on a docking target that is the dominant term, because recording rewards
+# in records.csv means scoring all 30,000 trajectories through the oracle. `flow_extract_s` is the
+# P_F/P_B pass. Deliberately a separate vocabulary from TIMING_COMPONENTS: the enum stage's
+# `enumeration_s` and this stage's `sampling_s` are different work and summing them under one name
+# would make the pipeline total unreadable.
+SAMPLE_TIMING_COMPONENTS = ("sampling_s", "flow_extract_s", "reward_gen_s", "unattributed_s")
+
+
+def write_sample_timings(
+    path,
+    *,
+    setup_s: float,
+    totals_s: Dict[str, float],
+    n_trajectories: int = 0,
+    n_records: int = 0,
+    device: str = "",
+    reward_name: str = "",
+    model: str = "",
+    cuda_synchronized: bool = False,
+    component_split: str = "full",
+    extra_meta: Optional[Dict] = None,
+) -> Dict:
+    """Write ``sample_timings.json`` — the SAMPLE stage's measured compute-time sidecar.
+
+    WHY THIS EXISTS AS A SHARED HELPER. The four workers had three different answers for the same
+    measurement: RGFN put ``setup_s``/``sample_s`` in ``meta.json``, SCENT wrote a richer split to
+    its own ``sample_timings.json``, and RxnFlow and FragGFN measured nothing at all. A probe of
+    ``meta.json`` therefore reported "no timing" for three generators, one of which in fact had the
+    best instrumentation of the four. One definition and one filename removes both the gap and the
+    misreading.
+
+    WHY THE SAMPLE STAGE IS NOT A ROUNDING ERROR. It is easy to assume enumeration dominates, and on
+    a surrogate target it does. On a docking target it does not: ``rgfn_6td3``'s sample stage took
+    **50,766 s and 45,179 s** (14.1 h and 12.6 h) across two seeds, because recording rewards in
+    ``records.csv`` means scoring every one of 30,000 trajectories through the docking oracle. Any
+    figure quoting whole-pipeline GPU-hours while missing this is short by half a day per cell.
+
+    ``component_split="full"`` means the components were timed separately; ``"lumped"`` means the
+    generator could only measure a total (recorded as ``unattributed_s``) — stated in the file rather
+    than silently implied by a zero column, the same convention :func:`write_enum_timings` uses.
+    """
+    totals = {k: round(float(totals_s.get(k, 0.0)), 3)
+              for k in SAMPLE_TIMING_COMPONENTS if totals_s.get(k)}
+    meta = {
+        "setup_s": round(float(setup_s), 3),
+        "device": str(device),
+        "cuda_synchronized": bool(cuda_synchronized),
+        "reward_name": reward_name,
+        "model": model,
+        "component_split": component_split,
+        "n_trajectories": int(n_trajectories),
+        "n_records": int(n_records),
+        "totals_s": totals,
+        # The number the compute-vs-reactions exhibit actually quotes, precomputed so no reader has
+        # to decide whether setup counts (it does -- a cell pays it).
+        "stage_total_s": round(float(setup_s) + sum(totals.values()), 3),
+    }
+    meta.update(extra_meta or {})
+    write_json(path, {"meta": meta})
+    return meta
+
+
+def write_enum_timings(
+    path,
+    *,
+    per_hub: Sequence[Dict],
+    setup_s: float,
+    device: str = "",
+    reward_name: str = "",
+    model: str = "",
+    cuda_synchronized: bool = False,
+    component_split: str = "full",
+    extra_meta: Optional[Dict] = None,
+) -> Dict:
+    """Write enum_timings.json — the measured compute-time sidecar, joined to enum_children by hub.
+
+    ``per_hub`` rows MUST carry ``hub_input`` (the stereo-aware join key ``EnumTimings._hub_id``
+    prefers, so stereoisomeric hubs that share a stripped ``hub_key`` stay distinct), ``hub_key``,
+    ``depth``, ``n_children``, and whichever of :data:`TIMING_COMPONENTS` were measured.
+
+    ``component_split="full"`` means all three real components were timed separately;
+    ``"lumped"`` means the generator could only measure a per-hub total (recorded as
+    ``unattributed_s``) — stated in the file rather than silently implied by a zero column.
+
+    When a 200-hub run is split across parallel jobs, merge the slices with
+    ``EnumTimings.merge`` (unions ``per_hub``, charges ``setup_s`` once).
+    """
+    keys = [k for k in TIMING_COMPONENTS if any(h.get(k) for h in per_hub)]
+    totals = {k: round(sum(float(h.get(k, 0.0)) for h in per_hub), 3) for k in keys}
+    meta = {
+        "setup_s": round(float(setup_s), 3),
+        "device": str(device),
+        "cuda_synchronized": bool(cuda_synchronized),
+        "reward_name": reward_name,
+        "model": model,
+        "component_split": component_split,
+        "n_hubs": len(per_hub),
+        "n_children": sum(int(h.get("n_children", 0)) for h in per_hub),
+        "totals_s": totals,
+    }
+    meta.update(extra_meta or {})
+    write_json(path, {"meta": meta, "per_hub": list(per_hub)})
+    return meta

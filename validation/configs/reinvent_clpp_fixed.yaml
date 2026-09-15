@@ -1,0 +1,69 @@
+# REINVENT 4 on ClpP — the STRUCTURE-BASED cell, docking against human ClpP 7UVU.
+#
+# Same entrant, same budget, same everything as `reinvent_seh_fixed.yaml`; only the reward differs. That
+# is the point: any sEH-vs-ClpP difference is the objective, not the setup.
+#
+# THE REWARD IS REACHED ACROSS AN ENV BOUNDARY. This entrant's conda env has no docking stack, so
+# `DockingBridgeReward` shells out to `scripts/score_batch.py --oracle docking_clpp` in the `rgfn`
+# env (or to the persistent docking server when RGFN_DOCK_SOCKET is set). `predict()` returns the
+# higher-is-better VALUE clip(-raw/norm, 0, inf); `raw_scores()` returns raw Vina kcal/mol.
+#
+# ⚠ THE MODE GATE IS ON THE **RAW** VALUE, -8.0, LOWER-IS-BETTER (Logs/045: Youden-optimal over 183
+# ChEMBL ClpP binders vs property-matched decoys, AUROC 0.895). Gate on `raw_score`, never on the
+# `score` = ReLU(-raw) column. The old -2.0 bar was non-binding — every generator cleared ~100% of it.
+#
+# ⚠ ANY JOB THAT DOCKS MUST `source ~/bin/rgfn-smoke-env.sh` (CLAUDE.md): QuickVina2-GPU links against
+# boost libs that live outside the conda env, and omitting them looks exactly like a degraded GPU.
+#
+# COST: ~1.2 s/molecule of docking, so a 10,000-call budget is ~3.3 h of docking on top of training.
+
+run:
+  name: fixed_reward/reinvent_clpp        # run dir: <root>/fixed_reward/reinvent_clpp/<timestamp>
+  root_dir: experiments                  # overridden by --root-dir on Balam ($SCRATCH)
+  seed: 42
+
+fixed_reward:
+  system: clpp
+  reward_name: clpp_docking
+  n_samples: 2000                        # unique valid molecules to emit — matches S3-GFN's pool
+  sample_oversample: 6.0                 # draws requested from the trained agent to reach n_samples
+  score_units: "clip(-vina) value (higher is better; RAW Vina kcal/mol in raw_score)"
+
+reward:
+  type: docking
+  oracle: docking_clpp                  # scripts/score_batch.py ORACLES key
+  norm: 1.0
+  clip: 10.0
+  failed_score: 0.0                     # an undockable molecule scores 0, not NaN
+  # NO reward_shaping/transform: DockingBridgeReward.predict already returns a
+  # bounded higher-is-better value, and stacking a sigmoid on top would double-shape it.
+
+reinvent:
+  device: cuda:0
+  prior_file: ""                         # default: external/reinvent/priors/reinvent.prior
+  batch_size: 64                         # AUTHORS' value (configs/toml/staged_learning.toml)
+  # ORACLE BUDGET — a REPORTED asymmetry, not an equalized one (the project's standing convention;
+  # cf. Logs/056's "surrogate calls ~500 vs 155,764"). 1000 steps x 128 = ~128,000 reward calls,
+  # the same order as S3-GFN's 5,000 steps x 64. REINVENT is often benchmarked at PMO's 10,000-call
+  # budget instead; that is ~13x less than every other entrant here gets, so we run it at the
+  # generous end. If a reviewer asks, the answer is that the baseline was over-fed, not starved.
+  max_steps: 157                         # 157 x 64 = 10,048 scored -- the PMO budget.
+                                         # WAS 1000 x 128 = 128,000, a 12.4x advantage over
+                                         # Saturn's 10,020 (audit 2026-08-20). REINVENT has no
+                                         # budget field: steps x batch IS the budget.
+  checkpoint_every_steps: 16             # ~1,024 scored molecules per checkpoint (16 x 64).
+                                         # Implemented as REINVENT's OWN multi-stage mechanism
+                                         # (10 stages summing to 157), not an upstream patch: its
+                                         # RL loop has no save hook. purge_memories=false and a
+                                         # top-level diversity filter mean nothing resets between
+                                         # stages, so training is unchanged.
+  sigma: 128                             # DAP reward-function sigma (REINVENT's documented default)
+  learning_rate: 0.0001
+  # ON BY DESIGN. REINVENT's RL is reward-maximizing and collapses onto one scaffold without this;
+  # a collapsed pool cannot reach the 100-mode deliverable and we would only find out after paying
+  # ~2.25 h of route discovery on it. This is also the charitable setting.
+  diversity_filter:
+    type: IdenticalMurckoScaffold
+    bucket_size: 25
+    minscore: 0.4
+    minsimilarity: 0.4

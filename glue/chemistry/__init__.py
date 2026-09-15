@@ -18,7 +18,12 @@ Cost enters generation two ways (see the doc): natively for SCENT (its own
 ``PathCostProxy``), retroactively for everyone else (``validation/harness/cost.py``
 prices recorded routes with the same numbers + formula).
 
-**Status:** non-functional stubs — every method raises ``NotImplementedError``.
+**Status: LIVE** (corrected 2026-09-12 — this docstring previously said "non-functional
+stubs, every method raises NotImplementedError", which stopped being true when the loaders
+landed and was never updated). ``ChemLibrary`` loads and exports real libraries, and
+``GlueReactionDataFactory`` is selected by four configs in ``configs/glue/`` against
+``data/libraries/glue_standard_v1`` (418 priced fragments, 112 templates with yields).
+
 Imported here so ``glue.registry`` registers ``GlueReactionDataFactory`` with gin.
 """
 

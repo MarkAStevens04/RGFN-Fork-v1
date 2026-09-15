@@ -1,0 +1,14 @@
+# 5,000-iteration variant of fixed_reward_6td3b.gin (benchmark_v2).
+#
+# The one change vs the base config: Trainer.n_iterations 400 -> 5000, so the 6TD3-B cells carry
+# the same uniform training budget as the rest of the matrix. Reaction cap stays at the original
+# 4 (the +1-reaction idea was measured to ~3x the compute + amplify size-drift and was dropped;
+# Logs/030 Results). Everything else — the CNN_VS oracle, the SMALL shared library, beta=4,
+# norm=1.0, lean metrics, and the orientation resolved from the oracle rather than a literal —
+# is inherited from the base and deliberately not restated here.
+#
+# Run:  python scripts/fixed_reward.py --cfg configs/glue/fixed_reward_6td3b_5k.gin --seed 42
+# (Balam compute node; multi-day docking-in-the-loop -> launch via the v2 chain launcher.)
+include 'configs/glue/fixed_reward_6td3b.gin'
+
+Trainer.n_iterations = 5000

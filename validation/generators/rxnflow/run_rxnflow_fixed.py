@@ -17,8 +17,11 @@ Candidate emission shells to ``scripts/ingest_candidates.py`` under the ``rgfn``
 
 import argparse
 import csv
+import json
+import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import torch
@@ -28,6 +31,18 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from validation.generators._budget_stop import (
+    BudgetReached,
+    BudgetStopper,
+    arm_b_budget,
+)
+from validation.generators._trace import (
+    ARM_A_ORACLE_CALLS,
+    BudgetCheckpointer,
+    TracedReward,
+    TraceWriter,
+    write_timing,
+)
 from validation.generators.rxnflow.al_loop import LabelStore, RxnFlowActiveLearningLoop
 from validation.generators.rxnflow.fixed_reward import (
     DockingBridgeReward,
@@ -71,7 +86,18 @@ def main() -> None:
     )
     ap.add_argument("--seed", type=int, default=None, help="override RNG seed (else cfg.run.seed)")
     ap.add_argument("--root-dir", default=None, help="base run dir (else cfg.run.root_dir)")
+    ap.add_argument(
+        "--run-dir",
+        default=None,
+        help="EXACT run dir (stable, no timestamp) to reuse across 3-day auto-requeue chain "
+        "links (campaign Logs/030): the run resumes from its last checkpoint. Overrides "
+        "--root-dir + cfg.run.name.",
+    )
     ap.add_argument("--device", default=None, help="cpu | cuda (else auto)")
+    ap.add_argument(
+        "--n-train-steps", type=int, default=None, help="override n_train_steps (smoke)"
+    )
+    ap.add_argument("--n-samples", type=int, default=None, help="override n_samples (smoke)")
     args = ap.parse_args()
 
     cfg = OmegaConf.load(args.cfg)
@@ -83,16 +109,23 @@ def main() -> None:
     seed = args.seed if args.seed is not None else int(run_c.get("seed", 42))
     device = args.device or rxn_c.get("device") or ("cuda" if torch.cuda.is_available() else "cpu")
     beta = float(fr_c.get("beta", 8))
-    n_train_steps = int(fr_c.get("n_train_steps", 5000))
-    n_samples = int(fr_c.get("n_samples", 1000))
+    n_train_steps = (
+        args.n_train_steps
+        if args.n_train_steps is not None
+        else int(fr_c.get("n_train_steps", 5000))
+    )
+    n_samples = args.n_samples if args.n_samples is not None else int(fr_c.get("n_samples", 1000))
     reward_type = reward_c.get("type", "seh_proxy")
     system = fr_c.get("system", "seh")
     reward_name = fr_c.get("reward_name", "seh_proxy")
     score_units = fr_c.get("score_units", f"{reward_name} (higher is better)")
 
-    root = Path(args.root_dir or run_c.get("root_dir", "experiments"))
-    run_name = run_c.get("name", "fixed_reward/rxnflow_seh")
-    run_dir = root / run_name / _timestamp()
+    if args.run_dir:  # stable dir for auto-requeue chain links (resume into the same place)
+        run_dir = Path(args.run_dir)
+    else:
+        root = Path(args.root_dir or run_c.get("root_dir", "experiments"))
+        run_name = run_c.get("name", "fixed_reward/rxnflow_seh")
+        run_dir = root / run_name / _timestamp()
     run_dir.mkdir(parents=True, exist_ok=True)
     OmegaConf.save(cfg, run_dir / "run_config.yaml")
     print(
@@ -107,14 +140,26 @@ def main() -> None:
         )
     elif reward_type == "docking":
         # Per-step GPU docking across the env boundary (score_batch.py under rgfn).
+        # ORIENTATION MUST BE PLUMBED. DockingBridgeReward defaults to lower-is-better
+        # (it negates the raw score), which is right for dvina/Vina and silently fatal for
+        # 6TD3-B: cnn_vs is higher-is-better in roughly [0, 9], so `max(-raw/norm, 0)` maps
+        # every molecule to exactly 0.0 -- a flat reward, no exception, no nan, nothing in
+        # the logs. The LSD-Flow sampling worker already resolves this from targets.py; this
+        # TRAINING path did not, so the flag has to travel from the config.
         reward = DockingBridgeReward(
             oracle=reward_c.get("oracle", "docking_seh"),
             repo_root=str(_REPO_ROOT),
             norm=float(reward_c.get("norm", 1.0)),
             failed_score=float(reward_c.get("failed_score", 0.0)),
             clip=float(reward_c.get("clip", 10.0)),
+            higher_is_better=bool(reward_c.get("higher_is_better", False)),
             oracle_args=dict(reward_c.get("oracle_args", {})),
             workdir=str(run_dir / "reward_bridge"),
+        )
+        print(
+            f"[RXN-FR] docking oracle={reward.oracle} "
+            f"higher_is_better={reward.sign > 0} (sign={reward.sign:+.0f})",
+            flush=True,
         )
     else:
         reward = SEHFrozenReward(
@@ -122,7 +167,17 @@ def main() -> None:
             clip=float(reward_c.get("clip", 10.0)),
             batch_size=int(reward_c.get("batch_size", 128)),
         )
-    print(f"[RXN-FR] reward={reward_type} system={system}", flush=True)
+    # --- trace: every reward evaluation, continuously (benchmark_v2 arm A/B) --------
+    # Wrapped HERE, before the trainer and the loop take their references, so both the training
+    # loop and the final candidate scoring land in one file. RxnFlow has three providers and the
+    # trainer calls reward() while the emitter calls predict(); one wrapper catches all of them.
+    _t0 = time.time()
+    trace = TraceWriter(run_dir / "trace.csv", t0=_t0)
+    reward = TracedReward(reward, trace, tag="RXN-FR")
+    print(
+        f"[RXN-FR] reward={reward_type} system={system} | trace -> {run_dir / 'trace.csv'}",
+        flush=True,
+    )
 
     # --- RxnFlow Config (mirrors run_rxnflow_al.py). -------------------------------
     from rxnflow.config import Config, init_empty
@@ -173,12 +228,71 @@ def main() -> None:
     out_dir = run_dir / "fixed_reward"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. train the synthesis-GFN ONCE against the frozen sEH reward.
-    print(
-        f"[RXN-FR] training {n_train_steps} steps against frozen sEH proxy (beta={beta})",
-        flush=True,
+    # 1. train the synthesis-GFN ONCE. Resume from a prior 3-day auto-requeue chain link's
+    #    checkpoint if present (campaign Logs/030), then train only the REMAINING steps.
+    loop.load_checkpoint()
+
+    # ARM A (benchmark_v2): preserve the checkpoint taken when the trace's n_scored first reaches
+    # 10,000 oracle calls. Defined on the CALL axis, never the step axis -- RxnFlow at the authors'
+    # num_from_policy=64 crosses it near step 156, but replay makes that arithmetic unreliable, so
+    # the trace triggers it. Copied aside rather than left as last_gfn.pt, which the periodic
+    # cadence overwrites minutes later.
+    def _save_arm_a(iteration_idx: int) -> None:
+        loop.save_checkpoint()
+        src = loop._ckpt_path()
+        dst = src.parent / "arm_a_10k.pt"
+        shutil.copy2(src, dst)
+
+    arm_a = BudgetCheckpointer(trace, ARM_A_ORACLE_CALLS, _save_arm_a, tag="RXN-FR")
+
+    # ARM B: the oracle-call STOP. Wired HERE and not inherited, because RxnFlow does not go through
+    # `attach_proxy_trace` -- it uses the TracedReward shape and drives the budget from this hook.
+    # Wiring the stop only into attach_proxy_trace therefore covered RGFN and SCENT and left
+    # RxnFlow's 12 arm-B cells with NO stop at all: they would have run to the config's 5,000 steps,
+    # roughly 155,000 calls against a declared 320,000, and the capability guards would have passed
+    # because the stop exists in _trace.py -- an existence check standing in for a capability check,
+    # one file over from where the same defect was fixed today.
+    _arm_b_calls = arm_b_budget()
+    arm_b = (
+        BudgetStopper(trace, _arm_b_calls, trace.path, tag="RXN-FR-armB")
+        if _arm_b_calls is not None
+        else None
     )
-    loop._train_steps(n_train_steps)
+    if arm_b is not None:
+        print(
+            f"[RXN-FR] arm-B stop armed at {_arm_b_calls:,} distinct training molecules", flush=True
+        )
+
+    def _on_iteration(it: int) -> None:
+        # Stamp the NEXT iteration's rows before checking the budget: _train_steps calls this after
+        # train_batch, so rows scored from here belong to it+1.
+        reward.set_step(it + 1)
+        arm_a.note_iteration(it)
+        # LAST, and after arm A: note_iteration RAISES, and arm A can legitimately fire on the same
+        # boundary that ends the run.
+        if arm_b is not None:
+            arm_b.note_iteration(it)
+
+    remaining = n_train_steps - loop._it
+    if remaining > 0:
+        print(
+            f"[RXN-FR] training {remaining} steps (of {n_train_steps}; resumed at {loop._it}) "
+            f"against frozen {reward_type} reward (beta={beta})",
+            flush=True,
+        )
+        reward.set_step(loop._it + 1)
+        # ARM B ENDS BY RAISING, AND THAT IS A SUCCESS -- twin of the catch in
+        # glue/fixed_reward/pipeline.py. Uncaught, BudgetReached propagates out and the job reports
+        # FAILED for a cell that spent exactly the budget it was given.
+        try:
+            loop._train_steps(remaining, on_iteration=_on_iteration)
+        except BudgetReached as stop:
+            print(f"[RXN-FR] arm-B budget reached, ending training normally: {stop}", flush=True)
+    else:
+        print(
+            f"[RXN-FR] already trained {loop._it} >= {n_train_steps} steps; skipping to sampling.",
+            flush=True,
+        )
 
     # 2. sample a batch of unique valid molecules WITH synthesis routes.
     batch, routes = loop._sample_query_batch()
@@ -198,6 +312,31 @@ def main() -> None:
             w.writerow([smi, sc] + ([raws[i]] if raws is not None else []))
     routes_path = out_dir / "routes.jsonl"
     loop._write_routes_jsonl(routes_path, batch, routes)
+
+    # CLOSE THE TRACE BEFORE THE INGEST, not after. Ingest is a `conda run` subprocess into a
+    # different env and it CAN fail for reasons that have nothing to do with training -- a smoke on
+    # 2026-09-07 died there on a missing libnvrtc, and because these writes used to sit after the
+    # call, a complete 214-row training history plus its timing and arm-A manifest were lost with
+    # it. The training record must not depend on a downstream step succeeding.
+    trace.close()
+    n_scored, n_distinct = trace.n_scored, trace.n_distinct
+    write_timing(
+        run_dir / "timing.json",
+        {"train_and_sample_s": time.time() - _t0},
+        total_s=time.time() - _t0,
+    )
+    (run_dir / "arm_a.json").write_text(json.dumps(arm_a.manifest(), indent=2))
+    print(
+        f"[RXN-FR] trace closed: {n_scored} scored / {n_distinct} distinct "
+        f"-> {run_dir / 'trace.csv'}; timing -> timing.json; arm_a -> arm_a.json",
+        flush=True,
+    )
+    if not arm_a.fired:
+        print(
+            f"[RXN-FR] NOTE arm-A checkpoint never fired: the run scored {n_scored} molecules, "
+            f"below the {ARM_A_ORACLE_CALLS}-call budget. This cell is arm A in its entirety.",
+            flush=True,
+        )
 
     ingest_cmd = [
         "conda",

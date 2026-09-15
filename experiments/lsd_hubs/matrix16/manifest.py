@@ -1,0 +1,468 @@
+#!/usr/bin/env python
+"""The 16-cell LSD-Flow matrix manifest — the ONE place that resolves every cell's spec.
+
+A "cell" = one (generator x target) run of the publication-scale 4x4 matrix (Logs/030).
+This module joins three things into a single :class:`Cell` object every driver consumes:
+
+  1. the static per-cell spec (``manifest.csv``: generator, target, seed, config, checkpoint,
+     guidance sidecar),
+  2. the per-target science (``targets.py``: reward gate value + direction + enumeration cost
+     class), and
+  3. **live filesystem status** (checkpoint present? SCENT sidecar present? how many candidates
+     has training emitted?), computed at load time so the manifest never goes stale.
+
+Output locations (the organization scheme — proposal §3 + Logs/030 layout):
+  * heavy scratch artifacts (sampled DAG + enumeration):
+    ``$SCRATCH/rgfn_runs/lsdflow/matrix16/<gen>_<target>/{sample,enum}/``
+  * committed small results (campaign readouts, summaries):
+    ``experiments/lsd_hubs/matrix16/results/<gen>_<target>/``
+
+Run policy: ``surrogate`` cells (sEH/DRD2) are **active** now; ``docking`` cells (6TD3/ClpP) are
+**deferred** (they need the GPU-docking enumeration path + finished training). ``Cell.run_stage``
+exposes this; ``select(..., stage="active")`` filters to the runnable set.
+
+CLI: ``python experiments/lsd_hubs/matrix16/manifest.py`` prints a live status table.
+"""
+
+from __future__ import annotations
+
+import csv
+import glob
+import json
+import os
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import List, Optional
+
+HERE = Path(__file__).resolve().parent
+if str(HERE) not in sys.path:  # allow `import targets` whether run as script or module
+    sys.path.insert(0, str(HERE))
+from targets import Target, get_target  # noqa: E402
+
+REPO_ROOT = HERE.parents[2]  # experiments/lsd_hubs/matrix16 -> repo root
+# All THREE of these are env-overridable, and all three must be redirected together for an isolated
+# run to be safe. MATRIX16_SCRATCH alone is not enough: results_dir lives in the REPO, so redirecting
+# only the scratch tree still points the campaign at the committed results -- which is how a 24-hub
+# harvest test overwrote the real rxnflow_seh curve.png/summary.json (restored from git).
+#
+# MATRIX16_MANIFEST exists so a *different seed* can be run without editing the shared manifest.csv:
+# `tag` is deliberately (generator, target) with no seed in it, so a second seed reusing this file
+# would collide in both the scratch and results trees. Point all three at per-seed values instead:
+#   MATRIX16_MANIFEST=.../manifest_seed43.csv
+#   MATRIX16_SCRATCH=/scratch/.../lsdflow/matrix16_seed43
+#   MATRIX16_RESULTS=.../results_seed43
+# Unset, every one of them falls back to the seed-42 headline paths, so existing callers are unchanged.
+MANIFEST_CSV = Path(os.environ.get("MATRIX16_MANIFEST", str(HERE / "manifest.csv")))
+RESULTS_ROOT = Path(os.environ.get("MATRIX16_RESULTS", str(HERE / "results")))
+SCRATCH_ROOT = Path(
+    os.environ.get("MATRIX16_SCRATCH", "/scratch/markymoo/rgfn_runs/lsdflow/matrix16")
+)
+
+
+@dataclass
+class Cell:
+    """One (generator x target) matrix cell: static spec + resolved target + live status."""
+
+    generator: str
+    target_name: str
+    seed: int
+    config: str  # repo-relative
+    checkpoint: str  # absolute (scratch)
+    guidance_sidecar: str  # absolute (scent only) or ""
+
+    @property
+    def target(self) -> Target:
+        return get_target(self.target_name)
+
+    @property
+    def tag(self) -> str:
+        """Stable cell id used for scratch/results dir names + logs."""
+        return f"{self.generator}_{self.target_name}"
+
+    @property
+    def reward_type(self) -> str:
+        return self.target.reward_type
+
+    @property
+    def run_stage(self) -> str:
+        """'active' (surrogate, run now) | 'deferred' (docking, wire but hold)."""
+        return "deferred" if self.target.is_docking else "active"
+
+    @property
+    def conda_env(self) -> str:
+        """The conda env the generator's worker runs in (== generator name for all four)."""
+        return self.generator
+
+    @property
+    def worker(self) -> str:
+        """Repo-relative path to the generator's per-env worker (sample + enumerate)."""
+        return f"validation/lsdflow/adapters/workers/{self.generator}_worker.py"
+
+    # -- resolved paths ---------------------------------------------------------
+    @property
+    def config_path(self) -> Path:
+        return REPO_ROOT / self.config
+
+    @property
+    def scratch_dir(self) -> Path:
+        return SCRATCH_ROOT / self.tag
+
+    @property
+    def sample_dir(self) -> Path:
+        return self.scratch_dir / "sample"
+
+    @property
+    def enum_dir(self) -> Path:
+        return self.scratch_dir / "enum"
+
+    @property
+    def results_dir(self) -> Path:
+        return RESULTS_ROOT / self.tag
+
+    # -- live filesystem status (computed each load, never frozen in the CSV) ----
+    @property
+    def checkpoint_exists(self) -> bool:
+        return bool(self.checkpoint) and os.path.exists(self.checkpoint)
+
+    @property
+    def guidance_ok(self) -> bool:
+        """SCENT needs the P_B sidecar (entry 024) for exact flow recovery; N/A for others."""
+        if self.generator != "scent":
+            return True
+        return bool(self.guidance_sidecar) and os.path.exists(self.guidance_sidecar)
+
+    @property
+    def n_candidates(self) -> int:
+        """Max candidates any candidates.csv in THIS checkpoint's own run dir holds — a cheap
+        training-completion proxy (surrogate ~1000, docking ~200 when done).
+
+        Derived from the checkpoint path, not a guessed ``<tag>_5k`` dir, so a cell may point at any
+        run location (e.g. the cap-6 re-run ``fraggfn_drd2_maxfrag6/<timestamp>/``) and still resolve.
+        Walks up from ``.../checkpoints/last_gfn.pt`` — the run root is 1 level up for
+        fraggfn/rxnflow and 2 for rgfn/scent (which nest a ``train/`` dir)."""
+        if not self.checkpoint:
+            return 0
+        ck = Path(self.checkpoint)
+        best = 0
+        for up in (2, 3, 4):  # checkpoints/ -> run root, allowing the extra train/ level
+            if len(ck.parents) <= up:
+                break
+            for h in glob.glob(f"{ck.parents[up]}/**/candidates.csv", recursive=True):
+                try:
+                    with open(h) as fh:
+                        best = max(best, sum(1 for _ in fh) - 1)
+                except OSError:
+                    pass
+            if best:
+                break
+        return best
+
+    # Campaign standard: every pub-scale cell trains 5,000 iterations (Logs/030). A cell trained
+    # less than this is not comparable to the others, however healthy it looks.
+    EXPECTED_EPOCH = 5000
+
+    @property
+    def train_epoch(self):
+        """Iterations the checkpoint actually reached, or ``None`` if not yet scanned.
+
+        Read from a cached ``<checkpoint>.epoch.json`` sidecar, NOT from the checkpoint: a real read
+        is ``torch.load`` on a 200-450 MB file (13-19 s measured, even with ``mmap=True``), so doing
+        it inside ``--emit`` would add minutes to every launcher invocation. Populate the sidecars
+        once with ``manifest.py --scan-epochs``.
+
+        WHY THIS EXISTS: ``ready`` used to mean "checkpoint + sidecar present and training emitted
+        candidates", which says nothing about how FAR training got. Both RGFN docking cells reported
+        ready at 2730/5000 and 3570/5000, and a smoke against the 71%-trained one passed every
+        assertion -- because the plumbing was fine. Only the epoch reveals that the cell would not be
+        comparable to the six trained to 5000. This is the second time "ready" meant less than it
+        sounded (see ``docking_wired``), so it is now checked rather than assumed.
+
+        STALENESS: the sidecar is a cache of a file that KEEPS CHANGING -- training appends to the
+        same last_gfn.pt for days -- so a sidecar older than its checkpoint describes a run that has
+        since moved on. Ignoring that inverted every RGFN verdict: sidecars written 08-07 still said
+        2730/3590/3620 while the 08-12 checkpoints had reached 4880/4999/4999, so this gate reported
+        three FULLY-TRAINED cells as undertrained and blocked the last gap in the docking matrix for
+        two days. A cache that silently serves stale data is worse than no cache here, because the
+        whole point of the gate is to be believed. Now: if the checkpoint is newer than its sidecar,
+        the sidecar is discarded and reported as unknown (``None``) rather than trusted, which routes
+        the caller to ``--scan-epochs`` instead of to a wrong number."""
+        if not self.checkpoint:
+            return None
+        side = Path(self.checkpoint + ".epoch.json")
+        ckpt = Path(self.checkpoint)
+        if not side.exists():
+            return None
+        try:
+            if ckpt.exists() and ckpt.stat().st_mtime > side.stat().st_mtime + 1:
+                return None  # stale: checkpoint advanced since the scan
+            return int(json.load(open(side))["epoch"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+
+    @property
+    def training_complete(self):
+        """``True`` / ``False`` / ``None`` (unknown — sidecar not populated). Never guesses."""
+        ep = self.train_epoch
+        if ep is None:
+            return None
+        return ep >= self.EXPECTED_EPOCH * 0.99
+
+    @property
+    def training_note(self) -> str:
+        """Human-readable provenance, safe to paste into a log or a figure caption."""
+        ep = self.train_epoch
+        if ep is None:
+            return "epoch unknown (run manifest.py --scan-epochs)"
+        if self.training_complete:
+            return f"trained {ep}/{self.EXPECTED_EPOCH}"
+        pct = 100.0 * ep / self.EXPECTED_EPOCH
+        return f"UNDERTRAINED {ep}/{self.EXPECTED_EPOCH} ({pct:.0f}%)"
+
+    @property
+    def docking_wired(self) -> bool:
+        """Whether this generator's worker can ACTUALLY score this target.
+
+        ``ready`` used to mean only "the checkpoint and its sidecar exist", which for a docking cell
+        is necessary but not sufficient: rgfn_worker and fraggfn_worker have no docking path at all
+        (fraggfn raises "reward not wired", rgfn never references a docking bridge). Those cells
+        still reported ``ready``, so ``submit_docking_cell.sh`` -- which gates on exactly that --
+        would launch, construct the oracle (~35-44 s), run a real preflight dock, and only then die
+        in the worker. Cheap, but it reads as a cluster problem rather than a missing feature, and it
+        misled a cross-cluster hand-off into planning 8 docking cells when only 4 can run.
+
+        Detected from the worker source rather than a hand-maintained list, so wiring a generator
+        flips it automatically. Surrogate targets are always wired (in-process proxy, no bridge).
+
+        Detects the REFUSAL, not the capability. A first attempt looked for the cross-env bridge
+        classes and gave a FALSE NEGATIVE on RGFN, which needs no bridge at all: it runs in the same
+        env as ``glue`` and reaches the oracle in-process through gin (``@OracleRewardProxy`` wrapping
+        ``@DockingClpPOracle``), so the class names never appear in its worker. Every worker that
+        cannot dock says so explicitly with a "not wired" SystemExit, and that is the reliable
+        signal."""
+        if not self.target.is_docking:
+            return True
+        try:
+            src = (REPO_ROOT / self.worker).read_text()
+        except OSError:
+            return False
+        # An explicit refusal naming this target's reward is the negative signal.
+        for line in src.splitlines():
+            if "not wired" in line and ("6td3" in line or "clpp" in line or "reward_name" in line):
+                # a guard exists; wired iff the worker ALSO builds a docking reward
+                return any(
+                    k in src
+                    for k in ("DockingBridgeReward", "DockingBridgeProxy", "OracleRewardProxy")
+                )
+        return True
+
+    @property
+    def ready(self) -> bool:
+        """Analysis-ready = trained checkpoint present + (SCENT) sidecar present + training has
+        emitted candidates. NOTE: candidate-presence is a proxy for "training finished"; verify
+        ``torch.load(ckpt)['metrics']['epoch']`` == target iters before a *headline* run
+        (verify-checkpoint-trained memory)."""
+        return (
+            self.checkpoint_exists
+            and self.guidance_ok
+            and self.n_candidates > 0
+            and self.docking_wired
+            and self.training_complete is True
+        )
+
+    def status(self) -> str:
+        if not self.checkpoint_exists:
+            return "no-checkpoint"
+        if not self.guidance_ok:
+            return "missing-sidecar"
+        if self.n_candidates == 0:
+            return "training"
+        if not self.docking_wired:
+            return "worker-not-wired"  # trained + present, but this worker cannot dock
+        tc = self.training_complete
+        if tc is False:
+            return f"undertrained:{self.train_epoch}/{self.EXPECTED_EPOCH}"
+        if tc is None:
+            return "epoch-unknown"
+        return "ready"
+
+
+def load_manifest(path: Path = MANIFEST_CSV) -> List[Cell]:
+    cells: List[Cell] = []
+    with open(path) as fh:
+        for r in csv.DictReader(fh):
+            cells.append(
+                Cell(
+                    generator=r["generator"].strip(),
+                    target_name=r["target"].strip(),
+                    seed=int(r["seed"]),
+                    config=r["config"].strip(),
+                    checkpoint=r["checkpoint"].strip(),
+                    guidance_sidecar=r.get("guidance_sidecar", "").strip(),
+                )
+            )
+    return cells
+
+
+def select(
+    cells: Optional[List[Cell]] = None,
+    *,
+    generators: Optional[List[str]] = None,
+    targets: Optional[List[str]] = None,
+    stage: Optional[str] = None,  # "active" | "deferred"
+    reward_type: Optional[str] = None,  # "surrogate" | "docking"
+    only_ready: bool = False,
+) -> List[Cell]:
+    """Filter the manifest. All criteria AND together; None = no constraint."""
+    cells = cells if cells is not None else load_manifest()
+    out = []
+    for c in cells:
+        if generators and c.generator not in generators:
+            continue
+        if targets and c.target_name not in targets:
+            continue
+        if stage and c.run_stage != stage:
+            continue
+        if reward_type and c.reward_type != reward_type:
+            continue
+        if only_ready and not c.ready:
+            continue
+        out.append(c)
+    return out
+
+
+def get_cell(generator: str, target: str, cells: Optional[List[Cell]] = None) -> Cell:
+    hits = select(cells, generators=[generator], targets=[target])
+    if not hits:
+        raise KeyError(f"No manifest cell for generator={generator!r} target={target!r}")
+    return hits[0]
+
+
+def _emit_shell(cell: Cell) -> str:
+    """Shell-sourceable ``KEY=VALUE`` view of a cell — the bridge for ``submit_cell.sh``
+    (``eval "$(python manifest.py --emit <gen> <target>)"``). Keeps the manifest the single
+    source of truth; bash never re-derives paths."""
+    t = cell.target
+    kv = {
+        "CELL_TAG": cell.tag,
+        "GENERATOR": cell.generator,
+        "TARGET": cell.target_name,
+        "REWARD_NAME": cell.target.reward_name,
+        "SEED": cell.seed,
+        "CONFIG": cell.config,
+        "CHECKPOINT": cell.checkpoint,
+        "GUIDANCE": cell.guidance_sidecar,
+        "HIGHER_IS_BETTER": "true" if t.higher_is_better else "false",
+        "MODE_REWARD_THRESHOLD": t.mode_reward_threshold,
+        "REWARD_TYPE": cell.reward_type,
+        "RUN_STAGE": cell.run_stage,
+        "CONDA_ENV": cell.conda_env,
+        "WORKER": cell.worker,
+        "SAMPLE_DIR": str(cell.sample_dir),
+        "ENUM_DIR": str(cell.enum_dir),
+        "RESULTS_DIR": str(cell.results_dir),
+        "STATUS": cell.status(),
+        "TRAIN_EPOCH": cell.train_epoch if cell.train_epoch is not None else "",
+        "TRAINING_COMPLETE": {True: "true", False: "false", None: "unknown"}[
+            cell.training_complete
+        ],
+        "TRAINING_NOTE": cell.training_note,
+    }
+    import shlex
+
+    return "\n".join(f"{k}={shlex.quote(str(v))}" for k, v in kv.items())
+
+
+def _print_table() -> None:
+    cells = load_manifest()
+    hdr = (
+        f"{'cell':<16}{'stage':<10}{'reward_type':<12}{'gate':>7}  {'dir':>4}  {'#cand':>6}  status"
+    )
+    print(hdr)
+    print("-" * len(hdr))
+    for c in cells:
+        t = c.target
+        gate = f"{'>' if t.higher_is_better else '<'}{t.mode_reward_threshold:g}"
+        print(
+            f"{c.tag:<16}{c.run_stage:<10}{c.reward_type:<12}{gate:>7}  "
+            f"{'ok' if c.checkpoint_exists else 'NO':>4}  {c.n_candidates:>6}  {c.status()}"
+        )
+    ready = [c.tag for c in cells if c.ready]
+    active_ready = [c.tag for c in select(cells, stage="active", only_ready=True)]
+    print(f"\nready ({len(ready)}/16): {', '.join(ready)}")
+    print(f"active + ready ({len(active_ready)}/8 surrogate): {', '.join(active_ready)}")
+
+
+def _scan_epochs() -> None:
+    """Populate ``<checkpoint>.epoch.json`` for every cell. Import torch lazily so the rest of the
+    manifest stays dependency-free (the launcher sources it from a bare conda env)."""
+    import torch
+
+    for c in load_manifest():
+        if not c.checkpoint_exists:
+            print(f"  {c.tag:<16} no checkpoint")
+            continue
+        side = Path(c.checkpoint + ".epoch.json")
+        # Re-read when the checkpoint is NEWER than its sidecar. Skipping on mere existence made this
+        # command unable to repair the very staleness it is the documented fix for: `train_epoch`
+        # correctly reported "unknown" for an outdated sidecar and pointed here, and this then printed
+        # "cached: epoch unknown" and moved on, leaving the stale file in place forever.
+        ckpt = Path(c.checkpoint)
+        stale = ckpt.exists() and side.exists() and ckpt.stat().st_mtime > side.stat().st_mtime + 1
+        if side.exists() and not stale:
+            print(f"  {c.tag:<16} cached: {c.training_note}")
+            continue
+        if stale:
+            print(f"  {c.tag:<16} sidecar STALE (checkpoint is newer) -- re-reading")
+        try:
+            d = torch.load(c.checkpoint, map_location="cpu", weights_only=False, mmap=True)
+            ep = (d.get("metrics") or {}).get("epoch", d.get("it"))
+            if ep is None:
+                print(f"  {c.tag:<16} no epoch/it in checkpoint")
+                continue
+            side.write_text(json.dumps({"epoch": int(ep), "checkpoint": c.checkpoint}) + "\n")
+            print(f"  {c.tag:<16} {c.training_note}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  {c.tag:<16} scan failed: {exc}")
+
+
+def _main() -> None:
+    import argparse
+
+    ap = argparse.ArgumentParser(description="LSD-Flow 16-cell matrix manifest")
+    ap.add_argument(
+        "--emit",
+        nargs=2,
+        metavar=("GENERATOR", "TARGET"),
+        help="print a shell-sourceable KEY=VALUE spec for one cell (for submit_cell.sh)",
+    )
+    ap.add_argument(
+        "--scan-epochs",
+        action="store_true",
+        help="read each checkpoint's reached iteration and cache it to <ckpt>.epoch.json. SLOW "
+        "(torch.load per checkpoint, 13-19 s each) and only needed once per checkpoint -- every "
+        "other command reads the cached sidecar.",
+    )
+    ap.add_argument(
+        "--list",
+        choices=["all", "active", "deferred", "active-ready"],
+        help="print 'generator<TAB>target' per matching cell (for launch scripts)",
+    )
+    a = ap.parse_args()
+    if a.scan_epochs:
+        _scan_epochs()
+    elif a.emit:
+        print(_emit_shell(get_cell(a.emit[0], a.emit[1])))
+    elif a.list:
+        stage = None if a.list in ("all", "active-ready") else a.list
+        only_ready = a.list == "active-ready"
+        if a.list == "active-ready":
+            stage = "active"
+        for c in select(stage=stage, only_ready=only_ready):
+            print(f"{c.generator}\t{c.target_name}")
+    else:
+        _print_table()
+
+
+if __name__ == "__main__":
+    _main()

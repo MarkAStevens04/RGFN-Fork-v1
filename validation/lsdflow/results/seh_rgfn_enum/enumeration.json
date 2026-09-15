@@ -1,0 +1,164 @@
+{
+  "reward_threshold": 7.0,
+  "similarity_threshold": 0.7,
+  "per_hub_enumeration": [
+    {
+      "hub": "Nc1ccc(-c2ccc(CNc3ccc(-c4cncc(F)c4)cn3)cc2)cc1",
+      "depth": 3,
+      "n_enumerated_paths": 1350,
+      "n_records": 1350
+    },
+    {
+      "hub": "Fc1cccc(CNc2cc(-c3ccc(-c4nc5cc(Br)ccc5o4)cc3)n[nH]2)c1F",
+      "depth": 3,
+      "n_enumerated_paths": 838,
+      "n_records": 838
+    },
+    {
+      "hub": "Nc1cc(-c2ccc(CNc3cc(-c4cccc(F)c4)n[nH]3)cc2)n[nH]1",
+      "depth": 3,
+      "n_enumerated_paths": 1350,
+      "n_records": 1350
+    },
+    {
+      "hub": "Nc1cc(-c2ccc(-c3nc4cc(-c5cccc(F)c5)ccc4o3)cc2)n[nH]1",
+      "depth": 3,
+      "n_enumerated_paths": 728,
+      "n_records": 728
+    },
+    {
+      "hub": "O=C=Nc1ccc(-c2cccc(F)c2)cc1",
+      "depth": 1,
+      "n_enumerated_paths": 162,
+      "n_records": 162
+    },
+    {
+      "hub": "Fc1cccc(-c2ccc3nc(-c4nc5cc(Br)ccc5o4)oc3c2)c1",
+      "depth": 3,
+      "n_enumerated_paths": 216,
+      "n_records": 216
+    },
+    {
+      "hub": "Fc1cncc(Br)c1",
+      "depth": 0,
+      "n_enumerated_paths": 216,
+      "n_records": 216
+    },
+    {
+      "hub": "CCCCCCBr",
+      "depth": 0,
+      "n_enumerated_paths": 222,
+      "n_records": 222
+    },
+    {
+      "hub": "O=C(O)c1cc[nH]n1",
+      "depth": 0,
+      "n_enumerated_paths": 474,
+      "n_records": 474
+    },
+    {
+      "hub": "Cc1cccc(CBr)c1C",
+      "depth": 0,
+      "n_enumerated_paths": 222,
+      "n_records": 222
+    },
+    {
+      "hub": "Cc1cccc(C)c1B(O)O",
+      "depth": 0,
+      "n_enumerated_paths": 61,
+      "n_records": 61
+    },
+    {
+      "hub": "OB(O)c1cccc(F)c1",
+      "depth": 0,
+      "n_enumerated_paths": 61,
+      "n_records": 61
+    }
+  ],
+  "enrichment": [
+    {
+      "hub_key": "Nc1ccc(-c2ccc(CNc3ccc(-c4cncc(F)c4)cn3)cc2)cc1",
+      "depth": 3,
+      "n_sampled_children": 2,
+      "n_enumerated_children": 996,
+      "hit_modes": 29,
+      "children_per_hit_mode": 34.34,
+      "sampled_recovered_by_enum": "2/2",
+      "enum_best_reward": 7.918,
+      "reward_threshold": 7.0,
+      "similarity_threshold": 0.7,
+      "enum_reactions_per_mode_hub": 1.103,
+      "enum_reactions_per_mode_independent": 4.0
+    },
+    {
+      "hub_key": "Fc1cccc(CNc2cc(-c3ccc(-c4nc5cc(Br)ccc5o4)cc3)n[nH]2)c1F",
+      "depth": 3,
+      "n_sampled_children": 3,
+      "n_enumerated_children": 686,
+      "hit_modes": 2,
+      "children_per_hit_mode": 343.0,
+      "sampled_recovered_by_enum": "3/3",
+      "enum_best_reward": 7.126,
+      "reward_threshold": 7.0,
+      "similarity_threshold": 0.7,
+      "enum_reactions_per_mode_hub": 2.5,
+      "enum_reactions_per_mode_independent": 4.0
+    },
+    {
+      "hub_key": "Nc1cc(-c2ccc(CNc3cc(-c4cccc(F)c4)n[nH]3)cc2)n[nH]1",
+      "depth": 3,
+      "n_sampled_children": 3,
+      "n_enumerated_children": 996,
+      "hit_modes": 19,
+      "children_per_hit_mode": 52.42,
+      "sampled_recovered_by_enum": "3/3",
+      "enum_best_reward": 7.83,
+      "reward_threshold": 7.0,
+      "similarity_threshold": 0.7,
+      "enum_reactions_per_mode_hub": 1.158,
+      "enum_reactions_per_mode_independent": 4.0
+    },
+    {
+      "hub_key": "Nc1cc(-c2ccc(-c3nc4cc(-c5cccc(F)c5)ccc4o3)cc2)n[nH]1",
+      "depth": 3,
+      "n_sampled_children": 3,
+      "n_enumerated_children": 498,
+      "hit_modes": 19,
+      "children_per_hit_mode": 26.21,
+      "sampled_recovered_by_enum": "3/3",
+      "enum_best_reward": 7.722,
+      "reward_threshold": 7.0,
+      "similarity_threshold": 0.7,
+      "enum_reactions_per_mode_hub": 1.158,
+      "enum_reactions_per_mode_independent": 4.0
+    },
+    {
+      "hub_key": "O=C=Nc1ccc(-c2cccc(F)c2)cc1",
+      "depth": 1,
+      "n_sampled_children": 4,
+      "n_enumerated_children": 134,
+      "hit_modes": 1,
+      "children_per_hit_mode": 134.0,
+      "sampled_recovered_by_enum": "4/4",
+      "enum_best_reward": 7.071,
+      "reward_threshold": 7.0,
+      "similarity_threshold": 0.7,
+      "enum_reactions_per_mode_hub": 2.0,
+      "enum_reactions_per_mode_independent": 2.0
+    },
+    {
+      "hub_key": "Fc1cccc(-c2ccc3nc(-c4nc5cc(Br)ccc5o4)oc3c2)c1",
+      "depth": 3,
+      "n_sampled_children": 2,
+      "n_enumerated_children": 188,
+      "hit_modes": 1,
+      "children_per_hit_mode": 188.0,
+      "sampled_recovered_by_enum": "2/2",
+      "enum_best_reward": 7.159,
+      "reward_threshold": 7.0,
+      "similarity_threshold": 0.7,
+      "enum_reactions_per_mode_hub": 4.0,
+      "enum_reactions_per_mode_independent": 4.0
+    }
+  ]
+}

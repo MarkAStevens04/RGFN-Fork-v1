@@ -1,8 +1,27 @@
 # Chemistry library format — a standard, swappable fragment + reaction set
 
-**Status:** design + non-functional stubs (2026-07-02). Nothing here is wired into a
-run yet; the stubs (`glue/chemistry/`, `validation/harness/cost.py`) raise
-`NotImplementedError` and exist to fix the interfaces. See "Build order" at the end.
+**Status: BUILT AND IN USE** (corrected 2026-09-12).
+
+This header previously read *"design + non-functional stubs (2026-07-02). Nothing here is
+wired into a run yet; the stubs raise `NotImplementedError`."* That stopped being true when
+the loaders landed and nobody updated it, so the document disowned a feature that works —
+which is worse than no document, because a reader concludes the capability does not exist.
+
+What is actually live:
+
+| | |
+|---|---|
+| `glue/chemistry/library.py` | `ChemLibrary` loads/exports the canonical format. No gin, no torch — rdkit only |
+| `glue/chemistry/reaction_data_factory.py` | `GlueReactionDataFactory`, `@gin.configurable`, subclasses upstream `ReactionDataFactory` |
+| `data/libraries/glue_standard_v1/` | 418 priced fragments, 112 templates with yields |
+| `configs/glue/fixed_reward_{seh_proxy_stdlib,drd2_stdlib,clpp,6td3}.gin` | four configs select it |
+
+The "Build order" section at the end is retained as a record of the original plan; read it as
+history, not as a to-do list. The one part still genuinely unbuilt is the retroactive cost
+evaluator described in §6.
+
+This subsystem has also been migrated to the publication repo as `hubbatching.chemistry`, with
+a user-facing guide at `docs/extending/chemistry.md` there.
 
 This document specifies a **canonical, modular library** of the two inputs every
 reaction-based generator in this project builds molecules from — a **fragment /

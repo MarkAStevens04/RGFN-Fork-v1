@@ -1,0 +1,1069 @@
+#!/usr/bin/env python
+"""The competitor pipeline's frontier: SPARROW SELECTS a library from a pre-routed candidate pool.
+
+THE EXPERIMENT THIS IMPLEMENTS. A chemist wanting 100 diverse compounds likely to bind would (1)
+generate candidates with a generative model, (2) retro-plan them ALL with a batch planner, (3) hand
+routes + predicted rewards to SPARROW and let it choose the subset worth making. This script is
+stages 2->3: it consumes a cached MultiAiZ routes artifact and sweeps SPARROW's reaction budget,
+emitting the (modes, reactions) frontier that LSD-Flow's curve is read against at a common mode count.
+
+WHY THIS IS NOT sweep_campaign.py. That driver applies a reward-ranked, tau-diverse greedy selection
+FIRST and uses SPARROW only to PRICE the result — SPARROW never decides anything, and the baseline is
+handed a diversity-aware selector it would not actually have. Here SPARROW does its own job
+(`--select`, maximize selected reward s.t. `--max-rxns`), which is both the honest baseline and the
+one that exposes its blind spot: SPARROW optimizes reward and cost, never diversity. We therefore
+MEASURE how many of its chosen targets are distinct modes rather than assuming.
+
+PLAN-ONCE / PRICE-MANY. Route discovery (~14 h, `submit_multiaiz_discover.sh`) is done once per pool
+and cached; so is the merged reaction network, which does not depend on the budget. Only the MILP
+re-runs per budget point (~0.01-1 s), so a whole frontier costs seconds. Changing SPARROW parameters
+never re-triggers discovery.
+
+MODE COUNTING uses the project's canonical metric (validation/lsdflow/metrics/diversity: Morgan r=3
+/2048, greedy sphere exclusion, best-reward-first) so these numbers are directly comparable to every
+reactions-per-mode figure in the benchmark.
+
+Runs in the ``rgfn`` env (imports validation.lsdflow); shells to the ``sparrow`` env for the MILP.
+
+Usage:
+  python experiments/lsd_hubs/campaign/sparrow_select_frontier.py \
+      --routes  $SCRATCH/rgfn_runs/lsdflow_sparrow/multiaiz_pools/s3gfn_seh_N500/multiaiz_routes.json \
+      --pool    $SCRATCH/rgfn_runs/lsdflow_sparrow/multiaiz_pools/s3gfn_seh_N500/pool_scores.csv \
+      --out-dir experiments/lsd_hubs/campaign/results/s3gfn_seh_select \
+      --tag s3gfn_seh_multiaiz_select
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(REPO))
+
+from validation.lsdflow.eval.network import (  # noqa: E402
+    build_network,
+    canonical,
+    expand_route_with_recipes,
+)
+from validation.lsdflow.eval.route_recovery import env_python  # noqa: E402
+from validation.lsdflow.metrics.diversity import (  # noqa: E402
+    count_modes,
+    mean_pairwise_similarity,
+    mode_assignments,
+    mode_representatives,
+    unique_scaffolds,
+)
+
+SPARROW_WORKER = "validation/lsdflow/adapters/workers/sparrow_worker.py"
+
+
+def passes_gate(val: float, gate: float, higher_is_better: bool) -> bool:
+    """Is this molecule a hit? The ONE place the gate's direction is decided.
+
+    Docking targets are lower-is-better (raw Vina; ClpP's bar is -8.0), surrogate targets are
+    higher-is-better (sEH 5.0, DRD2 0.5). Getting this backwards does not error -- it silently
+    selects the WORST molecules and reports them as a library, so the rule lives in one function
+    that every pool loader calls rather than being re-expressed per call site.
+    """
+    return val > gate if higher_is_better else val < gate
+
+
+def sparrow_reward(val: float, higher_is_better: bool) -> float:
+    """The value handed to SPARROW, which MAXIMIZES total reward.
+
+    A lower-is-better raw score has to be flipped or the MILP would prefer the worst binders. We use
+    the project's existing convention, ``ReLU(-raw)`` -- the same transform the 16-cell matrix scores
+    docking cells with (gate on ``raw_score``, optimise ``score``). On a gated pool this is identical
+    to plain ``-raw`` (every survivor has raw < gate < 0); the clip only matters for a failed pose
+    with a positive raw (we observe up to +42.4), which would otherwise become a large NEGATIVE
+    reward instead of a harmless zero.
+
+    It also keeps the scale comparable across targets -- ClpP lands ~8-15 against sEH's ~7-8 -- so
+    the lambda_div ladder swept on sEH transfers to docking rather than needing a re-sweep.
+    """
+    return val if higher_is_better else max(0.0, -val)
+
+
+def load_pool(path: Path, gate: float, top_n: int = 0, higher_is_better: bool = True):
+    """[(smiles, reward)] above the gate, DEDUPLICATED by SMILES, best-reward-first.
+
+    Dedup is load-bearing, not hygiene. A GFlowNet samples the same molecule many times, so a
+    ``records.csv`` row is a *sampling event*, not a candidate: the top-500 rows of the sEH run are
+    only 115 distinct molecules. Taking rows verbatim would (a) hand SPARROW the same target dozens
+    of times and (b) silently shrink "the 500 best candidates" to ~115, making the arm look far
+    weaker than it is. Keep each molecule once, at its best observed reward.
+
+    ``top_n`` caps AFTER dedup, so "top-N candidates" means N distinct molecules.
+    """
+    best = {}
+    with open(path, newline="") as fh:
+        for r in csv.DictReader(fh):
+            smi = r.get("smiles") or r.get("SMILES") or r.get("child_key")
+            raw = r.get("score", r.get("reward"))
+            try:
+                val = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if not smi or not passes_gate(val, gate, higher_is_better):
+                continue
+            # "best observed" is direction-aware too: for docking the best repeat is the LOWEST.
+            if smi not in best or (val > best[smi] if higher_is_better else val < best[smi]):
+                best[smi] = val
+    # Sorted best-first in the TARGET's own direction, because `top_n` means "the N best candidates"
+    # and every downstream consumer relies on that ordering.
+    rows = sorted(best.items(), key=lambda t: (-t[1] if higher_is_better else t[1]))
+    return rows[:top_n] if top_n else rows
+
+
+def _flat_smiles(smi: str) -> str:
+    """Canonical SMILES with stereochemistry removed; "" when unparseable.
+
+    Used only to bridge stereo-stripped hub keys to stereo-bearing recipe keys.
+    """
+    from rdkit import Chem
+
+    m = Chem.MolFromSmiles(smi)
+    if m is None:
+        return ""
+    Chem.RemoveStereochemistry(m)
+    return Chem.MolToSmiles(m)
+
+
+def load_enum_pool(
+    enum_path: Path,
+    hub_routes_path: Path,
+    gate: float,
+    top_n: int = 0,
+    higher_is_better: bool = True,
+    hub_recipes: dict | None = None,
+):
+    """BC-Enum-SB's pool: the ENUMERATED CHILDREN of a hub set, with their routes ASSEMBLED.
+
+    Why this cannot reuse the `native` path. An enumerated child is a molecule the generator never
+    sampled — it is one reaction past a hub — so it has no entry in ``routes.json`` (measured: 29 of
+    500 children present, versus 64 of 64 hub_keys). Its route has to be built the way
+    ``reconcile_t15._native_route_for_mode`` builds it for hub-batching:
+
+        child route = the hub's route steps  +  the child's own diversifying reaction
+
+    Getting this wrong silently produces a pool of ~6% of the children, which would make the arm look
+    absurdly weak for a reason that has nothing to do with the science.
+
+    Returns ``([(smiles, reward)], {smiles: shallow_route})`` — still SHALLOW, so the caller must
+    recipe-expand exactly as for native routes.
+    """
+    data = json.loads(Path(enum_path).read_text())
+    hub_routes = json.loads(Path(hub_routes_path).read_text())
+    # THE OTHER HALF of the guard below. The n_no_rxn checks catch "children carry no reaction", but
+    # they are gated on `if routes`, so they cannot fire when the HUB side is what is missing: an empty
+    # routes.json skips every hub, leaves `routes` empty, and returns an empty pool that SPARROW
+    # reports as Optimal at zero cost -- the same wrong-and-flattering answer, reached from the other
+    # direction. 36 of 40 sampled cell-seeds have an empty routes.json (only SCENT emitted them before
+    # 2026-08-21), so this is the common case, not a hypothetical.
+    if not hub_routes:
+        raise SystemExit(
+            f"[enum] ABORT: hub-routes file is EMPTY ({hub_routes_path}).\n"
+            f"Every hub would be skipped and SPARROW would price an empty library as trivially "
+            f"optimal -- a wrong answer that looks like a crushing win for us and never raises.\n"
+            f"routes.json is written by the SAMPLE stage, so re-running the enumeration does NOT fix "
+            f"this; the cell needs a re-sample with a route-emitting worker. Check which cells are "
+            f"usable with:  python experiments/lsd_hubs/matrix16/check_route_readiness.py"
+        )
+    # A hub with no route is not always a gap: a DEPTH-0 hub is a purchasable catalogue compound, so
+    # its prefix is legitimately EMPTY rather than missing. Distinguishing the two needs the hub's
+    # promoted-fragment list, which lives in compositions.json beside the enumeration.
+    comps_path = Path(enum_path).parent / "compositions.json"
+    comps = json.loads(comps_path.read_text()) if comps_path.exists() else {}
+
+    # PROMOTED-FRAGMENT HUBS ARE NOT A MISSING-DATA PROBLEM. A hub that IS a promoted fragment has no
+    # entry in routes.json for a legitimate reason: routes.json holds routes for molecules the
+    # generator SAMPLED, and a promoted fragment used as a hub is a building block, not a sampled
+    # terminal molecule. Its route is its RECIPE, which the run's fragment snapshot already carries in
+    # `smiles_to_route` -- the very dict this script loads for child recipe expansion. Verified on the
+    # frozen sEH snapshots (2026-08-27): all 5 such hubs across seeds 43/44 have a recipe, 3 keyed
+    # exactly and 2 under a stereo-bearing variant. So NO re-sample or re-train fixes this; only the
+    # lookup does, and a re-run would reproduce the identical gap.
+    #
+    # The stereo index is needed because hub keys are stereo-stripped (meta.json `strip_stereo: true`)
+    # while recipe keys are not -- e.g. recipe `C[C@@H](N)c1nc2cc(...)` against hub_key
+    # `CC(N)c1nc2cc(...)`. Stripping is many-to-one, so an ambiguous collapse (two distinct recipes
+    # landing on one stripped key) is NOT resolved by guessing: those stay skipped and counted.
+    recipe_by_flat: dict = {}
+    if hub_recipes:
+        from rdkit import Chem, RDLogger
+
+        RDLogger.DisableLog("rdApp.*")
+        for _k in hub_recipes:
+            _m = Chem.MolFromSmiles(_k)
+            if _m is None:
+                continue
+            Chem.RemoveStereochemistry(_m)
+            recipe_by_flat.setdefault(Chem.MolToSmiles(_m), []).append(_k)
+
+    best, routes, n_missing_hub, n_buyable_hub, n_recipe_hub = {}, {}, 0, 0, 0
+    child_rxn = {}  # smiles -> did THIS child carry its own reaction? (guard below)
+    for hub in data.get("hubs", []):
+        hk = hub.get("hub_key")
+        hr = hub_routes.get(hk) if hk else None
+        if hr is None:
+            # DEPTH-0 = BOUGHT, NOT BROKEN. Such a hub has no synthesis route because a chemist buys
+            # it; the correct prefix is [] (zero reactions), and skipping it discards every child of
+            # the cheapest hubs there are. That matters far more than the raw hub count suggests,
+            # because flow concentrates on exactly these: a bought scaffold costs 0 reactions and
+            # still carries thousands of children, so it ranks near the top by flow. Measured on the
+            # flow-prefix pools (2026-08-27), skipping them dropped 26-27% of the qualifying
+            # candidates -- INCLUDING the hub our own arm builds its largest R=100 batch off -- which
+            # silently inflated our advantage. On the full 200-hub pools the same skip costs only
+            # 1.6-3.1%, which is why this went unnoticed until the pool was restricted to high-flow
+            # hubs. Our own cost model already prices these at zero
+            # (campaign.shallow_couplings(depth=0, promoted=()) == 0), so this restores parity rather
+            # than granting the competitor anything it was not owed.
+            #
+            # A route-less hub at depth > 0 is a REAL gap and is still skipped. Those are hubs that
+            # ARE a promoted fragment, whose recipe is stored under its stereo-bearing SMILES while
+            # the hub key is stereo-stripped (meta.json `strip_stereo: true`), so the lookup misses --
+            # e.g. promoted `C[C@@H](N)c1nc2cc(...)` against hub_key `CC(N)c1nc2cc(...)`. Pretending
+            # their prefix is empty would price two reactions of scaffold at zero and flatter the
+            # COMPETITOR, so it must stay a counted skip until the stereo lookup is fixed.
+            promoted = (comps.get(hk) or {}).get("promoted") if hk else None
+            rec = (hub_recipes or {}).get(hk)
+            if rec is None and hk:
+                cand = recipe_by_flat.get(_flat_smiles(hk)) or []
+                rec = (hub_recipes or {}).get(cand[0]) if len(cand) == 1 else None
+            if int(hub.get("depth", -1)) == 0 and not promoted:
+                n_buyable_hub += 1
+                prefix = []
+            elif rec is not None:
+                n_recipe_hub += 1
+                prefix = list(rec.get("steps") or [])
+            else:
+                n_missing_hub += 1
+                continue  # count it, never silently drop
+        else:
+            prefix = list(hr.get("steps") or [])
+        for c in hub.get("children", []):
+            smi, rew = c.get("smiles"), c.get("reward")
+            if not smi or rew is None:
+                continue
+            rew = float(rew)
+            if not passes_gate(rew, gate, higher_is_better):
+                continue
+            if smi in best and not (rew > best[smi] if higher_is_better else rew < best[smi]):
+                continue
+            own = list(c.get("reaction") or [])
+            steps = prefix + own
+            best[smi] = rew
+            child_rxn[smi] = bool(own)
+            routes[smi] = {"product_smiles": smi, "num_reactions": len(steps), "steps": steps}
+    if n_buyable_hub:
+        print(
+            f"[enum] {n_buyable_hub} depth-0 hub(s) are purchasable (no route because bought) — "
+            f"priced with an EMPTY prefix, children kept"
+        )
+    if n_recipe_hub:
+        print(
+            f"[enum] {n_recipe_hub} hub(s) ARE promoted fragments — priced from the snapshot's "
+            f"smiles_to_route recipe (routes.json holds sampled molecules only)"
+        )
+    if n_missing_hub:
+        print(
+            f"[enum] WARNING {n_missing_hub} hub(s) at depth>0 had no route in hub-routes — their "
+            f"children skipped (likely the stereo-stripped promoted-fragment lookup)"
+        )
+    # A child with no ``reaction`` inherits ONLY the hub's steps, so its route's product is the HUB,
+    # not the child. SPARROW then prices a network in which almost nothing is reachable and returns
+    # the empty library as trivially Optimal — a wrong answer that LOOKS like a crushing win for us
+    # and never raises. Measured on `campaign_enum_seh_70363`: 2,000 targets collapsed to 239
+    # compound nodes with 0 intermediates and 0 targets selected.
+    #
+    # Every RGFN enumeration on disk has this shape (35/35 artifacts, all seeds, all targets):
+    # rgfn_worker's build_enum_hub call omits ``reaction_by_child`` where the other three workers
+    # pass it. Two pre-fix July artifacts (campaign_enum_seh_70295/70363) omit the key entirely.
+    # Fail loudly rather than let either become a published number.
+    n_no_rxn = sum(1 for smi in routes if not child_rxn.get(smi))
+    if routes and n_no_rxn == len(routes):
+        raise SystemExit(
+            f"[enum] ABORT: none of the {len(routes)} children carry a per-child reaction, so every "
+            f"assembled route stops at its hub and prices the wrong molecule. This enumeration "
+            f"cannot be used for selection — re-enumerate with a worker that records reactions "
+            f"(see enum_children.json children[].reaction)."
+        )
+    if n_no_rxn:
+        # ABORT on the PARTIAL case too, not just warn. A partial artifact is the more dangerous of the
+        # two: the all-absent case collapses the network so obviously that it aborts above, whereas a
+        # partial one prices a MIXTURE -- some children at their true molecule, the rest at their hub --
+        # and still returns `Optimal`, so it looks like a real result. Measured on the hub_order merged
+        # artifacts, which mix pre-schema July steps with later ones: flow_top 609,379/1,077,049 (56.6%)
+        # carry a reaction, cand_order 131,569/535,476 (24.6%), random 347,487/350,764 (99.1%). A 99.1%
+        # artifact is exactly the one a warning gets scrolled past.
+        #
+        # ALLOW_PARTIAL_ROUTES=1 downgrades this to the old warning, for the one legitimate case:
+        # deliberately measuring how much the gap moves a number. It has to be asked for explicitly.
+        import os
+
+        msg = (
+            f"{n_no_rxn}/{len(routes)} children have an EMPTY reaction — their routes stop at the hub "
+            f"and price the wrong molecule, while the solve still reports Optimal."
+        )
+        if os.environ.get("ALLOW_PARTIAL_ROUTES") == "1":
+            print(
+                f"[enum] WARNING {msg} ALLOW_PARTIAL_ROUTES=1 set — proceeding; result is suspect."
+            )
+        else:
+            raise SystemExit(
+                f"[enum] ABORT: {msg} Re-enumerate with a worker that records reactions, or set "
+                f"ALLOW_PARTIAL_ROUTES=1 if you are deliberately quantifying the gap."
+            )
+    rows = sorted(best.items(), key=lambda t: (-t[1] if higher_is_better else t[1]))
+    if top_n:
+        rows = rows[:top_n]
+    keep = {s for s, _ in rows}
+    return rows, {s: r for s, r in routes.items() if s in keep}
+
+
+def _run_sparrow(repo, sparrow_env, tree, targets, out, work, max_seconds, extra=()):
+    """Invoke the SPARROW worker; returns its result dict (or None on failure)."""
+    cmd = [
+        *env_python(sparrow_env), str(repo / SPARROW_WORKER),
+        "--tree", str(tree), "--targets", str(targets), "--out", str(out),
+        "--max-seconds", str(max_seconds), "--work-dir", str(work), *extra,
+    ]  # fmt: skip
+    proc = subprocess.run(cmd, cwd=str(repo), capture_output=True, text=True)
+    if proc.returncode != 0 or not Path(out).exists():
+        print(f"    FAILED rc={proc.returncode} {proc.stderr.strip()[-200:]}")
+        return None
+    return json.loads(Path(out).read_text())
+
+
+def _price_kept_set(a, out_dir, entries_by_smiles, kept, tag):
+    """Reactions actually needed to make ``kept`` — a PRICING solve over just those molecules.
+
+    Why re-price instead of reusing the selection budget R: SPARROW spent R reactions producing a set
+    we then prune. You do not pay for compounds you discard, so charging R for the survivors would
+    overstate the competitor's cost — and the pruned duplicates take their unique final steps with
+    them, leaving only the shared prefixes. R is what it was ALLOWED to spend; this is what the
+    deliverable actually costs.
+
+    The same prune is applied to hub-batching, where it is a NO-OP (its picks are distinct by
+    construction), so the procedure is symmetric rather than a concession to one side.
+    """
+    sub = [e for smi in kept for e in entries_by_smiles.get(smi, [])]
+    if not sub:
+        return None
+    snap = out_dir / f"price_{tag}"
+    net = build_network(sub, strip_stereo=a.strip_stereo)
+    tree, targets = net.write(snap)
+    res = _run_sparrow(
+        REPO, a.sparrow_env, tree, targets, snap / "milp.json",
+        snap / "sparrow_run", a.max_seconds,
+    )  # fmt: skip
+    return res.get("total_reactions") if res else None
+
+
+def _greedy_frontier(a, out_dir, pool, routed, entries):
+    """The baseline's STRONGEST configuration: a diversity-aware greedy selection picks the modes,
+    SPARROW only prices them (pricing mode, every selected mode must be synthesized).
+
+    Contrast with the default path, where SPARROW both selects and prices. Comparing only against
+    that would let a reviewer object that SPARROW was judged on diversity, which it does not
+    optimize. This arm removes the objection: the competitor gets a selector that IS diversity-aware
+    AND the convergent planner's routes.
+    """
+    rewards = {s: r for s, r in pool}
+    routed_list = [s for s in (s for s, _ in pool) if s in routed]  # keep best-reward-first order
+    reps = mode_representatives(
+        routed_list,
+        [rewards[s] for s in routed_list],
+        higher_is_better=a.higher_is_better,
+        reward_threshold=a.gate,
+        similarity_threshold=a.cutoff,
+    )
+    ordered_modes = [routed_list[i] for i in reps]
+    print(f"[greedy] {len(ordered_modes)} modes available from {len(routed_list)} routed molecules")
+
+    by_smiles = {}
+    for e in entries:
+        by_smiles.setdefault(e["smiles"], []).append(e)
+
+    # SELECT ONLY MODES THAT CAN ACTUALLY BE MADE. `routed` means "this molecule has route entries
+    # in the artifact", NOT "those routes terminate in purchasable stock" -- MultiAiZ promotes
+    # discovered intermediates to stock during its own iterations, so a target can be reported routed
+    # and still have no complete path to real ZINC. Greedy prices in FORCED mode (every selected mode
+    # must be synthesized), so a single such target makes the MILP infeasible and the arm returns
+    # nothing at all. Measured 2026-08-27 on s3gfn_seh_seed42_pruned: m=1/2/5 price Optimal at 3/4/7
+    # reactions, m=10 comes back `RuntimeError: Problem is infeasible`, and all 65 modes were
+    # "routed". Before this, that cell contributed no greedy row at any budget.
+    #
+    # Dropping the unmakeable ones is what a chemist does and what this arm is FOR: it is the
+    # competitor's STRONGEST configuration, so handing it targets it cannot synthesize and then
+    # recording a failure understates it. SPARROW's own selection mode already skips them freely,
+    # which is exactly why the SPARROW arm produced results on cells where greedy produced none --
+    # so leaving this unfixed biases the headline comparison TOWARD SPARROW.
+    #
+    # Lazy and exact: costs nothing when the whole set prices (the common case), and only when a set
+    # comes back infeasible does it price candidates individually to find the culprits. Both counts
+    # are reported so a pool whose modes are mostly unmakeable cannot look like a healthy one.
+    known_good: list = []
+    known_bad: set = set()
+    checked = 0
+
+    def _prices_alone(smi):
+        sub1 = by_smiles[smi]
+        # hashed dir name: SMILES contain / and \ and would otherwise create paths
+        snap1 = out_dir / "feas" / hashlib.md5(smi.encode()).hexdigest()[:16]  # nosec - not crypto
+        net1 = build_network(sub1, strip_stereo=a.strip_stereo)
+        t1, g1 = net1.write(snap1)
+        r1 = _run_sparrow(
+            REPO, a.sparrow_env, t1, g1, snap1 / "milp.json", snap1 / "run", a.max_seconds,
+        )  # fmt: skip
+        return bool(r1) and r1.get("total_reactions") is not None
+
+    def _extend_good(k):
+        """Grow known_good to k entries, walking ordered_modes and testing unknowns individually."""
+        nonlocal checked
+        i = 0
+        while len(known_good) < k and i < len(ordered_modes):
+            smi = ordered_modes[i]
+            i += 1
+            if smi in known_good or smi in known_bad:
+                continue
+            checked += 1
+            (known_good.append(smi) if _prices_alone(smi) else known_bad.add(smi))
+        return known_good[:k]
+
+    rows = []
+    use_feasible_only = False
+    for m in [int(x) for x in a.mode_points.split(",") if x.strip()]:
+        if not use_feasible_only and m > len(ordered_modes):
+            print(f"  modes={m:<5} SKIP (only {len(ordered_modes)} available)")
+            continue
+        if use_feasible_only:
+            sel = _extend_good(m)
+            if len(sel) < m:
+                print(
+                    f"  modes={m:<5} SKIP (only {len(sel)} SYNTHESIZABLE of {len(ordered_modes)})"
+                )
+                continue
+        else:
+            sel = ordered_modes[:m]
+        sub = [e for s in sel for e in by_smiles[s]]
+        snap = out_dir / f"network_m{m}"
+        net = build_network(sub, strip_stereo=a.strip_stereo)
+        tree, targets = net.write(snap)
+        res = _run_sparrow(
+            REPO, a.sparrow_env, tree, targets, out_dir / f"milp_m{m}.json",
+            out_dir / f"sparrow_run_m{m}", a.max_seconds,
+        )  # fmt: skip
+        if (res is None or res.get("total_reactions") is None) and not use_feasible_only:
+            # First infeasible set: some selected mode cannot be made. Switch to feasible-only
+            # selection from here on and retry THIS mode point, so no budget is silently lost.
+            print(
+                f"  modes={m:<5} infeasible on the raw top-{m}; re-selecting from synthesizable "
+                "modes only (see the comment in _greedy_frontier)"
+            )
+            use_feasible_only = True
+            sel = _extend_good(m)
+            if len(sel) < m:
+                print(
+                    f"  modes={m:<5} SKIP (only {len(sel)} SYNTHESIZABLE of {len(ordered_modes)})"
+                )
+                continue
+            sub = [e for s_ in sel for e in by_smiles[s_]]
+            snap = out_dir / f"network_m{m}"
+            net = build_network(sub, strip_stereo=a.strip_stereo)
+            tree, targets = net.write(snap)
+            res = _run_sparrow(
+                REPO, a.sparrow_env, tree, targets, out_dir / f"milp_m{m}.json",
+                out_dir / f"sparrow_run_m{m}", a.max_seconds,
+            )  # fmt: skip
+        if res is None:
+            continue
+        rx = res.get("total_reactions")
+        rows.append(
+            {
+                "n_modes": m,
+                "used_rxns": rx,
+                "n_selected": m,  # greedy selects modes directly: every pick IS a distinct mode
+                "mode_rate": 1.0,
+                "rxn_per_mode": round(rx / m, 4) if rx else None,
+                "milp_status": res.get("milp_status"),
+                "n_targets_priced": res.get("n_targets_selected"),
+            }
+        )
+        # rx CAN be None -- SPARROW returns no total_reactions when the pricing MILP finds no
+        # solution for this mode set. `{rx:<5}` then raises TypeError and takes the WHOLE greedy arm
+        # with it, after the row was already appended: the run dies with no greedy_frontier.csv, the
+        # cell reports rc=1, and the SPARROW arm's results sit there looking like the cell half-ran.
+        # That is why three s3gfn cells had SPARROW but no greedy on 2026-08-27, and why the failure
+        # read as "greedy cannot reach the mode target" when it was a crash in a log line.
+        _rx = "n/a" if rx is None else f"{rx:<5}"
+        print(
+            f"  modes={m:<5} rxns={_rx} rxn/mode={rows[-1]['rxn_per_mode']} "
+            f"({res.get('milp_status')}, priced {res.get('n_targets_selected')}/{m})"
+        )
+
+    with open(out_dir / "greedy_frontier.csv", "w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()) if rows else ["n_modes"])
+        w.writeheader()
+        w.writerows(rows)
+    json.dump(
+        {"tag": a.tag, "selection": "greedy", "gate": a.gate, "cutoff": a.cutoff,
+         "n_modes_available": len(ordered_modes), "n_routed": len(routed), "rows": rows},
+        open(out_dir / "greedy_frontier_summary.json", "w"), indent=2,
+    )  # fmt: skip
+    print(f"[greedy] wrote {out_dir}/greedy_frontier.csv")
+
+
+def _write_rows(out_dir, rows) -> None:
+    """Write select_frontier.csv. Called after EVERY budget point so a walltime kill keeps the rows
+    already solved -- see the call site for why. Writes via a temp file and os.replace so a kill
+    DURING the write cannot leave a half-written CSV behind."""
+    if not rows:
+        return
+    tmp = out_dir / "select_frontier.csv.tmp"
+    with open(tmp, "w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
+        w.writeheader()
+        w.writerows(rows)
+    os.replace(tmp, out_dir / "select_frontier.csv")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument(
+        "--routes",
+        required=True,
+        help="multiaiz_routes.json, or the run's routes.json when --route-source native",
+    )
+    ap.add_argument(
+        "--route-source",
+        default="multiaiz",
+        choices=["multiaiz", "native", "enum", "external"],
+        help="multiaiz = the competitor's planned routes (MANY candidate recipes per molecule). "
+        "native = the reaction-GFN's own by-construction routes (exactly ONE per molecule, and "
+        "SHALLOW, so they must be recipe-expanded — --snapshot becomes required). "
+        "external = a REACTION-AWARE competitor's own by-construction routes (SynFormer), read from "
+        "a routes.jsonl. Like `native` these come free with the molecule, but UNLIKE `native` they "
+        "are already deep: every leaf is a purchasable catalogue block, so there is nothing to "
+        "recipe-expand and --snapshot must NOT be passed.",
+    )
+    ap.add_argument(
+        "--snapshot",
+        default="",
+        help="fragments_<N>.json — REQUIRED with --route-source native: supplies the "
+        "`smiles_to_route` recipes that turn attached promoted fragments into BUILT ones. Without "
+        "it SPARROW buys what count-once builds (the Logs/049 DRD2 62.7% failure).",
+    )
+    ap.add_argument(
+        "--hub-routes",
+        default="",
+        help="the sample's routes.json — REQUIRED with --route-source enum: supplies each hub's "
+        "route prefix. Enumerated children are one reaction past a hub and are absent from "
+        "routes.json themselves, so their routes must be assembled rather than looked up.",
+    )
+    ap.add_argument(
+        "--pool",
+        required=False,
+        default="",
+        help="pool CSV (smiles|child_key + score|reward) for the SAME pool",
+    )
+    ap.add_argument(
+        "--top-n",
+        type=int,
+        default=0,
+        help="cap the pool at the N highest-reward DISTINCT molecules (0 = all above gate). This is "
+        "the 'as large as SPARROW can solve' knob.",
+    )
+    ap.add_argument("--out-dir", required=True)
+    ap.add_argument("--tag", default="sparrow_select")
+    ap.add_argument(
+        "--gate",
+        type=float,
+        required=True,
+        help="per-target reward gate — see experiments/lsd_hubs/matrix16/targets.py (5%-FPR standard, 2026-08-21); passing a stale hand-picked bar is the bug this replaced",
+    )
+    ap.add_argument(
+        "--higher-is-better",
+        type=lambda v: v.lower() != "false",
+        default=True,
+        help="direction of the reward. TRUE for surrogate targets (sEH 5.0, DRD2 0.5); FALSE for "
+        "docking (raw Vina, ClpP -8.0). Setting this wrongly does NOT error -- it selects the worst "
+        "molecules and reports them as a library -- so it is explicit rather than inferred.",
+    )
+    ap.add_argument("--cutoff", type=float, default=0.5, help="tau for mode counting")
+    ap.add_argument(
+        "--budgets", default="", help="comma-separated reaction budgets (default: auto)"
+    )
+    ap.add_argument(
+        "--selection",
+        default="sparrow",
+        choices=["sparrow", "greedy"],
+        help="WHO CHOOSES THE LIBRARY. `sparrow` (default) = SPARROW's own MILP picks the subset "
+        "under a reaction budget — the pipeline a chemist actually runs, and the one with no "
+        "diversity term. `greedy` = reward-ranked tau-diverse greedy selection picks the modes and "
+        "SPARROW only PRICES them — a diversity-AWARE competitor, i.e. the baseline's strongest "
+        "configuration. `greedy` exists so the headline cannot be accused of comparing against "
+        "SPARROW at the one job it was not built for; it is the conservative comparator.",
+    )
+    ap.add_argument(
+        "--lambda-div",
+        default="",
+        help="comma-separated values of SPARROW's NATIVE diversity weight to sweep (e.g. "
+        "'0,0.1,0.5,1,2'). Their Fig 3B traces a Pareto front as this moves, so sweeping and "
+        "reporting SPARROW at its BEST value per metric gives it its strongest showing and "
+        "forecloses 'you picked a bad lambda'. Requires tau-mode clusters, built automatically.",
+    )
+    ap.add_argument(
+        "--min-clusters",
+        type=int,
+        default=None,
+        help="DIVERSITY-CONSTRAINED SB ([fromer2025diversity] sec 2.2, constraint form): require "
+        "every selection to represent at least this many of OUR tau-modes. Turns SB from a "
+        "diversity-BLIND competitor into a diversity-AWARE one competing on our own metric. Budgets "
+        "below the feasible minimum come back infeasible -- that boundary IS the readout (the "
+        "reactions needed to deliver K distinct molecules), directly comparable to hub-batching.",
+    )
+    ap.add_argument(
+        "--mode-points",
+        default="25,50,75,100,125,150",
+        help="--selection greedy: mode counts to price (the x-axis is modes, not budget)",
+    )
+    ap.add_argument("--sparrow-env", default="sparrow")
+    ap.add_argument("--max-seconds", type=int, default=600)
+    ap.add_argument(
+        "--gap-rel",
+        type=float,
+        default=None,
+        help="relative MIP gap handed to CBC. SPARROW hardcodes 1e-7 -- seven digits of optimality "
+        "on a ~52k-variable problem, for an effect we measure in whole molecules. Relaxing it is "
+        "the cheapest lever on a TimeLimit solve; measured on the earlier gap experiment it did NOT "
+        "achieve convergence alone but left the objective stable to 0.5% across 1e-7..1e-2, so it "
+        "composes with a longer --max-seconds rather than replacing it. Omitted = SPARROW's default.",
+    )
+    ap.add_argument("--strip-stereo", type=lambda s: s.lower() != "false", default=True)
+    a = ap.parse_args()
+
+    out_dir = Path(a.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if a.route_source in ("native", "enum") and not a.snapshot:
+        raise SystemExit(
+            f"[select] --route-source {a.route_source} requires --snapshot (recipe expansion)"
+        )
+    if a.route_source == "enum" and not a.hub_routes:
+        raise SystemExit(
+            "[select] --route-source enum requires --hub-routes (the sample routes.json)"
+        )
+    if a.route_source != "enum" and not a.pool:
+        raise SystemExit(
+            "[select] --pool is required unless --route-source enum (which derives it)"
+        )
+    # The fragment snapshot is needed in TWO places -- the promoted-fragment hub-prefix fallback
+    # inside load_enum_pool, and child recipe expansion further down. It carries several 400k-entry
+    # dicts, so read it once and share it rather than loading it twice.
+    _snap = json.loads(Path(a.snapshot).read_text()) if a.snapshot else {}
+    if a.route_source == "enum":
+        pool, raw = load_enum_pool(
+            Path(a.routes),
+            Path(a.hub_routes),
+            a.gate,
+            a.top_n,
+            higher_is_better=a.higher_is_better,
+            hub_recipes=_snap.get("smiles_to_route") or {},
+        )
+        print(
+            f"[enum] {len(pool)} distinct children above gate>{a.gate}, routes assembled "
+            "(hub prefix + the child's own reaction)"
+        )
+    elif a.route_source == "external":
+        # A reaction-aware competitor emits routes.jsonl (one JSON object per line, our route
+        # schema). Fold it into the SAME {canonical_smiles: [route, ...]} shape the multiaiz
+        # artifact uses, so everything downstream — build_network, the MILP, the pricing — is
+        # literally the same code path. One route per molecule here, versus ~16 for multiaiz;
+        # that asymmetry favours the multiaiz side and is reported, not corrected.
+        raw = {}
+        with open(a.routes) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                smi = rec.get("smiles") or rec.get("product_smiles")
+                c = canonical(smi, a.strip_stereo) if smi else None
+                if c:
+                    raw.setdefault(c, []).append(rec)
+        print(f"[external] {len(raw)} molecules carry a by-construction route")
+        pool = load_pool(Path(a.pool), a.gate, a.top_n, higher_is_better=a.higher_is_better)
+    else:
+        raw = json.loads(Path(a.routes).read_text())
+        pool = load_pool(Path(a.pool), a.gate, a.top_n, higher_is_better=a.higher_is_better)
+    if not pool:
+        raise SystemExit(f"[select] no pool molecules above gate {a.gate} in {a.pool}")
+
+    # TWO ROUTE SOURCES, different shapes and different correctness requirements.
+    #
+    #   multiaiz : {canonical_smiles: [route, ...]}  — MANY candidate recipes per molecule (~16 for
+    #              the N=500 pool). Already bottom out at purchasable stock, so they price directly.
+    #
+    #   native   : {smiles: {seed, num_reactions, steps}} — exactly ONE recipe per molecule, and
+    #              *shallow*: a promoted dynamic-library fragment is ATTACHED in one step, never
+    #              synthesized. Feeding those to SPARROW unexpanded is the bug that made the DRD2
+    #              reconcile read 62.7% (Logs/049): SPARROW would BUY the promoted fragments while
+    #              count-once BUILDS them, so the two price different assumptions. Every native
+    #              route must therefore be recipe-expanded first (`expand_route_with_recipes`),
+    #              which needs the run's fragment snapshot — hence --snapshot is required here.
+    is_native = a.route_source in ("native", "enum")
+    recipes, promoted = {}, set()
+    if is_native:
+        if not a.snapshot:
+            raise SystemExit(
+                "[select] --route-source native requires --snapshot (recipe expansion)"
+            )
+        snap = _snap
+        recipes = snap.get("smiles_to_route") or {}
+        promoted = set(snap.get("chosen_smiles", []))
+
+        # ---- CHECK 1: does this snapshot even belong to this run? --------------------------------
+        # The original version of this guard asked only "does the snapshot have recipes for its OWN
+        # chosen_smiles". A snapshot from a DIFFERENT model is internally complete, so it scored
+        # 100% and sailed through while half the run's fragments went unexpanded. Measured on
+        # matrix16/scent_seh (trained from scent_seh_5k/seed42) paired with the dated
+        # scent_seh/2026-07-10 snapshot: guard said 100%, reality was 53% -- 549 of 1,169 promoted
+        # fragments silently BOUGHT rather than BUILT. That is the Logs/049 62.7% failure with a
+        # green light on top.
+        #
+        # The run records its checkpoint in meta.json, and a snapshot lives under its own training
+        # directory, so a provenance mismatch is detectable without reading either payload.
+        run_ckpt = ""
+        for _m in (
+            Path(a.pool).parent / "meta.json" if a.pool else None,
+            Path(a.routes).parent / "meta.json" if a.routes else None,
+            Path(a.hub_routes).parent / "meta.json" if a.hub_routes else None,
+        ):
+            if _m and _m.exists():
+                try:
+                    run_ckpt = json.loads(_m.read_text()).get("checkpoint", "") or run_ckpt
+                except (
+                    Exception
+                ):  # noqa: BLE001 - a meta we cannot parse simply fails the check open
+                    pass
+                if run_ckpt:
+                    break
+        if run_ckpt:
+            # both paths pass through .../fixed_reward/<run-id>/..., so compare that segment
+            def _run_id(path: str) -> str:
+                parts = Path(path).parts
+                if "fixed_reward" in parts:
+                    i = parts.index("fixed_reward")
+                    return "/".join(parts[i + 1 : i + 3])
+                return ""
+
+            ck_id, sn_id = _run_id(run_ckpt), _run_id(a.snapshot)
+            if ck_id and sn_id and ck_id != sn_id:
+                msg = (
+                    f"snapshot/run PROVENANCE MISMATCH — the run was sampled from {ck_id} "
+                    f"but the snapshot belongs to {sn_id}. A snapshot from another model is "
+                    "internally consistent, so a coverage check on its own fragments passes while "
+                    "the RUN's fragments go unexpanded and SPARROW buys what count-once builds."
+                )
+                if os.environ.get("ALLOW_SNAPSHOT_MISMATCH"):
+                    print(
+                        f"[select] WARNING {msg} (ALLOW_SNAPSHOT_MISMATCH set — results are "
+                        f"NOT a like-for-like price)"
+                    )
+                else:
+                    raise SystemExit(
+                        f"[select] ABORT: {msg} Pass the snapshot from the run's own training "
+                        "directory, or set ALLOW_SNAPSHOT_MISMATCH=1 if you are deliberately "
+                        "quantifying that gap."
+                    )
+            else:
+                print(f"[select] provenance OK — run and snapshot both from {ck_id or sn_id}")
+
+        # ---- CHECK 2: coverage of the RUN's OWN promoted fragments ------------------------------
+        # compositions.json lists, per sampled molecule, the promoted fragments it is built from --
+        # an account of what the run ACTUALLY used, independent of whatever snapshot we were handed.
+        # This is the substantive check; CHECK 1 only catches the common cause.
+        run_promoted = set()
+        for _c in (
+            Path(a.pool).parent / "compositions.json" if a.pool else None,
+            Path(a.hub_routes).parent / "compositions.json" if a.hub_routes else None,
+        ):
+            if _c and _c.exists():
+                try:
+                    for _v in json.loads(_c.read_text()).values():
+                        run_promoted.update(_v.get("promoted") or [])
+                except Exception:  # noqa: BLE001
+                    pass
+                if run_promoted:
+                    break
+        if run_promoted:
+            rcov = sum(1 for s in run_promoted if s in recipes) / len(run_promoted)
+            if rcov < 0.95 and not os.environ.get("ALLOW_SNAPSHOT_MISMATCH"):
+                raise SystemExit(
+                    f"[select] ABORT: the snapshot can route only {rcov:.1%} of the "
+                    f"{len(run_promoted)} promoted fragments THIS RUN actually uses "
+                    f"({len(run_promoted) - sum(1 for s in run_promoted if s in recipes)} would be "
+                    "bought rather than built). Coverage of the snapshot's own chosen_smiles is NOT "
+                    "the same question and can read 100% while this reads 53%."
+                )
+            print(
+                f"[select] run-fragment recipe coverage {rcov:.1%} of {len(run_promoted)} "
+                f"fragments the run actually uses"
+            )
+
+        cov = (sum(1 for s in promoted if s in recipes) / len(promoted)) if promoted else 1.0
+        if promoted and cov < 0.95 and not os.environ.get("ALLOW_SNAPSHOT_MISMATCH"):
+            raise SystemExit(
+                f"[select] ABORT: snapshot has recipes for only {cov:.1%} of its {len(promoted)} "
+                "promoted fragments. Native routes cannot be expanded, so SPARROW would treat them "
+                "as bought while count-once builds them — the pricing would be meaningless."
+            )
+        print(
+            f"[select] {a.route_source} routes | recipe coverage {cov:.1%} of {len(promoted)} promoted frags"
+        )
+
+    # entries: one per (target, candidate route). Duplicate targets are intentional — build_network
+    # unions their reactions and the MILP picks the max-sharing combination.
+    entries, routed = [], set()
+    for smi, rew in pool:
+        if is_native:
+            rt = raw.get(smi) or (raw.get(canonical(smi, a.strip_stereo)) if smi else None)
+            rts = [expand_route_with_recipes(rt, recipes, promoted)] if rt else None
+        else:
+            c = canonical(smi, a.strip_stereo)
+            rts = raw.get(c) if c else None
+        if not rts:
+            continue
+        routed.add(smi)
+        for r_ in rts:
+            # SPARROW MAXIMIZES this. `rew` is the target's own raw score, which for docking is
+            # lower-is-better -- handing it over unflipped would have the MILP buy the WORST
+            # binders. sparrow_reward() applies the project's ReLU(-raw) convention; it is the
+            # identity for higher-is-better targets, so sEH/DRD2 numbers are bit-for-bit unchanged.
+            entries.append(
+                {
+                    "smiles": smi,
+                    "reward": sparrow_reward(rew, a.higher_is_better),
+                    "route": r_,
+                }
+            )
+    if not entries:
+        raise SystemExit("[select] no pool molecule has a route in the artifact — wrong pairing?")
+
+    print(
+        f"[select] pool={len(pool)} above gate>{a.gate} | routed={len(routed)} "
+        f"({len(routed)/len(pool):.1%}) | route entries={len(entries)}"
+    )
+
+    if a.selection == "greedy":
+        return _greedy_frontier(a, out_dir, pool, routed, entries)
+
+    # The network is budget-independent: build + write ONCE, then only the MILP re-runs per budget.
+    t0 = time.perf_counter()
+    net = build_network(entries, strip_stereo=a.strip_stereo)
+    snap = out_dir / "network"
+    tree, targets = net.write(snap)
+    build_s = time.perf_counter() - t0
+    print(f"[select] network built in {build_s:.1f}s -> {tree}")
+
+    # Clusters are pool-dependent but budget-independent: compute ONCE, like the network. Using our
+    # own tau-modes (not SPARROW's default Butina/count-Morgan) is deliberate -- it makes the arm
+    # optimize the exact quantity the benchmark reports, so a win or loss is on our metric rather
+    # than on a proxy for it. Legitimate because the paper defines clusters as an arbitrary
+    # caller-supplied partition.
+    lambdas = [float(x) for x in a.lambda_div.split(",") if x.strip()] or [0.0]
+    cluster_args = []
+    if a.min_clusters is not None or any(l > 0 for l in lambdas):
+        t2 = time.perf_counter()
+        rewards_all = {s_: r_ for s_, r_ in pool}
+        pool_smis = [s_ for s_, _ in pool if s_ in routed]
+        groups = mode_assignments(
+            pool_smis,
+            [rewards_all[s_] for s_ in pool_smis],
+            higher_is_better=a.higher_is_better,
+            reward_threshold=a.gate,
+            similarity_threshold=a.cutoff,
+        )
+        cl_path = out_dir / "clusters.json"
+        cl_path.write_text(json.dumps(groups))
+        cluster_args = ["--clusters", str(cl_path)]
+        if a.min_clusters is not None:
+            cluster_args += ["--min-clusters", str(a.min_clusters)]
+        member2cl = {m: c for c, ms in groups.items() for m in ms}
+        print(
+            f"[select] tau-mode clusters: {len(groups)} over {len(pool_smis)} routed molecules "
+            f"({time.perf_counter()-t2:.1f}s)"
+            + (
+                f" | requiring >= {a.min_clusters} represented"
+                if a.min_clusters is not None
+                else f" | lambda_div sweep {lambdas}"
+            )
+        )
+        if a.min_clusters is not None and a.min_clusters > len(groups):
+            raise SystemExit(
+                f"[select] ABORT: --min-clusters {a.min_clusters} exceeds the {len(groups)} clusters "
+                "the pool contains — every budget would be infeasible and the sweep would report "
+                "that as a solver limit rather than a pool limit."
+            )
+
+    if a.budgets:
+        budgets = [int(x) for x in a.budgets.split(",") if x.strip()]
+    else:
+        # geometric-ish ladder; the ceiling is "every routed target", which pricing mode would give
+        budgets = [10, 20, 35, 50, 75, 100, 150, 200, 300, 400, 600, 800]
+
+    if not cluster_args:
+        member2cl = {}
+    entries_by_smiles = {}
+    for e in entries:
+        entries_by_smiles.setdefault(e["smiles"], []).append(e)
+
+    rows = []
+    rewards = {s_: r_ for s_, r_ in pool}
+    for LD in lambdas:
+        for R in budgets:
+            tagLR = f"L{LD:g}_R{R}"
+            milp_out = out_dir / f"milp_{tagLR}.json"
+            cmd = [
+            *env_python(a.sparrow_env),
+            str(REPO / SPARROW_WORKER),
+            "--tree", str(tree),
+            "--targets", str(targets),
+            "--out", str(milp_out),
+            "--objective", "reward",
+            "--select",
+            "--max-rxns", str(R),
+            "--max-seconds", str(a.max_seconds),
+            "--work-dir", str(out_dir / f"sparrow_run_{tagLR}"),
+            *cluster_args,
+        ]  # fmt: skip
+            if LD > 0:
+                cmd += ["--lambda-div", str(LD)]
+            if a.gap_rel is not None:
+                cmd += ["--gap-rel", str(a.gap_rel)]
+            t1 = time.perf_counter()
+            proc = subprocess.run(cmd, cwd=str(REPO), capture_output=True, text=True)
+            solve_s = time.perf_counter() - t1
+            if proc.returncode != 0 or not milp_out.exists():
+                print(
+                    f"  L={LD:<5g} R={R:<5d} FAILED rc={proc.returncode} {proc.stderr.strip()[-150:]}"
+                )
+                continue
+            res = json.loads(milp_out.read_text())
+            sel = res.get("selected_target_smiles") or []
+            n_sel = len(sel)
+
+            # (1) SPARROW's OWN metric -- how many tau-mode families its picks touch. We expect to lose
+            #     here: it is optimizing precisely this. Reported anyway.
+            touched = len({member2cl.get(x) for x in sel if x in member2cl}) if member2cl else None
+
+            # (2) OUR metric -- prune to a genuinely-distinct subset (each survivor dissimilar to EVERY
+            #     other survivor, not merely in a different family), then RE-PRICE the survivors. You do
+            #     not pay for what you discard. The identical prune applied to hub-batching is a no-op,
+            #     because its picks are distinct by construction -- so this is symmetric, not a handout.
+            keep_idx = mode_representatives(
+            sel, [rewards.get(x, 0.0) for x in sel],
+            higher_is_better=a.higher_is_better, reward_threshold=a.gate,
+            similarity_threshold=a.cutoff,
+        )  # fmt: skip
+            kept = [sel[i] for i in keep_idx]
+            cost_kept = (
+                _price_kept_set(a, out_dir, entries_by_smiles, kept, tagLR) if kept else None
+            )
+            mps = mean_pairwise_similarity(sel) if len(sel) > 1 else None
+
+            # FIVE METRICS, on BOTH the unpruned selection and the pruned survivors. No single number
+            # captures "diversity": cluster coverage is what SPARROW optimizes but is satisfiable by
+            # near-duplicates sitting between adjacent clusters (and one molecule may cover many
+            # clusters at once); sphere exclusion demands dissimilarity from EVERYTHING kept but is
+            # order-dependent; scaffold counts ignore decoration entirely. All three are proxies for
+            # information gain, which is what we would optimize if we could -- out of scope here, and
+            # flagged as a limitation. Reporting several, on both output sets, lets the reader see
+            # where they disagree rather than trusting our choice of one.
+            scaf_all = unique_scaffolds(sel) if sel else 0
+            scaf_kept = unique_scaffolds(kept) if kept else 0
+            mps_kept = mean_pairwise_similarity(kept) if len(kept) > 1 else None
+
+            rows.append(
+                {
+                    "lambda_div": LD,
+                    "budget_rxns": R,
+                    "used_rxns": res.get("total_reactions"),
+                    "n_selected": n_sel,
+                    "clusters_touched": touched,  # SPARROW's metric
+                    "n_modes_kept": len(kept),  # ours, after pruning
+                    "cost_kept_rxns": cost_kept,  # reactions for the pruned set ONLY
+                    "rxn_per_mode_kept": round(cost_kept / len(kept), 4)
+                    if cost_kept and kept
+                    else None,
+                    "mode_rate": round(len(kept) / n_sel, 4) if n_sel else None,
+                    "rxn_per_selected": round(res["total_reactions"] / n_sel, 4)
+                    if n_sel and res.get("total_reactions") is not None
+                    else None,
+                    "mean_pairwise_sim": round(mps, 4) if mps is not None else None,
+                    "mean_pairwise_sim_kept": round(mps_kept, 4) if mps_kept is not None else None,
+                    "scaffolds_all": scaf_all,  # unpruned: Bemis-Murcko on everything selected
+                    "scaffolds_kept": scaf_kept,  # pruned: on the survivors only
+                    "scaffold_rate": round(scaf_all / n_sel, 4) if n_sel else None,
+                    "total_reward": res.get("selected_reward_total"),
+                    "milp_status": res.get("milp_status"),
+                    # Carried so a truncated search can never be read as a proven optimum downstream.
+                    # A capped row's numbers are a LOWER BOUND on what SPARROW could achieve.
+                    "time_capped": res.get("time_capped"),
+                    "solve_s": round(solve_s, 2),
+                }
+            )
+            r_ = rows[-1]
+            print(
+                f"  L={LD:<5g} R={R:<5d} sel={n_sel:<4} touched={str(touched):<5} "
+                f"kept={len(kept):<4} cost(kept)={str(cost_kept):<5} "
+                f"rxn/mode={r_['rxn_per_mode_kept']} meanSim={r_['mean_pairwise_sim']}"
+                + ("  [TIME-CAPPED: lower bound]" if res.get("time_capped") else "")
+            )
+            # REWRITE THE CSV AFTER EVERY BUDGET POINT, not once at the end. A budget ladder can run
+            # for hours -- a single capped solve is an hour by itself -- so a walltime kill used to
+            # discard EVERY row computed so far, leaving the numbers visible in the SLURM log and
+            # absent from the artifact. That cost two cells on 2026-08-19 (reinvent_seh_seed42_pruned
+            # at 7 of 10 points, saturn_seh_seed44) and 1.3 h on job 73610 before that. Rewriting is
+            # O(rows) against solves that take minutes, so the cost is nil.
+            _write_rows(out_dir, rows)
+
+    _write_rows(out_dir, rows)
+    json.dump(
+        {
+            "tag": a.tag,
+            "routes_artifact": str(a.routes),
+            "pool": str(a.pool),
+            "gate": a.gate,
+            "cutoff": a.cutoff,
+            "n_pool_above_gate": len(pool),
+            "n_routed": len(routed),
+            "routed_fraction": round(len(routed) / len(pool), 4),
+            "n_route_entries": len(entries),
+            "network_build_s": round(build_s, 2),
+            "rows": rows,
+        },
+        open(out_dir / "select_frontier_summary.json", "w"),
+        indent=2,
+    )
+    n_capped = sum(1 for r in rows if r.get("time_capped"))
+    if n_capped:
+        print(
+            f"[select] WARNING {n_capped}/{len(rows)} solves hit the {a.max_seconds}s MILP limit. "
+            "Those rows are LOWER BOUNDS on SPARROW's performance, not proven optima — re-run "
+            "them with a larger --max-seconds before quoting any of them."
+        )
+    print(f"[select] wrote {out_dir}/select_frontier.csv + select_frontier_summary.json")
+
+
+if __name__ == "__main__":
+    main()

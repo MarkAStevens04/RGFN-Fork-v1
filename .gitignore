@@ -8,7 +8,14 @@ Logs/references/pdfs/*
 # Cloned upstream baseline code — installed by external/setup_*.sh, NOT vendored
 # (e.g. external/gflownet for FragGFN). Keeps the setup scripts tracked, the heavy
 # upstream trees out. See docs/ARCHITECTURE.md + validation/generators/README.md.
-external/*/
+#
+# Ignore EVERYTHING here except the setup scripts. The previous rule was `external/*/`,
+# which matches directories only — so when a git worktree linked the clones in
+# (experiments/lsd_hubs/matrix16/link_worktree_data.sh), the resulting SYMLINKS did not match,
+# got committed, and on merge replaced the real clones in the main checkout with links pointing
+# at themselves. Path-shaped, not type-shaped, so a symlink can never slip through again.
+external/*
+!external/setup_*.sh
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -186,6 +193,9 @@ Miniconda3-latest-Linux-x86_64.sh
 *.sdf
 *.csv
 
+# (Committed result CSVs under experiments/ are un-ignored further down, beside the run-dir
+# rules they belong with -- search for "results*/".)
+
 # superseded scaffold library (large; not part of the curated pipeline)
 data/validation-molecules/Enamine_CRBN_Molecular_Glue_Library_*.smiles
 
@@ -231,4 +241,54 @@ experiments/**/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_*/
 !experiments/**/seed_*.csv
 !experiments/**/*_results.csv
 
+# ...but the two rules above key on FILE NAMING, and the lsd_hubs analyses never adopted that
+# convention: their outputs are curve_hub_batching.csv, reaction_axis_ratio.csv, summary.csv,
+# pipeline_headline.csv. So they fell through to the blanket `*.csv` and stayed invisible --
+# 454 CSVs under experiments/lsd_hubs of which only 12 were tracked, including every headline
+# artifact (reaction_axis_ratio.csv IS the 2.93x matrix result). Nobody noticed for months because
+# `git add` NO-OPS SILENTLY on an ignored path; the failure mode is the silence, not the size.
+#
+# Un-ignore by LOCATION as well as by name. `results*/` is where analysis outputs already live by
+# convention, so this states the rule the tree was already following.
+#
+# VERIFY BOTH DIRECTIONS when touching this. It is not enough that the files you want became
+# trackable -- a representative bulk-data CSV must still be IGNORED, or this has quietly re-enabled
+# committing docking dumps. Checked 2026-09-08: analysis outputs trackable, while
+# experiments/lsd_hubs/campaign/enum_dump.csv and .../scale5k/analysis/*.csv still hit the blanket
+# rule at the top of this file.
+#
+# Scope, measured: 454 CSVs / 12.4 MB, largest single file 0.5 MB. 450 sit under a results dir; the
+# other 4 (matrix16/manifest*.csv, dropoff/funnel_*_results.csv) were already tracked, so the
+# location rule is exactly sufficient. One file outside lsd_hubs is also exposed --
+# aizynth_failure_modes/results/residual_taxonomy.csv -- an analysis result of the same class.
+#
+# THESE ARE ARCHIVAL, NOT A BASELINE. They are committed so the v1 record exists somewhere durable
+# rather than only on this filesystem and the /project backups. benchmark_v2 owes them nothing: the
+# point of the re-run is to leave the previous campaign in the past, and the two are not
+# commensurable anyway (different training budget, hit gates, generator taxonomy and pipeline
+# shape). Do not diff v1 against v2 and read the difference as a result.
+!experiments/**/results*/**/*.csv
+
+# benchmark_v2 gets ALL its CSVs, results dir or not: grid.csv (the cell list every driver reads)
+# and PROVENANCE.csv (the only record of what was generated versus copied forward) sit at its root,
+# and losing either would leave that tree unable to say what it contains -- the one thing it exists
+# to guarantee. Both were silently dropped from its first commit by the blanket rule.
+!experiments/benchmark_v2/**/*.csv
+
 oracle/drd2_current.pkl
+
+validation/lsdflow/results/seh_rgfn_pilot/graph.gpickle
+
+experiments/lsd_hubs/campaign/results/scent_seh_1kx200/diversity_pairs/gallery.png
+experiments/lsd_hubs/campaign/results/scent_seh_1kx200/diversity_pairs/route_trees.png
+
+experiments/lsd_hubs/campaign/results/s3gfn_seh_greedy_N500/network_m125/tree.json
+experiments/lsd_hubs/campaign/results/paper_pipeline_headline/pipeline_headline.png
+experiments/lsd_hubs/campaign/results/s3gfn_seh_select_N500/network/tree.json
+experiments/lsd_hubs/campaign/results/s3gfn_seh_greedy_N500/network_m150/tree.json
+experiments/ablations/sixway/violins_known_vs_decoy_matched.png
+data/validation-molecules/DRD2_actives_chembl_all.csv
+experiments/oracle_validation/docking_6td3/decoy_neighbours_weakest.png
+experiments/oracle_validation/docking_6td3/decoy_neighbours_strongest.png
+experiments/oracle_validation/drd2_proxy/drd2_activities_raw.jsonl
+experiments/lsd_hubs/campaign/results/acid_amine_families/acid_amine_families.png

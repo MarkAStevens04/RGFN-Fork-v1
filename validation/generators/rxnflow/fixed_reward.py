@@ -24,6 +24,51 @@ from gflownet.models import bengio2021flow
 from rdkit import Chem
 
 
+def _memoised_predict(cache: Dict[str, float], smiles: List[str], compute) -> List[float]:
+    """Score ``smiles``, answering repeats from ``cache`` so they never reach the model.
+
+    WHY THIS EXISTS, AND WHY ONLY IN THIS FILE. The budget counts molecules that REACHED the
+    oracle (runbook 2.3b). Where a provider caches, a repeat is withheld and costs nothing; where
+    it does not, a repeat re-invokes the model and really does spend budget. RxnFlow's surrogate
+    path had no cache, so a run halting at N DISTINCT molecules had already made MORE than N real
+    invocations -- ~3.2% more as a floor, measured on a barely-trained policy, and worse once
+    converged.
+
+    This mirrors PMO's own harness, which is where the convention comes from: it canonicalises,
+    and a buffer hit skips the evaluator entirely (``experiments/pmo/main/optimizer.py:168-172``),
+    so its ``max_oracle_calls`` has always meant distinct molecules. Our lack of a memo here was a
+    deviation from the convention we claim to adopt, not a property of the generator.
+
+    THE TWINS IN THE OTHER FIVE GENERATORS DELIBERATELY DO NOT HAVE THIS. Every one of their
+    seh/drd2 cells is already trained and FROZEN (32 of them), and adding a memo there would make
+    any future re-run diverge from the frozen siblings it must stay comparable to. Here there are
+    six cells still to train, so the fix lands before they run rather than after.
+
+    Scores are unchanged -- the models are deterministic, so a memo hit returns what a recompute
+    would have. Invalid molecules are NOT memoised: they never reach the model anyway and PMO
+    likewise returns without touching its buffer.
+    """
+    canon: List[Optional[str]] = []
+    for s in smiles:
+        mol = Chem.MolFromSmiles(s) if s else None
+        canon.append(Chem.MolToSmiles(mol) if mol is not None else None)
+
+    todo, todo_canon, seen = [], [], set()
+    for s, c in zip(smiles, canon):
+        if c is None or c in cache or c in seen:
+            continue
+        seen.add(c)
+        todo.append(s)
+        todo_canon.append(c)
+
+    if todo:
+        for c, v in zip(todo_canon, compute(todo)):
+            if v == v:  # NaN is not a score; leave it uncached
+                cache[c] = float(v)
+
+    return [float("nan") if c is None else cache.get(c, float("nan")) for c in canon]
+
+
 class SEHFrozenReward:
     """Frozen sEH MPNN reward generator (drop-in for ``AtomMPNNProxy`` as the task reward)."""
 
@@ -36,10 +81,18 @@ class SEHFrozenReward:
         self.model = bengio2021flow.load_original_model()
         self.model.to(device)
         self.model.eval()
+        # A repeat must not spend budget -- see _memoised_predict.
+        self._cache: Dict[str, float] = {}
 
     @torch.no_grad()
     def predict(self, smiles: List[str]) -> List[float]:
-        """Raw sEH proxy value per SMILES (higher = better); ``nan`` for invalid molecules."""
+        """Raw sEH proxy value per SMILES (higher = better); ``nan`` for invalid molecules.
+
+        Repeats are answered from the memo and never reach the model (see _memoised_predict)."""
+        return _memoised_predict(self._cache, smiles, self._predict_uncached)
+
+    @torch.no_grad()
+    def _predict_uncached(self, smiles: List[str]) -> List[float]:
         out: List[float] = []
         for start in range(0, len(smiles), self.batch_size):
             chunk = smiles[start : start + self.batch_size]
@@ -92,6 +145,8 @@ class DRD2FrozenReward:
         with open(model_path, "rb") as fh:
             self.model = pickle.load(fh)  # nosec - trusted local TDC oracle
         self.clip = float(clip)
+        # A repeat must not spend budget -- see _memoised_predict.
+        self._cache: Dict[str, float] = {}
 
     @staticmethod
     def _fp(mol):
@@ -104,6 +159,10 @@ class DRD2FrozenReward:
         return nfp
 
     def predict(self, smiles: List[str]) -> List[float]:
+        """Repeats are answered from the memo and never reach the model (see _memoised_predict)."""
+        return _memoised_predict(self._cache, smiles, self._predict_uncached)
+
+    def _predict_uncached(self, smiles: List[str]) -> List[float]:
         mols = [Chem.MolFromSmiles(s) if s else None for s in smiles]
         valid_idx = [i for i, m in enumerate(mols) if m is not None]
         out = [float("nan")] * len(smiles)
@@ -130,6 +189,22 @@ class DRD2FrozenReward:
         pass
 
 
+def _load_dock_server_client(repo_root):
+    """Path-import the stdlib ``DockingServerClient`` from ``glue/oracles/docking_server.py``
+    and return ``client_from_env()`` (client if ``RGFN_DOCK_SOCKET`` set, else ``None``). Imports
+    the file directly (not the ``glue`` package this env can't import); stdlib-only client half
+    makes it safe in the rxnflow env (campaign Logs/030)."""
+    import importlib.util
+
+    p = Path(repo_root) / "glue" / "oracles" / "docking_server.py"
+    if not p.exists():
+        return None
+    spec = importlib.util.spec_from_file_location("_rgfn_dockserver", str(p))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.client_from_env()
+
+
 class DockingBridgeReward:
     """Per-step GPU **docking** as a fixed reward for RxnFlow, reached across the env
     boundary via ``scripts/score_batch.py`` under the ``rgfn`` env.
@@ -141,6 +216,21 @@ class DockingBridgeReward:
     the task → ``exp(value·β)``), frees torch's GPU cache before each dock (Logs/014), and
     caches results per canonical SMILES. See the FragGFN twin for the full rationale."""
 
+    # ONE NAME, TWO MEANINGS -- THE SHADOWING BELOW IS AVOIDED DELIBERATELY.
+    # This attribute describes the OUTPUT: the recorded value is clip(sign*raw/norm), which is
+    # higher-is-better for every target, always True. The __init__ argument of the SAME NAME
+    # describes the RAW INPUT, and is False for dvina/Vina. They are not the same fact and they
+    # disagree on every existing docking config.
+    #
+    # So the constructor argument is stored as `self.sign`, NOT as `self.higher_is_better`. The
+    # obvious tidy-up -- assigning it to the matching name -- silently redefines this attribute
+    # from "the value is higher-better" to "the raw score is higher-better". Nothing in RxnFlow's
+    # own fixed-reward path reads it today (it is interface parity), so the tidy-up would look
+    # harmless here; the cost is visible in the closest twin of this class, where
+    # ScentFixedRewardRun.run reads ITS proxy's attribute
+    # (validation/generators/scent/fixed_reward.py:103) and sorts top-k with
+    # `reverse=higher_is_better` (line 188) -- flipping it there keeps the WORST 100 molecules,
+    # with no exception and no nan. Do not "fix" the naming.
     higher_is_better = True  # the recorded VALUE (clip(-raw/norm)) is higher-is-better
 
     def __init__(
@@ -150,6 +240,7 @@ class DockingBridgeReward:
         norm: float = 1.0,
         failed_score: float = 0.0,
         clip: float = 10.0,
+        higher_is_better: bool = False,
         conda_env: str = "rgfn",
         oracle_args: Optional[Dict] = None,
         workdir: Optional[str] = None,
@@ -159,12 +250,38 @@ class DockingBridgeReward:
         self.norm = float(norm)
         self.failed_score = float(failed_score)
         self.clip = float(clip)
+        # RAW ORIENTATION. The value transform NEGATES the raw score, because both docking targets
+        # this bridge was written for are lower-is-better (dvina, Vina). 6TD3-B is not: its reward is
+        # gnina's cnn_vs (CNNscore x CNNaffinity, gate 6.718), HIGHER is better, in roughly [0, 9].
+        # Left unconditional, `max(-raw/norm, 0)` maps EVERY 6TD3-B molecule to exactly 0.0 -- a
+        # perfectly flat reward, no error raised, and a GFlowNet that trains for 320,000 oracle calls
+        # against a constant. Default stays False so every existing config behaves bit-identically;
+        # a higher-is-better target must SAY so. RGFN's OracleRewardProxy already generalised this
+        # ("sign = +1 if higher_is_better else -1"); these two bridges never did.
+        self.sign = 1.0 if higher_is_better else -1.0
         self.conda_env = conda_env
         self.oracle_args = dict(oracle_args or {})
         self.workdir = Path(workdir) if workdir else (self.repo_root / "reward_bridge")
         self.workdir.mkdir(parents=True, exist_ok=True)
         self._cache: Dict[str, float] = {}  # canonical smiles -> raw docking score
         self._step = 0
+        # Persistent docking server (campaign Logs/030): dock over RGFN_DOCK_SOCKET if set,
+        # else per-step score_batch.py spawn. Client path-imported (stdlib) — no glue import.
+        self._client = _load_dock_server_client(self.repo_root)
+        if self._client is not None:
+            if not self._client.wait_until_ready(timeout=900):
+                raise RuntimeError(
+                    "RGFN_DOCK_SOCKET is set but the docking server never became ready "
+                    f"({self._client.socket_path})."
+                )
+            print(
+                f"[dock-bridge] persistent docking server @ {self._client.socket_path}", flush=True
+            )
+        else:
+            print(
+                "[dock-bridge] no RGFN_DOCK_SOCKET -> per-step score_batch.py subprocess",
+                flush=True,
+            )
 
     def predict(self, smiles: List[str]) -> List[float]:
         """The GFN **value** per SMILES = ``clip(-raw/norm, 0, inf)`` (higher = better)."""
@@ -187,26 +304,30 @@ class DockingBridgeReward:
     def _value(self, raw: float) -> float:
         if raw is None or raw != raw:
             return self.failed_score
-        return max(-float(raw) / self.norm, 0.0)
+        return max(self.sign * float(raw) / self.norm, 0.0)
 
     def _dock(self, smiles: List[str]) -> List[float]:
         canons = [self._canonical(s) for s in smiles]
         todo = [c for c in dict.fromkeys(canons) if c and c not in self._cache]
         if todo:
             self._step += 1
-            smi_path = self.workdir / f"step_{self._step:05d}.smi"
-            lbl_path = self.workdir / f"step_{self._step:05d}_labels.csv"
-            smi_path.write_text("\n".join(todo) + "\n")
-            cmd = [
-                "conda", "run", "--no-capture-output", "-n", self.conda_env,
-                "python", "scripts/score_batch.py",
-                "--oracle", self.oracle, "--in", str(smi_path), "--out", str(lbl_path),
-            ]  # fmt: skip
-            for k, v in self.oracle_args.items():
-                cmd += ["--oracle-arg", f"{k}={v}"]
-            self._free_gpu_cache()
-            subprocess.run(cmd, check=True, cwd=str(self.repo_root))
-            labels = self._read_labels(lbl_path, todo)
+            self._free_gpu_cache()  # free this proc's cache so the docking GPU can allocate (Logs/014)
+            if self._client is not None:
+                lab_raw, _ = self._client.dock(todo)
+                labels = [float(x) if x is not None else float("nan") for x in lab_raw]
+            else:
+                smi_path = self.workdir / f"step_{self._step:05d}.smi"
+                lbl_path = self.workdir / f"step_{self._step:05d}_labels.csv"
+                smi_path.write_text("\n".join(todo) + "\n")
+                cmd = [
+                    "conda", "run", "--no-capture-output", "-n", self.conda_env,
+                    "python", "scripts/score_batch.py",
+                    "--oracle", self.oracle, "--in", str(smi_path), "--out", str(lbl_path),
+                ]  # fmt: skip
+                for k, v in self.oracle_args.items():
+                    cmd += ["--oracle-arg", f"{k}={v}"]
+                subprocess.run(cmd, check=True, cwd=str(self.repo_root))
+                labels = self._read_labels(lbl_path, todo)
             for c, lab in zip(todo, labels):
                 self._cache[c] = lab
             if todo and all(lab != lab for lab in labels):

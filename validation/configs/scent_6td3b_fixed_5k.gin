@@ -1,0 +1,69 @@
+# SCENT FIXED-REWARD on 6TD3-B (gnina CNN_VS) — 5,000-iteration variant (benchmark_v2).
+#
+# SCENT's entry for the CDK12-DDB1 cell. Same protein, same docking, same poses as
+# scent_6td3_fixed_5k.gin; DIFFERENT reward. 6TD3's Vina Tier2-Tier1 differential is retained
+# unchanged for reproducibility but SUPERSEDED for training (Logs/072) — the generator games it,
+# clearing the differential's own gate 78% of the time against 67% for real glues while clearing
+# a CNN gate 0 times out of 400. 6TD3-B rewards gnina's CNN_VS = CNNaffinity x CNNscore on the
+# selected Tier-2 pose. Per-step docking-in-the-loop via @DockingBridgeProxy (shells out to
+# scripts/score_batch.py under the rgfn env), SHARED SMALL library, beta=4.
+#
+# ⚠ THE `higher_is_better` LINE BELOW IS LOAD-BEARING — DO NOT DELETE IT.
+# DockingBridgeProxy negates the raw score by default, which is correct for dvina/Vina and
+# catastrophic here. cnn_vs is HIGHER-is-better in roughly [0, 9], so the default
+# `max(-raw/norm, 0)` maps EVERY molecule to exactly 0.0: a perfectly flat reward. It does not
+# raise, does not produce a nan, and does not show up in the logs — the run would burn its full
+# docking budget training against a constant and finish looking healthy. Unlike RGFN's
+# OracleRewardProxy (which reads the sign off the oracle object) this cross-env bridge has no
+# access to the oracle class or to targets.py, so the config is the only place that can say it.
+#
+# ⚠ USE THE PRODUCT, NEVER THE AFFINITY HEAD ALONE. `cnnaff_t2` on its own is BLIND to exactly
+# the failure this reward exists to fix: AUROC 0.521 — a coin flip — separating real glues from
+# our own reward-optimised candidates (gnina's affinity head is hinge-trained on high-RMSD poses,
+# penalised only for over-predicting). `cnn_vs` gives 0.917 vs property-matched decoys and 0.946
+# vs our candidates. Repointing the oracle at the affinity term would produce a model optimising
+# a coin flip — and the reward would NOT be flat, so it would look like it was working.
+#
+# BETA / NORM UNCHANGED FROM THE 6TD3 TEMPLATE — a decision, not a copied line. The value the GFN
+# sees spans roughly [0, 9] for cnn_vs against roughly [0, 8] for clip(-dvina): a ~12% difference
+# in range, too small to justify re-tuning an inverse temperature matched to the RGFN docking
+# benchmark, and keeping beta=4 is what makes 6TD3-B comparable to the 6TD3 and ClpP cells.
+# norm = 1.0 is "no rescaling" in both.
+#
+# Run (repo root, scent env; docking libs exported for the rgfn subprocess):
+#   conda run -n scent python validation/generators/scent/run_scent_fixed.py \
+#       --cfg validation/configs/scent_6td3b_fixed_5k.gin --root-dir $SCRATCH/rgfn_runs/experiments
+
+include 'configs/scent_base.gin'
+include 'configs/envs/settings/small.gin'
+
+proxy/gin.singleton.constructor = @DockingBridgeProxy
+train_proxy = @proxy/gin.singleton()
+valid_proxy = %train_proxy
+DockingBridgeProxy.oracle = 'docking_6td3b_gpu'
+DockingBridgeProxy.norm = 1.0
+DockingBridgeProxy.higher_is_better = True   # cnn_vs: LOAD-BEARING, see the warning above
+
+beta = 4
+WandbLogger.mode = 'offline'
+
+# CRITICAL: drop @TanimotoSimilarityModes — it re-scores %train_proxy (would re-dock).
+train_metrics = [@StandardGFNMetrics(), @FractionEarlyTerminate()]
+
+Trainer.n_iterations = 5000
+Trainer.valid_every_n_iterations = 250   # periodic checkpoint cadence for 3-day auto-requeue (Logs/030)
+trainer/gin.singleton.constructor = @Trainer
+trainer = @trainer/gin.singleton()
+
+ScentFixedRewardRun.trainer = %trainer
+ScentFixedRewardRun.reward_generator = %train_proxy
+ScentFixedRewardRun.n_samples = 200
+ScentFixedRewardRun.sample_oversample = 6.0
+ScentFixedRewardRun.top_k = 100
+ScentFixedRewardRun.system = '6td3b'
+ScentFixedRewardRun.generator_name = 'scent'
+# '6td3b' matches BOTH matrix16/targets.py (Target.reward_name = "6td3b", gate 6.718) and the
+# worker vocabularies (_DOCKING_REWARDS / _HIGHER_IS_BETTER_BY_REWARD key on "6td3b"). The 6td3
+# sibling writes '6td3_diff' where targets.py says "6td3" — a pre-existing mismatch not copied here.
+ScentFixedRewardRun.reward_name = '6td3b'
+ScentFixedRewardRun.score_units = 'cnn_vs = CNNaffinity x CNNscore (higher is better; raw cnn_vs in raw_score column)'

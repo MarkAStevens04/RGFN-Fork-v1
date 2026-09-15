@@ -1,0 +1,482 @@
+# SCENT + RGFN / sEH — is a generator trained on a tenth of the usual budget still good enough to build a library from?
+
+**Date:** 2026-09-08, ~1pm
+
+## Question
+
+If we train our molecule generators for a thirty-second of the time they normally get — so that they
+can be compared fairly against competing programs — do they still learn enough for our library-design
+method to work?
+
+## Context & Summary
+
+**Context.** The clean re-run (`docs/RETRAIN_RUNBOOK.md`) standardises every generator on the same
+training budget so the comparison is fair: **10,000 scoring calls**, which is what the competing
+programs' own papers use. Our three generators have never been run that low. They normally get
+**320,000** — thirty-two times more — and that is the number *their* papers use. So the fairness fix
+creates a risk nobody had measured: our method works by reading the "flow field" a trained generator
+leaves behind, which tells it which partly-built molecules are worth committing to. If ten thousand
+calls is not enough training for that field to mean anything, the whole budget-matched comparison
+collapses. Entry `070` showed what it costs to discover a problem like this late — three artifacts
+were silently missing for weeks. This pilot spends one cheap cell to answer the question before 108
+cells are committed.
+
+**Summary.** We trained two generators (SCENT and RGFN) on the cheapest target (sEH) at the new
+low budget, then ran them through the full library-design pipeline and compared against the same
+generators trained the normal way. We measured three things: whether the flow field is informative at
+all, where in a molecule's assembly the method chooses to commit, and what the resulting library
+actually costs.
+
+## Answer
+
+**Arm A does not break library-based library design in general — it breaks SCENT specifically, and
+leaves the other generator untouched.** Priced at an identical gate, the generator with no learned
+library (RGFN) is *unharmed* by the thirty-two-fold budget cut, while SCENT loses more than half its
+delivered library and its advantage over the naive alternative falls from 3.4× to 1.6×.
+
+The reason is specific. **SCENT's defining feature — it learns to reuse its own best intermediates —
+never switches on at the low budget.** It is scheduled to start after a thousand training rounds and
+the low budget stops at a hundred and fifty-seven. The clinching number is that SCENT at the low
+budget costs almost exactly what the library-less generator costs (1.918 against 1.965 reactions per
+molecule, within 2.5%): stripped of its library, it converges onto the library-less cost profile
+rather than degrading in some generator-specific way.
+
+
+## Relevance to our Publication
+
+This is the entry the whole re-run turned on. The plan had been to run every comparison at the
+matched budget; this shows that would have quietly disabled the distinguishing feature of one of our
+three generators and understated our result against the competitors — the opposite of the fairness
+the change was meant to buy. It supports splitting the campaign: the head-to-head against other
+programs runs at the matched budget, where fairness is the point, and our own internal comparison
+runs at the full budget, which is what our generators' papers use.
+
+The precision matters for how the paper words it. The problem is **not** that our approach needs a
+large training budget — the library-less generator is fine at the small one. It is that one specific
+mechanism, learned intermediate reuse, has a start-up cost in training rounds that the matched budget
+does not reach. That is a statement about a *method's* sample efficiency, which is publishable, rather
+than a weakness in the benchmark.
+
+It also hands ICLR and NCS reviewers a clean answer to a question they will certainly ask about our
+strongest result — "isn't your method just picking cheap molecules off the shelf?" We can now say how
+much of a delivered library rests on bought starting material and exactly what excluding them costs:
+about two percent.
+
+## Next Experiments
+
+**Refining for publication**
+
+- **Re-measure with the two arms matched on enumeration.** The low-budget runs enumerated fewer
+  candidate intermediates (64 hubs capped at 4,000 children against 200 uncapped). This is now a
+  caveat on the exact magnitudes only, not on the finding: the same handicap applied to both
+  generators, and only one of them collapsed while the other improved under it.
+- **Extend to a second target and the other seeds.** The hub-depth half of this costs seconds and is
+  already done across every cell we hold; the library-cost half is one GPU job per cell.
+- **Measure the bought-starting-material share on the unfiltered intermediate pool.** The number we
+  have is a floor, measured on a pool that happened to contain only two such intermediates where the
+  pool we have adopted contains eleven.
+
+**Next steps in project**
+
+- **Decide what to do about SCENT at the matched budget** — the three options are to rescale its
+  schedule (which changes what SCENT is and must be disclosed), to report it as a finding about how
+  much training a library-learning method needs before its library exists, or to run SCENT only at
+  the full budget. This is a research decision and nothing has been built for any of the three. Note
+  the decision is now narrower than when it was raised: it affects **one generator**, not the arm.
+- **Confirm the other library-less generator behaves like RGFN.** RxnFlow has no dynamic library
+  either, so the prediction is that it is also unharmed at arm A. That is one cell.
+- **Price the compute-versus-reactions tradeoff**, now an approved exhibit: this pilot is its first
+  datapoint, showing what the extra GPU time at the full budget buys in saved bench chemistry.
+
+---
+
+# Re-creation
+
+Root for repo-relative paths: `/home/markymoo/projects/RGFN_Fork/RGFN-Fork`.
+Branch: `worktree-agent-b-arm-a-pilot`.
+
+### Relevant Files
+
+**Scripts** — all new, all under `./experiments/benchmark_v2/pilot/`
+
+- `submit_pilot_train.sh` — trains one generator to the arm-A budget into an **isolated** output
+  root. Exists because `experiments/fixed_reward/scale5k/submit_rgfn.sh` hardcodes
+  `FR_ROOT_DIR=$SCRATCH/rgfn_runs/experiments` with no override and derives its run name from
+  (system, seed) — pointed at seh/42 it resolves to the **live v1 cell** `rgfn_seh_5k/seed42` and
+  resumes from its 5,000-iteration checkpoint. This launcher refuses any `OUT_ROOT` inside the v1
+  tree (guard tested).
+- `submit_pilot_hubs.sh` — samples an arm-A checkpoint and ranks its hubs under both `--pool all` and
+  the legacy reward-pre-filtered pool. Detects a SCENT checkpoint with no `additional_fragments/`
+  snapshot and passes `--no-freeze`, so an arm-A SCENT runs on the 418-fragment base library
+  explicitly rather than letting the default resolve to nothing.
+- `submit_pilot_campaign.sh` — enumerates the arm-A hub set and prices it; also asserts whether
+  `depth_mix` populated.
+- `run_depthmix.sh` — the three `--min-synth-depth` arms on a cached enumeration.
+- `depth_mix.py` — joins accepted molecules to their hub's depth and reports the delivered-mode and
+  reaction-budget split by depth. Tries an exact SMILES join first and a stereo-stripped fallback
+  second, counting each, because `hubs.csv` holds stereo-bearing SMILES while some downstream keys
+  are stereo-stripped.
+- `hub_structure.py` — flow-field separation and evidence per hub, for reading an arm-A field beside
+  a v1 one on the same axis.
+- `hub_depth_grid.py` — runs `pick_hubs --pool all` over every cell whose sample survives, to test a
+  depth claim on the grid rather than on one cell. Gives each cell its own output directory.
+- `reconcile_depth.py` — mode, mode share, median and a concentration flag together, so a
+  mode-vs-median disagreement is visible rather than settled by whichever statistic was reached for
+  first.
+- `depth_mix_table.py`, `summarise_depthmix.sh` — reporting wrappers.
+
+**Models**
+
+- `/scratch/markymoo/rgfn_runs/v2_pilot/fixed_reward/scent_seh_armA/seed42/train/checkpoints/last_gfn.pt`
+  — SCENT at 10,048 calls. **28 MB against v1's 205 MB**: the action-space signature of an empty
+  dynamic library.
+- `/scratch/markymoo/rgfn_runs/v2_pilot/fixed_reward/rgfn_seh_armA/seed42/train/checkpoints/arm_a_10k.pt`
+  — RGFN's arm-A checkpoint, written by agent A's `BudgetCheckpointer` at the exact trace crossing.
+- `/scratch/markymoo/rgfn_runs/experiments/fixed_reward/{scent,rgfn}_seh_5k/seed42/...` — the v1
+  320,000-call checkpoints, the comparison arm. Read-only here.
+
+**Datasets**
+
+- `/scratch/markymoo/rgfn_runs/lsdflow/matrix16*/*/sample/records.csv` — 35 v1 sampled DAGs, the
+  grid the depth claim was tested on.
+- `/scratch/markymoo/rgfn_runs/lsdflow/matrix16/scent_seh/enum/{enum_children.json,hubs.csv}` — the
+  cached v1 enumeration the depth-mix arms were priced on. `hubs.csv` supplies the hub→depth join.
+
+**Results** (committed, `./experiments/benchmark_v2/pilot/results/`)
+
+- `hub_structure_both.json` — flow separation and evidence, arm A vs v1, both generators.
+- `hub_depth_grid.json` — top-40 hub depths for all 35 cells.
+- `depth_reconcile.json` — mode / share / median / concentration per cell.
+- `depthmix_{base,d2,d3}.json` — delivered-mode and reaction split by hub depth.
+
+**Job Logs** — `/scratch/markymoo/rgfn_runs/`
+
+- `pilotA_scent_seh-75927.out`, `pilotA_rgfn_seh-75928.out` — arm-A training.
+- `pilotB_hubs_scent-75931.out`, `pilotB_hubs_rgfn-75933.out` — sample + hub ranking.
+- `pilotB_camp_scent-75932.out`, `pilotB_camp_rgfn-75996.out` — enumerate + campaign.
+- `pilotB_depthmix-75930.out` — the depth arms.
+
+### Relevant Versions
+
+`027a007` (pilot scripts + SCENT library finding), `b03cf61` (verdict, controlled 2×2, defects), both
+on `worktree-agent-b-arm-a-pilot` and pushed. Merged agent C's `worktree-benchmark-v2-infra` twice
+(`e630d5c` and a second merge picking up `6599590`, the `pick_hubs` sidecar fix this entry's defect
+report prompted).
+
+Depends on agent A's arm-A checkpointing in `glue/fixed_reward/pipeline.py`, on the main checkout.
+**Note the import path:** `$CONDA_PREFIX/lib/python3.11/site-packages/rgfn.pth` points at the main
+checkout, so `import glue` / `import rgfn` resolve there regardless of which worktree launched the
+job — these runs executed agent A's code while logging `repo=<my worktree>`.
+
+[TODO — add commit hash for the final consolidation after pushing]
+
+### Relevant Resources
+
+**Sources**
+
+- Entry `070` — the route-artifact audit; the precedent for spending a cheap check before a large
+  campaign, and the source of the three-artifact contract this pilot's SCENT finding breaks.
+- Entry `053` — the hub-ordering ablation; source of `--pool all` and the "flow finds the
+  neighbourhood, not the rank" reading.
+- Entry `068` — the enumeration-cap correction; why the v1 enumeration is uncapped and this pilot's
+  is not.
+- `docs/RETRAIN_RUNBOOK.md` §1 (the two arms), §2.2 (`--pool all`, `free_frag`, `prebuild-k 0`),
+  §2.1 (the 5%-FPR gates).
+- SCENT clone config `external/scent/configs/envs/dynamic_library/dynamic_library.gin` — the
+  promotion schedule this entry's central finding rests on.
+
+**Packages**
+
+- `pick_hubs.py` (pure stdlib, ~0.2 s/cell) — the flow estimate and hub ranking.
+- `run_campaign.py` + `glue/samplers/lsdflow/` — selection strategies and the count-once cost model.
+- `validation/lsdflow/adapters/workers/{scent,rgfn}_worker.py` — sample and enumerate stages.
+
+### Method
+
+1. Train both generators to the arm-A budget into an isolated root, never the v1 tree:
+   ```
+   OUT_ROOT=$SCRATCH/rgfn_runs/v2_pilot N_ITERS=157 \
+     sbatch experiments/benchmark_v2/pilot/submit_pilot_train.sh scent seh 42   # job 75927
+   OUT_ROOT=$SCRATCH/rgfn_runs/v2_pilot N_ITERS=100 \
+     sbatch experiments/benchmark_v2/pilot/submit_pilot_train.sh rgfn  seh 42   # job 75928
+   ```
+2. Sample 30,000 trajectories from each arm-A checkpoint and rank hubs under both pools
+   (`submit_pilot_hubs.sh`, jobs 75931 / 75933). **Each pool written to its own directory** — see
+   Results §6.
+3. Enumerate the top 64 hubs of the `--pool all` set and price the library at R=100, gate 5.68,
+   τ 0.5, `free_frag`, `prebuild-k 0` (`submit_pilot_campaign.sh`, jobs 75932 / 75996).
+4. On the **cached v1** enumeration, run the same campaign at three deliverable filters
+   (`--min-synth-depth` 0 / 2 / 3) and join accepted molecules to hub depth
+   (`run_depthmix.sh` job 75930, then `depth_mix.py`).
+5. Test the hub-depth claim across all 35 v1 cells with `hub_depth_grid.py`, then
+   `reconcile_depth.py` for mode/median/concentration.
+
+### Results
+
+**1 — the arm-A flow field is informative, and better evidenced than the full-budget one.**
+Top-40 hubs, `--pool all`, sEH seed 42. Separations in nats of log-flow; "est/hub" is the median
+number of observed children backing a hub.
+
+| | ranked | top10 − median | rank0 − rank40 | est/hub | single-estimate frac |
+|---|---|---|---|---|---|
+| SCENT arm A | 200 | **4.281** | 4.535 | **101** | 0.05 |
+| SCENT v1 320k | 200 | 2.901 | 3.363 | 10 | 0.10 |
+| RGFN arm A | 200 | 4.103 | 4.898 | 21 | 0.125 |
+| RGFN v1 320k | 200 | 5.684 | 5.785 | **1** | **0.725** |
+
+Eligible pools: SCENT arm A 7,111 hubs, RGFN arm A 13,842. Note the last row — **72.5% of v1 RGFN's
+top-40 hubs rest on a single observed child**, so any v1 RGFN hub-ordering claim inherits an
+unreplicated point estimate.
+
+**2 — what arm A costs, measured.** All four cells at the **same gate (5.68)**, same
+config, same target and seed. Only the budget differs within each generator.
+
+| | HB modes @ R=100 | best-candidate | ratio | **rxn/mode** |
+|---|---|---|---|---|
+| RGFN v1 (320,000 calls) | 57 | 25 | 2.28× | 1.890 |
+| **RGFN arm A (10,007 calls)** | **65** | 25 | **2.60×** | **1.965** |
+| SCENT v1 (320,000 calls) | **96** | 28 | **3.43×** | **1.067** |
+| **SCENT arm A (10,048 calls)** | **39** | 25 | **1.56×** | **1.918** |
+
+**RGFN is not harmed** — slightly better at arm A, though on one seed that is not a claim of
+improvement, only of no damage. **SCENT is halved.** And SCENT at arm A costs **1.918 rxn/mode
+against RGFN's 1.965 at the same budget, within 2.5%** — stripped of its library it lands on the
+library-less cost profile rather than degrading in some SCENT-specific way.
+
+**Caveat on the v1 baselines this table prices against.** v1 RGFN's top-40 hubs rest on a median of
+**ONE** observed child, with **72.5%** singletons, against 21 (12.5% singletons) for the arm-A RGFN
+sample and 10 for v1 SCENT. So the v1 RGFN row — and every v1 RGFN hub-ordering claim — rests on
+unreplicated point estimates. The direction is counter-intuitive (the *less*-trained sample is the
+better-evidenced one) and is not explained here.
+
+**The enumeration mismatch does not explain it, and cuts the other way.** Both arm-A runs used the
+*smaller* enumeration (64 hubs at `enum_max` 4000 against v1's 200 uncapped). The same handicap
+applied to both generators; only SCENT collapsed, and RGFN improved under it. So the mismatch is a
+caveat on the exact magnitudes, not a candidate explanation for the SCENT result.
+
+**3 — the mechanism is the dynamic library, not the training length.** RGFN never has a dynamic
+library at any budget; SCENT has one only at v1. Top-40 hub depths, `--pool all`:
+
+| generator | arm A | v1 320k | moves with budget? |
+|---|---|---|---|
+| RGFN | {1:1, 2:5, 3:34} | {1:2, 2:4, 3:34} | **no — identical** |
+| SCENT | {2:3, 3:37} | {0:6, 1:30, 2:4} | **yes — flips 3 → 1** |
+
+**4 — SCENT promotes zero fragments at arm A.** From
+`external/scent/configs/envs/dynamic_library/dynamic_library.gin`, confirmed in the pilot's own
+resolved `operative_config.gin`:
+
+```
+DynamicLibrary.every_n_iterations = 1000
+DynamicLibrary.num_additions      = 10     -> promotions at iterations 1000, 2000 ... 10000
+DynamicLibrary.n_new_fragments    = 400
+```
+
+Arm A is 157 iterations; the first promotion is at iteration 1,000 = **64,000 oracle calls, 6.4× the
+arm-A budget**. Observed: `additional_fragments/` was never created. Arithmetic cross-check — v1
+(5,000 iterations) fired 4 of 10 promotions, writing `fragments_1000..4000.json`, exactly the 1,600
+promoted fragments its enumeration metadata records. Consequences: `free_frag` / `prebuild-k` are no-ops, and
+there are no recipes — which, **corrected 2026-09-12, does NOT fail `check_route_readiness`**. With
+`additional_fragments/` absent entirely, `_recipe_health` returns `None`
+(`check_route_readiness.py:175-176`, comment *"no dynamic library -> nothing to expand"*) and the cell
+reports `recipes: n/a`, the same path RGFN and RxnFlow take. That is correct rather than lucky: with
+zero promotions an arm-A SCENT route bottoms out directly on the 418 base blocks, so a chemist can act
+on every molecule. Entry `070`'s distinction is the operative one — *no recipes because logging was off
+while fragments WERE promoted* is broken and unrecoverable; *no recipes because nothing was promoted*
+is complete.
+
+**The real hazard is the reverse, and it is a v2 hazard this pilot did not hit.** In v2 one training
+run yields both arms in the SAME run directory, so `additional_fragments/` WILL exist, populated by
+**arm B's** promotions. `_recipe_health` resolves the snapshot by `run_id` taken from the checkpoint
+path (`_run_id`, line 124) and both arms' checkpoints share that `run_id`, so an arm-A SCENT cell's
+recipe check will silently read **arm B's** snapshot and report arm B's coverage. The verdict stays
+right by luck — arm A has nothing to expand either way — but the number recorded is about a different
+arm. That is entry `070`'s "a snapshot from a DIFFERENT model is internally complete, so it scores
+100% while the run's own fragments go unexpanded", recurring across *arms* instead of across models.
+This pilot avoided it only by training to 157 iterations and stopping, so no snapshot ever existed.
+
+**5 — the depth-0 share of a delivered library.** `scent_seh` v1 enumeration, gate 5.68, R=100. Hub
+join exact: 96/96 accepted molecules resolve, 0 unjoined, 0 needing the stereo fallback.
+
+| arm | HB modes@100 | hubs walked | hub depths | modes by depth | reactions by depth | depth-0 mode share |
+|---|---|---|---|---|---|---|
+| `--min-synth-depth 0` | 96 | 5 | 2×d0, 2×d1, 1×d2 | 35 / 48 / 13 | 35 / 50 / 15 | **36.5%** |
+| `--min-synth-depth 2` | 94 | 5 | 4×d1, 1×d2 | 81 / 13 | — | 0.0% |
+| `--min-synth-depth 3` | 71 | 19 | 10×d1, 8×d2 | 15 / 55 | — | 0.0% |
+
+Reactions/mode by hub depth is **1.000 / 1.042 / 1.154** for depth 0/1/2 — a depth-0 hub is bought,
+so it contributes nothing to the build and each child is one coupling, making 1.000 the floor a
+library can reach. Two of 200 hubs (1% of the set) deliver 36.5% of the library, so **counting hubs
+understates the reliance ~36×**; the delivered-mode share is the figure to report. Excluding
+buy-and-couple molecules costs 96 → 94 modes, **2.1%**.
+
+**This 36.5% is a lower bound and a SCENT number.** It was measured on the reward-pre-filtered pool
+(2 depth-0 hubs of 200); the `--pool all` set adopted by the runbook holds 11 of 200. And the two
+library-less generators already hub one step from terminal, so the figure does not generalise across
+the three. Best-candidate's depth mix is incomplete (12 of 26 named hubs absent from `hubs.csv`, the
+stereo fallback recovering none), so no BC share is quoted.
+
+**6 — three defects, all reported.**
+
+- **`pick_hubs` overwrote its own provenance.** Both sidecars went to a fixed name in the parent of
+  `--out`, so two invocations differing only in `--out` basename shared one file and the second
+  clobbered the first. This bit the pilot: a `topk` ranking was analysed as if it were `--pool all`,
+  caught because `pick_hubs_timing.json` recorded `pool: topk_candidates`. **This is the cause of the
+  standing "`hub_scores.csv` is often stale" warning** — the file does not age, the next run
+  overwrites it. Fixed by agent C in `6599590`.
+- **`run_campaign`'s hub provenance is null on any real cell.** `depth_mix` and
+  `n_promoted_fragments` populate correctly (the latter reading 0 independently confirms Result 4
+  from a second code path), but `hub_pool`, `min_hub_depth`, `max_hub_depth` and `walked_depth_hist`
+  are null because `pick_hubs` is a separate stage that never tells the campaign which pool it used.
+  In production those stages are always separate, so this is not an artifact of how the pilot ran.
+  **Mechanism found and fixed by agent C (2026-09-12):** `run_campaign` resolved
+  `pick_hubs_timing.json` in two places -- `load_hub_pick_s` honoured `--hub-pick-timing` while
+  the depth block fifteen lines away re-derived the path from `--enum-children` and ignored the
+  flag. This pilot enumerated into a directory with no sidecar beside `enum_children.json`, so
+  the depth fields came back null. One resolver now, both callers on it. Of the two per-cell
+  outputs `benchmark_v2/README.md` requires, `depth0_mode_frac` was always present and only
+  `walked_depth_hist` was genuinely null -- see Result 12.
+- **`timing.json`'s `score` column is a SEMANTICS trap, not a broken timer — corrected 2026-09-12.**
+  An earlier draft of this entry called RGFN's `score: 0.052 s` "not credible", reasoning that 52 ms
+  for 16,919 molecules is 3 µs each. **That arithmetic used the wrong denominator.** The `score`
+  phase wraps `_score_with_reward_generator(states)` on the FINAL candidate batch only
+  (`pipeline.py:147`), which the run's own log records as exactly **1,000** molecules
+  (`[FR] sampled 1000 unique valid candidates`). So it is **52 µs per molecule**, entirely plausible
+  for a batched MPNN forward. The training-loop scoring is inside `train_gfn`.
+  **So there is nothing to fix before the re-run.** What there is, is a column named `score` that
+  does not mean "what scoring cost" — it means "what the final re-score cost". Any GPU-hour total
+  that reads it as the oracle bill will understate by orders of magnitude. Re-running would not have
+  caught this: the measurement was right and the reading was wrong.
+
+**7 — mode-versus-median, and why concentration is the right statistic.** Testing the "library-less
+generators hub at (cap − 1)" claim across all 35 v1 cells: **19/23 library-less cells** sit at modal
+depth cap − 1, but SCENT is only 5/12. Mode and median disagree on 4/35 cells — every one a cell
+whose distribution is not concentrated. Adding the mode's share of the top-40 explains it:
+
+| | concentrated (mode ≥ 50% of top-40) | median mode share |
+|---|---|---|
+| library-less (RGFN, RxnFlow) | **23/23** | ~85% |
+| SCENT | **6/12** | ~51% |
+
+So the defensible statement is not "library-less hubs deep, SCENT hubs shallow" — it is that
+**without a dynamic library the flow field collapses onto a single depth one step from terminal;
+with one it spreads across depths.** SCENT's apparent target-dependence (deep on ClpP/6TD3, shallow
+on sEH/DRD2) is largely this: the docking cells are spread distributions being described by their
+largest bin.
+
+**8 — arm-A budgets land where intended, and the trace counter earns its keep.**
+
+| generator | mechanism | achieved |
+|---|---|---|
+| SCENT | 157 iterations × batch 64 | 10,048 calls (`paths.csv` last iteration 10,047) |
+| RGFN | `BudgetCheckpointer` on the trace counter | **10,007 calls at iteration 83** |
+
+RGFN was planned at 100 iterations on the assumption of 100 calls each. It crossed at **83**, because
+RGFN scores `train_forward_n_trajectories` (100) **plus** `train_replay_n_trajectories` (20) =
+120.6/iteration measured. Placing the checkpoint by step arithmetic would have trained it ~20% past
+the arm-A budget, making the external head-to-head quietly unfair in our favour.
+
+SCENT emitted no `trace.csv` — agent A's instrumentation covered RGFN's `glue/fixed_reward/pipeline.py`
+but not `run_scent_fixed.py` at this pilot's launch. And this pilot's RGFN trace predates A's phase
+fix: all 16,919 rows read `train`, of which ~12,060 are training calls and ~4,859 the final candidate
+scoring. **The checkpoint is unaffected** (the crossing is at iteration 83, the contamination appended
+at the end), but the trace cannot carry a modes-vs-calls curve without re-running.
+
+**9 — wall clock, arm A, sEH, one A100.** Published numbers for the compute-versus-reactions exhibit.
+
+| stage | SCENT | RGFN |
+|---|---|---|
+| train to arm-A budget | 1,159 s | 3,864 s (`train_gfn` 3,166 / `sample_batch` 659) |
+| sample, 30,000 trajectories | 1,189 s | 4,324 s |
+| `pick_hubs`, either pool | 0.18 s | 0.19 s |
+| enumerate, 64 hubs, `enum_max` 4000 | 922 s | *(job 75996)* |
+| campaign | 17 s | *(job 75996)* |
+
+RGFN costs ~3.3× SCENT per oracle call at arm A.
+
+**13 - WHICH COUNTER THE BUDGET MEANS, and a gap of 24.7% on this cell.** The researcher ruled
+(2026-09-12) that the budget counts molecules that **reached the oracle** -- distinct -- not molecules
+presented. Measured on this pilot's own RGFN trace:
+
+| | at the arm-A crossing | at end of run |
+|---|---|---|
+| `n_scored` (presented, repeats counted) | 10,000 | 16,919 |
+| `n_distinct` (**reached** the oracle) | **7,533** | **12,114** |
+| duplicate rate | 24.7% | 28.4% |
+
+`BudgetCheckpointer` fires on a presented counter, not a distinct one: `n_train_scored += 1` runs on
+every training row regardless of novelty (`_trace.py:110-112`), and `_seen` -- which does track
+distinct -- is never consulted for the budget test. So **this cell's arm-A checkpoint sits at 7,533
+molecules that reached the oracle, 24.7% under a 10,000-distinct budget.**
+
+**Direction matters and it is the opposite of the earlier step-arithmetic error.** Placing the
+checkpoint by step count would have trained RGFN ~20% *past* the budget, flattering us. Counting
+presented rather than distinct places it ~25% *short*, which under-trains our side against
+competitors whose own budgets are declared in distinct molecules (Saturn runs
+`allow_oracle_repeats: false`, so its 10,020 are all distinct). The external head-to-head is the
+exhibit that cares.
+
+**What is NOT established here: whether the ruling reaches the training checkpoint at all.** It was
+made on a competitor-side measurement (six ClpP cells) about pool and oracle accounting. Applying it
+to `BudgetCheckpointer` is an inference, not something the ruling states, and the duplicate rate is
+generator-specific -- 24.7% for RGFN at the crossing, unmeasured for SCENT and RxnFlow. Two readings
+follow and only the researcher can choose:
+
+* if the budget means distinct **everywhere**, `BudgetCheckpointer` needs to test `len(_seen)` and
+  55 cells are about to be checkpointed short by a generator-specific amount;
+* if it means distinct only in competitor pool accounting, the checkpoint is correct as it stands.
+
+Either way one thing is free and correct under both: **any "at 10,000 oracle calls" phrasing must say
+which counter it means.** In this entry it means *presented* training rows.
+
+**12 - depth-0 reliance is a SCENT/library phenomenon, and effectively ABSENT in RGFN.** `depth_mix`
+on the same axis, same run, both arm-A cells (measured 2026-09-12 after the checker below was fixed):
+
+| cell | modes @ R=100 | from walked hubs | modes by hub depth | **depth0_mode_frac** |
+|---|---|---|---|---|
+| RGFN arm A, hub-batching | 65 | 65 (`n_unmapped` 0) | {1:18, 2:28, 3:19} | **0.0** |
+| SCENT arm A, hub-batching | 39 | 39 (`n_unmapped` 0) | {2:7, 3:32} | **0.0** |
+| best-candidate (either) | 25 | 2 (`n_unmapped` 23) | {3:2} | 0.0 |
+| *SCENT v1 320k, for contrast* | *96* | *96* | *{0:35, 1:48, 2:13}* | ***0.365*** |
+
+Against Result 5's 36.5% on the v1 SCENT cell, this is independent corroboration that **bought-hub
+reliance travels with the dynamic library, not with hub-batching**. RGFN delivers zero modes off a
+depth-0 hub -- it has no library, so its flow field never surfaces one high enough to walk. That
+sharpens Result 3: the library decides not only *where* the hubs sit but *whether any delivered mode
+comes off a bought one*, which is the form the degenerate-optimum objection actually takes.
+
+Best-candidate's 23-of-25 unmapped is the control and is correct: it walks no hubs, so most of its
+molecules have no hub to map to.
+
+One observation worth recording without over-reading. RGFN's *hub* ranking is 85% depth-3 in the top
+40 ({1:1, 2:5, 3:34}, Result 3) while its *delivered* library skews shallower ({1:18, 2:28, 3:19}).
+The two are consistent with Result 5's cost mechanism -- shallower hubs buy more modes per reaction,
+so they contribute disproportionately to whatever fits inside a 100-reaction budget -- but that is one
+cell and the inference is not tested here.
+
+**11 — the compute-to-reactions sentence, with the cost localised to one stage.** From job 75999's
+`compute_time.csv` (RGFN, arm A, sEH seed 42, 64 hubs), read beside the same run's mode counts:
+
+| arm | selection wall-clock | modes @ R=100 |
+|---|---|---|
+| hub-batching | **5,647.29 s** | 65 |
+| best-candidate | **1.10 s** | 25 |
+
+**Hub-batching spends 5,129x the selection compute to deliver 2.60x the molecules at a fixed
+100-reaction budget** -- and **97.1% of that cost is a single stage**: `enumeration_s` is 5,484.77 s
+of the 5,647.29 s total. `hub_pick_s` is **0.0 s**; reading the flow field is free. The expense is
+enumerating the hubs' children so they can be scored, not anything about the method's own logic.
+
+Two things follow that the exhibit should state. The ratio is **selection-stage** compute, not total
+GPU-hours -- training is identical for both arms, since they read the same checkpoint. And because the
+cost sits entirely in enumeration, it scales with the enumeration knobs (`--n-hubs`,
+`--enum-max-children`), not with the budget R: this 64-hub run is the cost of the pool it was handed,
+not the cost of the method.
+
+**10 — what remains unexplained.** SCENT's target-dependence is narrowed but not solved. Three
+mechanisms have been ruled out: **dose-response** (all twelve SCENT cells fired exactly 4 promotions
+to `last_iter=4000` — identical library, opposite hub depths); **reward-by-depth** (top-decile-reward
+median hub depth is 2/3/2/3 across seh/drd2/clpp/6td3, no surrogate-versus-docking split); and a
+**policy-term effect** (decomposing top-40 flow, `logR` dominates `logP_B` and the two `logP_F` terms
+by an order of magnitude on every cell, so the ranking is essentially reward-mass ranking). No
+confirmed mechanism. Recorded as unexplained rather than filled with a story.

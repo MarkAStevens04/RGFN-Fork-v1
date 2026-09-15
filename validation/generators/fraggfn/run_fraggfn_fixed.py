@@ -20,6 +20,7 @@ import argparse
 import csv
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import torch
@@ -31,6 +32,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from validation.generators._trace import TraceWriter, write_timing
 from validation.generators.fraggfn.al_loop import FragGFNActiveLearningLoop, LabelStore
 from validation.generators.fraggfn.fixed_reward import (
     DockingBridgeReward,
@@ -97,6 +99,53 @@ def _sample_chunked(trainer, it, n_samples, oversample, chunk=128):
     return batch
 
 
+class _TracedReward:
+    """Wraps a frozen reward generator so every evaluation lands in trace.csv.
+
+    WHY WRAP RATHER THAN EDIT EACH PROVIDER. FragGFN has three (sEH proxy, DRD2, docking bridge) and
+    the task calls ``reward()`` while the candidate emitter calls ``predict()``. One wrapper catches
+    both for all three, and keeps ``fixed_reward.py`` free of trace plumbing -- the same separation
+    S3-GFN uses, and the reason its docking traces were correct while Saturn's and REINVENT's were
+    not.
+
+    RECORDS THE RAW ORACLE VALUE, never the shaped one. For docking, ``reward()`` is
+    ``exp(clip(-vina))`` and ``predict()`` is ``clip(-vina)``; the mode gates are defined on raw Vina
+    (ClpP -8.0, Logs/045), so the trace takes ``raw_scores()`` where the provider exposes it. Getting
+    this wrong is not hypothetical: nine ClpP traces recorded the shaped value and NOT ONE row cleared
+    the gate, so those cells' entire training histories read as empty (fixed 2026-08-28, commit
+    736c8e0). Cached per SMILES inside the bridge, so tracing costs no extra docks.
+
+    ``phase`` stays "train" here: unlike S3-GFN's ``evaluate()``, FragGFN's fixed-reward runner has no
+    separate evaluation pass, so every call IS training signal.
+    """
+
+    def __init__(self, inner, trace):
+        self._inner = inner
+        self._trace = trace
+
+    def _record(self, smiles):
+        if self._trace is None or not smiles:
+            return
+        try:
+            if hasattr(self._inner, "raw_scores"):
+                vals = list(self._inner.raw_scores(smiles))
+            else:
+                vals = list(self._inner.predict(smiles))
+            self._trace.add_many(list(smiles), vals)
+        except Exception as exc:  # noqa: BLE001 - a trace failure must never kill a run
+            print(f"[FGFN-FR] WARNING: trace write failed ({exc})", flush=True)
+
+    def reward(self, smiles):
+        self._record(smiles)
+        return self._inner.reward(smiles)
+
+    def predict(self, smiles):
+        return self._inner.predict(smiles)
+
+    def __getattr__(self, name):  # set_device, fit, raw_scores, ...
+        return getattr(self._inner, name)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
@@ -104,7 +153,18 @@ def main() -> None:
     )
     ap.add_argument("--seed", type=int, default=None, help="override RNG seed (else cfg.run.seed)")
     ap.add_argument("--root-dir", default=None, help="base run dir (else cfg.run.root_dir)")
+    ap.add_argument(
+        "--run-dir",
+        default=None,
+        help="EXACT run dir (stable, no timestamp). Set this to reuse a run dir across 3-day "
+        "auto-requeue chain links (campaign Logs/030): the run resumes from its last checkpoint "
+        "and appends. Overrides --root-dir + cfg.run.name.",
+    )
     ap.add_argument("--device", default=None, help="cpu | cuda (else auto)")
+    ap.add_argument(
+        "--n-train-steps", type=int, default=None, help="override n_train_steps (smoke)"
+    )
+    ap.add_argument("--n-samples", type=int, default=None, help="override n_samples (smoke)")
     args = ap.parse_args()
 
     cfg = OmegaConf.load(args.cfg)
@@ -116,17 +176,24 @@ def main() -> None:
     seed = args.seed if args.seed is not None else int(run_c.get("seed", 42))
     device = args.device or gfn_c.get("device") or ("cuda" if torch.cuda.is_available() else "cpu")
     beta = float(fr_c.get("beta", 8))
-    n_train_steps = int(fr_c.get("n_train_steps", 5000))
-    n_samples = int(fr_c.get("n_samples", 1000))
+    n_train_steps = (
+        args.n_train_steps
+        if args.n_train_steps is not None
+        else int(fr_c.get("n_train_steps", 5000))
+    )
+    n_samples = args.n_samples if args.n_samples is not None else int(fr_c.get("n_samples", 1000))
     # Which fixed reward generator: sEH proxy (default) or DRD2 (RGFN paper's proxies).
     reward_type = reward_c.get("type", "seh_proxy")
     system = fr_c.get("system", "seh")
     reward_name = fr_c.get("reward_name", "seh_proxy")
     score_units = fr_c.get("score_units", f"{reward_name} (higher is better)")
 
-    root = Path(args.root_dir or run_c.get("root_dir", "experiments"))
-    run_name = run_c.get("name", "fixed_reward/fraggfn_seh")
-    run_dir = root / run_name / _timestamp()
+    if args.run_dir:  # stable dir for auto-requeue chain links (resume into the same place)
+        run_dir = Path(args.run_dir)
+    else:
+        root = Path(args.root_dir or run_c.get("root_dir", "experiments"))
+        run_name = run_c.get("name", "fixed_reward/fraggfn_seh")
+        run_dir = root / run_name / _timestamp()
     run_dir.mkdir(parents=True, exist_ok=True)
     OmegaConf.save(cfg, run_dir / "run_config.yaml")
     print(
@@ -156,7 +223,14 @@ def main() -> None:
             clip=float(reward_c.get("clip", 10.0)),
             batch_size=int(reward_c.get("batch_size", 128)),
         )
-    print(f"[FGFN-FR] reward={reward_type} system={system}", flush=True)
+    # Opened BEFORE training so a walltime kill keeps the history; the writer flushes per batch.
+    run_t0 = time.time()
+    trace = TraceWriter(run_dir / "trace.csv")
+    reward = _TracedReward(reward, trace)
+    print(
+        f"[FGFN-FR] reward={reward_type} system={system} | trace -> {run_dir / 'trace.csv'}",
+        flush=True,
+    )
 
     # --- gflownet Config (mirrors run_fraggfn_al.py). -----------------------------
     gcfg = init_empty(Config())
@@ -166,6 +240,10 @@ def main() -> None:
     gcfg.overwrite_existing_exp = True
     gcfg.print_every = int(gfn_c.get("print_every", 100))
     gcfg.num_training_steps = n_train_steps
+    # STEPS x num_from_policy IS THE ORACLE BUDGET, so pin it from the config rather than inheriting
+    # a library default that could change under us. 64 is both the gflownet default and what the
+    # authors set in seh_frag.py; 157 x 64 = 10,048 matches REINVENT and S3-GFN exactly.
+    gcfg.algo.num_from_policy = int(gfn_c.get("num_from_policy", 64))
     gcfg.algo.max_nodes = int(gfn_c.get("max_nodes", 9))
     gcfg.algo.sampling_tau = float(gfn_c.get("sampling_tau", 0.9))
     gcfg.model.num_emb = int(gfn_c.get("num_emb", 128))
@@ -214,12 +292,26 @@ def main() -> None:
     out_dir = run_dir / "fixed_reward"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. train the fragment-GFN ONCE against the frozen sEH reward.
-    print(
-        f"[FGFN-FR] training {n_train_steps} steps against frozen sEH proxy (beta={beta})",
-        flush=True,
-    )
-    loop._train_steps(n_train_steps)
+    # 1. train the fragment-GFN ONCE. If a prior 3-day auto-requeue chain link left a
+    #    checkpoint (campaign Logs/030), resume from it and train only the REMAINING steps to
+    #    reach n_train_steps total (loop._train_steps adds steps from loop._it+1).
+    loop.load_checkpoint()
+    remaining = n_train_steps - loop._it
+    if remaining > 0:
+        print(
+            f"[FGFN-FR] training {remaining} steps (of {n_train_steps}; resumed at {loop._it}) "
+            f"against frozen {reward_type} reward (beta={beta})",
+            flush=True,
+        )
+        _t0 = time.time()
+        loop._train_steps(remaining)
+        train_s = time.time() - _t0
+    else:
+        train_s = 0.0
+        print(
+            f"[FGFN-FR] already trained {loop._it} >= {n_train_steps} steps; skipping to sampling.",
+            flush=True,
+        )
 
     # For a uniform-temperature (annealed) run, sample the final batch from the
     # EXPLOITATION policy: condition at a fixed high β via the *uniform* branch
@@ -237,7 +329,9 @@ def main() -> None:
 
     # 2. sample a batch of unique valid molecules (chunked to bound GPU memory; a single
     #    n_samples*oversample sampling call OOMs at this scale — job 69564).
+    _t0 = time.time()
     batch = _sample_chunked(trainer, loop._it, n_samples, float(fr_c.get("sample_oversample", 4.0)))
+    sample_s = time.time() - _t0
     print(f"[FGFN-FR] sampled {len(batch)} unique valid candidates", flush=True)
 
     # 3. score them with the reward generator itself (its VALUE = the score column,
@@ -284,6 +378,20 @@ def main() -> None:
     subprocess.run(ingest_cmd, check=True)
 
     trainer.terminate()
+    # Close the trace and record where the wall-clock went, so FragGFN can appear in the end-to-end
+    # compute comparison (training + pool + retrosynthesis + selection) alongside the other five.
+    trace.close()
+    n_scored, n_distinct = trace.n_scored, trace.n_distinct
+    write_timing(
+        run_dir / "timing.json",
+        {"train": round(train_s, 1), "sample": round(sample_s, 1)},
+        total_s=round(time.time() - run_t0, 1),
+    )
+    print(
+        f"[FGFN-FR] trace closed: {n_scored} scored / {n_distinct} distinct "
+        f"-> {run_dir / 'trace.csv'}; timing -> timing.json",
+        flush=True,
+    )
     print(f"[FGFN-FR] done. candidates at {out_dir / 'candidates'}", flush=True)
 
 

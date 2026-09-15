@@ -985,44 +985,6 @@ FragGFN cross-env (69693) both COMPLETED with conformant candidates and 100% per
 success while torch trains. Imports/gin-parse/py_compile all pass. **NOT YET**: the full matrix
 launch (awaiting user go-ahead) and a `git` commit. rgfn/ + upstream configs untouched.
 
-## 2026-07-03 — `glue/analysis/`: trained-GFN hub-based late-stage-diversification pipeline
-
-New **post-hoc analysis** subpackage for a *trained* reaction-GFN. Goal: select the `m`
-highest-value **pre-terminal hubs** (shared `ReactionStateA` intermediates) and diversify
-each in parallel via a single diverging final reaction (late-stage diversification), then
-trade **diversity** against **concurrency** (# lanes) or **cost** (shared intermediate) — the
-infrastructure to build that Pareto front, not the front itself.
-
-- **`glue/analysis/`** — modular, registry-driven, NOT gin (driven by `scripts/analyze_gfn.py`
-  + a Python/JSON `SweepSpec`), so intentionally NOT imported by `glue.registry`:
-  - `loader.TrainedGFN` — load cfg+ckpt like `infer.py` (strict=False for sampling-cache
-    buffers; imports `Trainer` so config parse resolves `Trainer.*`); sample trajectories,
-    score states, expose env/policy/proxy.
-  - `hub_graph` — `build_hub_graph(traj)` reduces trajectories to hubs; **flow = visit count**
-    (TB trains no per-state flow), observed 1-reaction children off the penultimate `SA`.
-  - `expanders` — `observed` (cheap, sampled) vs `enumerative` (env-driven exhaustive +
-    proxy-scored, per-hub-key cached, capped-with-warning).
-  - `hub_selectors` (`highest_flow`/`most_modes`/`highest_expected_reward`/`highest_child_reward`
-    + `DiverseHubSelector`), `mol_selectors` (`top_k_reward`/`top_k_reward_diverse`/
-    `scaffold_diverse_k`/`random_k`), `registry` (add a strategy = subclass + one line).
-  - `batch_plan` (→ standard `CandidateDataset` + `lanes.csv`), `metrics` (diversity/
-    concurrency/cost/reward; reuses `glue.metrics` + `glue.chemistry` cost), `cost` (route
-    pricing from `ChemLibrary`), `select`, `sweep` (trials × strategies → `results.csv`),
-    `pareto` (front extraction + trial aggregation).
-- **`scripts/analyze_gfn.py`** — generic entry point (mirrors `scripts/infer.py`).
-- **`experiments/diversification/`** — new experiment group; `seh_stdlib/` example (spec.json
-  + submit).
-
-**Verified** end-to-end on a real trained checkpoint (fixed-reward sEH proxy on
-`glue_standard_v1`, GPU): observed sweep (2 trials × 24 configs → `results.csv`), all
-selectors, both Pareto fronts (diversity-vs-concurrency and -vs-cost), enumerative expander
-(single hubs → 29/87/105 products; `top_k_reward_diverse` lifts modes 48→75), cost saving
-33% (observed) → 50% (enumerative k=25/lane). `py_compile` + imports pass. rgfn/ + upstream
-untouched. **Placement is the recommended default** (`glue/analysis/` since `glue/metrics/`
-is already post-hoc analysis `validation/` imports); the child-expansion default, cost-now,
-and home are the open forks flagged to the user — a `git mv` moves the tree if they prefer
-`validation/`. **NOT YET**: `git` commit; user sign-off on the forks.
-
 ## 2026-07-06 — Oracle-call counting + random-acquisition arm (Objective 1, Fig. 7 curve)
 
 Instrumentation for the top-k-vs-oracle-calls curve reviewers ask for
@@ -1076,3 +1038,1229 @@ timestamped dir (second granularity) and clobbered each other's rewrite-each-rou
 `run_name = <config>/<acq>_seed<seed>/<timestamp>` so concurrent arms/seeds never share a dir
 (required for the 6-job campaign). Pilot curve committed at
 `validation/results/6td3_acquisition_curve_pilot/`.
+
+---
+
+## LSD-Flow phase-1 vertical slice (2026-07-08) — post-hoc hub selection
+
+Built the first slice of **LSD-Flow** (`docs/LSD_FLOW_PROPOSAL.md`): post-hoc extraction of
+batchable "synthetic neighborhoods" (hubs) from a trained reaction GFN, split across the two
+axes exactly as the proposal §3 prescribes. This is the successor to the removed hub-analysis
+pipeline (see the memory note); none of the old code was resurrected.
+
+**Production side — `glue/` (the acquisition primitives; the AL loop imports these):**
+- `glue/metrics/lsdflow_flow.py` — the §2 flow recovery in log space:
+  `log F_hat(h;x) = logR + logP_B − logP_F(move) − logP_F(stop)`, plus `logsumexp`, the
+  median-consensus and total-terminating aggregators, and the reward-free `logZ`-shifted
+  visitation estimate.
+- `glue/metrics/uncertainty.py` — `U(h)` = population variance of the per-child log-flow
+  estimates (the flow-matching residual) + `effective_sample_count`.
+- `glue/samplers/lsdflow/` — `records.py` (the model-agnostic `FlowRecord` + the HubDAG-shaped
+  duck-type protocols); `dag.py` (`LiteHubDAG`, the lightweight in-loop aggregation; children
+  deduped by canonical key so `U(h)` isn't deflated by resampling); `rgfn_extract.py` (the
+  rgfn-native trajectory→`FlowRecord` extraction — composes the last reaction's A/B/C
+  micro-steps into one move, reads the final stop micro-step as `P_F(stop|x)`, and the C-step
+  backward log-prob as the learned `P_B`; shared with the validation RGFN adapter);
+  `hub/` (6 strategies — highest_terminating_flow, highest_flow, most_modes, parent_of_topk
+  [control], highest_visitation [reward-free], lowest_uncertainty — all `@gin.configurable`,
+  protocol-pure, + registry); `molecule/` (topk_reward, prob_weighted [Efraimidis–Spirakis
+  weighted-without-replacement], uniform_random + registry); `acquisition.py`
+  (`LSDFlowAcquisition`, the AL-facing entry point: trajectories+objective → flat molecule
+  batch; `select_grouped` keeps hub→children for the amortized-cost accounting).
+- Wired into gin discovery via `glue/samplers/__init__.py` + `glue/metrics/__init__.py`
+  (both already on the `glue.registry` path).
+
+**Validation side — `validation/lsdflow/` (analysis; imports `glue/`, never imported back):**
+- `adapters/` — `base.py` (`GFNAdapter` ABC + `FlowSample` canonical schema; the §4b
+  six-method contract, with the phase-2 enumeration methods raising a clear NotImplementedError
+  so an un-wired capability fails loudly); `rgfn_adapter.py` (the in-process RGFN anchor:
+  rebuilds objective + the **pure-policy** `valid_sampler` from a gin config + checkpoint,
+  loads `last_gfn.pt`, samples, extracts flow records); `registry.py` (declares all four
+  targets + env + build status; only RGFN wired); `workers/` (documented placeholder for the
+  cross-env SCENT/FragGFN/RxnFlow subprocess workers — phase 3-4).
+- `dag/` — `node.py` (canonical stereo-stripped cross-model key, §6); `graph.py` (`HubDAG`:
+  wraps `LiteHubDAG` for the strategy-facing duck type, adds a networkx view + per-node stats +
+  CSV/JSON/gpickle persistence keyed by model×reward×run); `build.py`.
+- `metrics/` — `diversity.py` (Butina modes on ECFP4 @ Tanimoto 0.65 + Bemis-Murcko
+  scaffolds, §11); `cost/` (reactions-per-mode PRIMARY: hub batch = depth(h)+k vs independent
+  = Σ depth(x_j); amortization-ratio declared for phase 2).
+- `harness/` — `config.py` (`LSDFlowRunConfig`) + `run.py` (the vertical-slice driver:
+  sample → build DAG → rank hubs under every strategy → run acquisition combos through
+  cost/modes → the flow-vs-visitation TB-integrity diagnostic → persist). `matrix.py` (full
+  sweep) and `analysis/` (severe tests, hub-coincidence, pareto) are declared, not built.
+
+**Verified on the Balam login node** (GFN inference only, no docking; `rgfn-smoke-env.sh`):
+pure-logic unit test of the aggregation + all strategies + acquisition (synthetic records)
+passes; the RGFN adapter builds from `configs/glue/fixed_reward_seh_proxy_stdlib.gin` +
+the `seh_proxy_stdlib` checkpoint and runs the whole slice end-to-end (300-traj smoke: flow
+recovery, `U(h)`, all 6 strategies, acquisition + reactions-per-mode, DAG persistence). One
+fix needed: import `Trainer` explicitly in the adapter to register the gin configurable (as
+`scripts/*.py` do). **Empirical finding under investigation:** sampled penultimate hubs are
+*sparse* — at 300 trajectories only 2/292 hubs had ≥2 terminal children (max 2), because a
+hub only accrues a child when a trajectory *stops exactly one reaction later*, and most
+trajectories through a hub continue deeper. A 20k-trajectory characterization run is in flight
+to see how multichild-hub density scales; this directly bears on whether phase-2
+`enumerate_children` (enumerate a selected hub's terminal children rather than waiting for
+sampling to hit them) is needed for the thesis. **NOT YET:** git commit; loop integration of
+`LSDFlowAcquisition` (needs a small `glue/active_learning/loop.py` change — the current loop
+has no pluggable-sampler hook, contra proposal §4a); the matrix/analysis modules; SCENT/
+FragGFN/RxnFlow adapters.
+
+**Correction + result (same day, Logs/025).** The 300-traj smoke and 20k run above were on the
+wrong checkpoint — `seh_proxy_stdlib/2026-07-02_13-45-03` is a **cancelled 30-iteration** stub,
+not the completed run. `seh_proxy_stdlib/` holds three timestamped dirs (jobs 69613/69615/69616);
+only **`2026-07-02_14-59-53`** is the completed 5,001-iter model (verified via `metrics['epoch']`
++ `candidates.csv` matching Logs/020). Re-ran the 10k slice on the correct checkpoint: **613/8183
+multi-child hubs (max 9), reactions-per-mode 3.55 hub vs 6.24 independent (~40% saving).** Severe-
+test caveats: 91% of multi-child hubs sit at the `max_num_reactions` boundary (forced stop); flow
+ranking ties the `parent_of_topk` control on cost (3.55 vs 3.47); flow-vs-visitation correlation
+~0 (0.086). Added a checkpoint-provenance caution to `validation/lsdflow/README.md`. Results:
+`validation/lsdflow/results/seh_rgfn_pilot/`.
+
+**Phase-2 exhaustive enumeration (same day, Logs/025 addendum).** Added the §4b
+`enumerate_children` path: `glue/samplers/lsdflow/rgfn_enumerate.py` (DFS the env's A→B→C
+action spaces → all one-reaction products → rebuild each `hub→…→stop→Terminal` micro-step
+trajectory with the env's own action spaces → reuse `extract_flow_records`, so enumerated flow
+terms == sampled), `RGFNAdapter.enumerate_hub_children`, and harness flags
+`--enumerate-top-hubs` / `--enumerate-max-children` / `--from-records` (reuse a persisted DAG
+so enumeration skips the slow ~30–40 min RGFN re-sample). Persisted-records now carry
+`hub_stereo_key`/`child_stereo_key`. **Validated:** a depth-0 fragment hub enumerates to 498
+one-reaction children / 309 modes (sampling saw 8), 100% sampled-child recovery — resolving the
+boundary-artifact caveat for the cheapest hubs. Guard: children whose `P_B` the env can't invert
+(max-depth boundary / stereo-dependent disconnection) are skipped, never assigned a fabricated
+`P_B=1`. **Limitation:** hubs with stereocenters reconstructed from the stereo-stripped key
+enumerate to 0 (stereo-dependent disconnection fails) — a fresh stereo-keyed DAG fixes it (the
+committed 10k `records.csv` predates the stereo columns). Enumeration artifacts:
+`validation/lsdflow/results/seh_rgfn_pilot/enumeration.json` + `enumerated_records.csv`.
+
+**Deeper-hub result (Balam job 70140, fresh 30k stereo-keyed DAG, 3h39m, Logs/025).** A fresh run
+reconstructs hubs from live stereo SMILES → **fully fixed** deeper-hub enumeration (all 12 hubs
+100% sampled-child recovery, incl. depth-3; the limitation was stereo-stripping, not the
+max-depth boundary). Landed the reactions-per-mode amortization — costed as **one
+representative per mode** (`_per_mode_cost`; hub = depth+n_modes, indep = n_modes·(depth+1),
+bounded by trajectory length; an earlier all-children/n_modes denominator inflated it to ~44,
+fixed): hub/mode ≈1.0 vs indep/mode = depth+1 → ~(depth+1)× saving (depth-1 ~2×, depth-3 ~4×,
+depth-0 fragments free); best enumerated sEH 7.1-7.9. Also added: the harness
+persists the DAG BEFORE enumeration (a slow enumeration can't lose the multi-hour sample), the
+`--from-records` reuse path, interior (depth 1-2) hub targeting, and
+`validation/lsdflow/submit_seh_enum.sh` (compute-node submit). Small artifacts committed to
+`validation/lsdflow/results/seh_rgfn_enum/`.
+
+**Paper-comparable modes + dropoff funnel (Logs/026).** Redefined a "mode" in
+`validation/lsdflow/metrics/diversity.py` to match upstream `TanimotoSimilarityModes` /
+`[bengio2021gflownet]`: reward-gated + best-first greedy sphere-exclusion (ECFP Morgan r=3, 2048,
+sim 0.7), replacing the structure-only ECFP4/0.65 Butina; `_per_mode_cost` now costs one
+representative per hit-mode; config knobs `mode_similarity_threshold` + `mode_reward_threshold`
+(+ CLI). New **modular analysis home `experiments/lsd_hubs/`** (one sub-dir per analysis; reuses
+`glue/`+`validation/lsdflow/` primitives) with `dropoff/funnel.py` (per-hub filter funnel) +
+committed `funnel_seh_70140_results.csv`/`_summary.json`. Finding (30k sEH): the binding gate is
+the dominant dropoff (4586 raw → 3% at sEH≥7, 0% at ≥8; Tanimoto dedup gentle 2.3×) — depth-0
+fragment hubs are diverse but hitless, depth-3 hubs carry the hits + amortize ~3.6×. Regenerated
+the committed `seh_rgfn_{enum,pilot}` acquisition/enumeration numbers under the gated definition.
+
+**SCENT cross-env adapter — LSD-Flow phase 3 (Logs/027).** Wired SCENT into the hub-analysis
+harness as the first cross-env target (proposal §4b/§10.3). SCENT can't co-import (its package
+is also named `rgfn`, own `scent` env), so the adapter is a subprocess bridge, NOT one imported
+class: `validation/lsdflow/adapters/workers/scent_worker.py` runs *in the scent env* (rebuilds
+`objective`+pure `valid_sampler` via the `verify_pb_recovery.py` recipe, loads `last_gfn.pt` +
+the `guidance_models.pt` P_B sidecar from Logs/024, samples, and emits the canonical
+`records.csv`+`visit_counts.json`+`meta.json`); `validation/lsdflow/adapters/scent_adapter.py`
+is the in-process client (rgfn env) that shells to the worker under `conda activate scent` with
+the scent env's torch-bundled `nvidia/*/lib` on `LD_LIBRARY_PATH` (the `rgfn-smoke-env.sh`
+trick, cluster-agnostic) and reads the files back into a `FlowSample` — identical downstream
+contract to `RGFNAdapter`, so **the harness itself is unchanged**. The §2 flow-extraction
+algorithm is a self-contained copy of `glue.samplers.lsdflow.rgfn_extract` inside the worker (it
+can't be imported — its `import rgfn` would resolve to *our* rgfn; SCENT's fork is API-compatible
+so the algorithm transfers verbatim). `registry.py` flipped `get_adapter("scent")` from
+`NotImplementedError` to live. `validation/lsdflow/submit_scent_seh.sh` is the compute-node
+submit (activates the `rgfn` harness env; the worker self-activates `scent`). **Validated
+end-to-end** on the 5,000-iter patched sEH checkpoint (logZ 74.33 = trained value; sidecar loads,
+P_B exact): N=2k → 19 multi-child hubs, amortization 2.49 vs 3.92 rxn/mode. **Not built for
+SCENT yet:** phase-2 `enumerate_hub_children` (frozen-dynamic-library enumeration) raises
+`NotImplementedError`; the hub-coincidence analysis (`validation/lsdflow/analysis/`, §8) is the
+next build. Full 30k run = job 70179.
+
+**SCENT frozen-library sampling + enumeration + recipe logging (Logs/027 addendum).** Extended the
+SCENT cross-env adapter for the *faithful full* model. (1) **Freeze:** building SCENT from a
+checkpoint leaves it restricted to the 418 base fragments (`current_fragments=418`); the worker now
+fires `trainer.on_update_fragments_library` from the `fragments_<N>.json` snapshot to grow the env
+reactant set + policy embedding + cost proxy to the full trained vocabulary (418 + ~1,600 promoted),
+for BOTH sampling and enumeration (`SCENTAdapter.freeze=True` default; `--no-freeze` reverts). (2)
+**Enumeration:** `scent_worker.py --mode enumerate` + `SCENTAdapter.enumerate_hub_children` mirror
+`glue.samplers.lsdflow.rgfn_enumerate` worker-side on the frozen library — validated exhaustive
+(depth-0 hub 3,975 paths, 2/2 sampled recovered at cap 12k; neighborhoods ~10x the RGFN 418-lib
+case, so `submit_scent_seh.sh` now runs enumeration with ENUM_MAX=12000). (3) **Recipe logging:**
+`validation/generators/scent/recipe_logging.py` monkeypatches `DynamicLibrary` (clone pristine) to
+record each promoted fragment's min-reaction synthesis route (reaction SMARTS + reactants + product)
+into `fragments_<N>.json`; wired as `run_scent_fixed.py --log-recipes`
+(`experiments/fixed_reward/scent_seh/submit_fixed_scent_seh_recipes.sh`, job 70180). Feeds the LSD-Flow
+cost model's exact nested dynamic-fragment amortization (each distinct promoted fragment charged once
+per costed library; reactions primary + SCENT $-cost secondary) and a future chemist "synthesize
+these intermediates" view. **The nested-amortization cost model itself is not built yet** — it needs
+per-molecule fragment-composition capture from the analysis trajectories (not in `FlowRecord` today).
+
+---
+
+## 2026-07-14 — Full synthesis-route recording (reconstruction / "how to make it")
+
+**Why:** reconstructing a suggested molecule step-by-step was not fully possible — the reactions
+*after the hub attach* were not recorded, and the hub's own build route was never captured (only
+promoted-fragment recipes existed, in `fragments_<N>.json`). This closes both gaps so the
+chemist-facing `experiments/lsd_hubs/campaign/synthesis_routes.py` (Logs/032) can be a lookup, not an
+inference.
+
+**What changed (all in `validation/`, additive + backward-compatible):**
+- `adapters/workers/scent_worker.py`:
+  - added `_reaction_id` / `_reaction_step` helpers (self-contained copies of the recipe_logging
+    schema — the worker can't import our-rgfn-bound modules).
+  - **enumerate mode:** every `enum_children.json` child now carries `reaction` = the ground-truth
+    final hub→child step(s) `{reaction, reactants, input, product}`, built from the **states**
+    (`hub_state.molecule` in, `x_state.molecule` out) because the action's `output_molecule` may be
+    unpopulated pre-apply in the enumerate path. `enumerate_terminal_children` / `build_child_trajectory`
+    now return a `reaction_by_stereo` map.
+  - **sample mode:** new `routes.json` = every product molecule's full min-reaction route (same
+    schema), keyed by the **stereo-stripped** product SMILES (matching `records.csv`/enum `hub_key`,
+    so the join is exact; steps keep raw SMILES). Gated `routes_out`/`RAC` params on
+    `extract_flow_records` (enumerate path passes none → unchanged).
+- `adapters/base.py`: `FlowSample.routes` field (empty for adapters that don't emit routes, e.g. RGFN).
+- `dag/graph.py`: `HubDAG.save` persists `routes.json` (symmetric to `compositions.json`).
+- `adapters/scent_adapter.py`: reads `routes.json` into `FlowSample.routes`.
+
+**Verified (debug job 70526, ~3 min):** `routes.json` populated (814 entries, real RGFN templates);
+enum child `reaction` field populated with the ground-truth final step; a depth-1 hub's build route
+present in `routes.json` (depth-0 hubs correctly absent — they are stock fragments). Schema/assembly
+logic unit-tested separately (nesting, intermediates-first ordering, count-once).
+
+**`synthesis_routes.py` wired to consume it (backward-compatible):** `full_route` now builds the hub
+(linearizes `routes` which merges `smiles_to_route` + the optional `--routes routes.json`) and uses
+the child's logged `reaction` for the final step, preferring ground truth over `hub_reaction_name`.
+Both inputs are optional — with neither present it falls back to the old behavior. Verified: a
+backward-compat run on the current (un-repopulated) data runs clean (hub still a "buy" leaf, final
+step inferred), and a synthetic test confirms the upgrade path (hub + promoted intermediate built,
+then the logged final step) and the fallback path.
+
+**Not done / next:** the **current** committed results predate the recording — `scent_seh_70189` has
+no `routes.json` and `campaign_enum_seh_70363`'s `enum_children.json` has no `reaction` field; a
+re-run (sample 30k ~3–4 h + enumeration ~5.5 h, both exceed debug's 2 h → `compute`) will populate
+them, at which point `synthesis_routes.py --routes routes.json` yields fully-grounded protocols with
+the hub built.
+
+---
+
+## 2026-07-14 — Fair count-once cost model for the hub-batching campaign (Logs/033)
+
+**Why.** The campaign's reactions/mode double-counted SCENT's promoted dynamic-library fragments.
+SCENT's per-molecule `num_reactions` is **fully nested** — it already includes building every
+attached promoted fragment (`external/scent/rgfn/gfns/reaction_gfn/reaction_env.py`: seed carries
+`fragment.num_reactions`; each attached reactant adds `fragment.num_reactions`; each coupling +1) —
+yet `BestCandidateStrategy`/`HubBatchingStrategy` then *added* the fragment builds again via
+`_charge_promoted`. Confirmed empirically: for all 245 promoted fragments present as intermediates,
+`compositions.json`'s `num_reactions` equals the nested closure cost exactly. Net: the per-molecule
+assembly term was ~2× inflated. Separately, best-candidate got no credit for parent scaffolds its
+top-N picks share (user request: "count shared hubs once, like intermediates").
+
+**What changed (all in ours; both concerns fixed on ONE model applied to both strategies):**
+- `glue/samplers/lsdflow/campaign.py`:
+  - new `shallow_couplings(num_reactions, promoted, cost_table)` = `num_reactions − Σ(nested build
+    cost of each attached promoted fragment)` → the true assembly-coupling count (verified 1–4, no
+    negatives on top-1000). Both strategies now charge couplings, not the nested `num_reactions`.
+  - new `HubAssignmentPolicy` ABC + `MostSharedAssignment` (default) + `NoHubSharing` — swappable;
+    assigns each best-candidate mode to the parent hub most reused among accepted modes.
+  - `BestCandidateStrategy` is now three-pass (select → assign shared hubs → count-once cost) and
+    takes `hub_compositions` (to cost parent hubs) + `assignment_policy`. A **prefix-validity filter**
+    (`couplings(hub) < couplings(mode)`) keeps a cross-trajectory parent from ever *raising* a mode's
+    cost — sharing is provably ≤ no-sharing (asserted in the isolation test). Fragments are charged
+    via each mode's full `promoted` (count-once), so a shared hub's fragments are never double-charged.
+  - `HubBatchingStrategy` charges `shallow_couplings(hub)` instead of the nested `depth`.
+  - The old "disjoint inputs — best-candidate never touches hub data" contract is dropped: for a fair
+    cost comparison best-candidate now reads `records.csv` parent hubs + `compositions`.
+- `experiments/lsd_hubs/campaign/run_campaign.py`: `_load_candidates` also collects each terminal's
+  observed parent hub keys; new shared `build_strategy()` (used by both drivers) wires the model.
+- `experiments/lsd_hubs/campaign/sweep_campaign.py`: threads `compositions` through `build_strategy`.
+
+**Verified (login CPU).** `py_compile` clean; isolation test asserts sharing ≤ no-sharing.
+Regenerated `results/scent_seh/` (50-hub, ~42 s) + `results/scent_seh_1kx200/` (200-hub, ~73 s).
+sEH cutoff 0.5, 300 modes: best-candidate **1,479 → 949** (double-count fix, −530) **→ 929**
+(accidental hubs, −20); hub-batching **819** (≈unchanged; its used hubs are depth-0 base fragments,
+0 couplings). Hub-batching's edge **1.81× → 1.13×**. At loose cutoffs (≥0.75, 200-hub)
+best-candidate beats hub-batching on reactions.
+
+**Not changed.** `hub_stats.py`, the diversity-pairs/route-trees/synthesis-routes tools, and the
+scaffold-concentration ceiling / chemistry-floor findings are cost-model-independent and untouched.
+
+---
+
+## 2026-07-17 — LSD-Flow documentation reconciliation (docs match the code)
+
+**Why.** The LSD-Flow docs described an earlier design that the code had moved past: several READMEs
++ the proposal + auto-memories listed modules that were removed on 2026-07-11 when the count-once
+**campaign** superseded the original per-hub acquisition design — `glue/samplers/lsdflow/acquisition.py`
+(`LSDFlowAcquisition`), `glue/samplers/lsdflow/molecule/` (the molecule-selection strategy registry),
+and `validation/lsdflow/metrics/cost/{base,reactions_per_mode,registry}.py` (the cost-model ABC +
+the simple reactions-per-mode metric). That removal was recorded only in Logs/028's addendum, so the
+higher-level docs still read as if the deleted pieces existed — which misled an agent into planning
+against phantom modules.
+
+**What the pipeline actually is (single, current design).** Two stages joined by a persisted
+flow-record DAG: (1) **sampling / flow extraction** — `validation/lsdflow/harness/run.py` drives a
+per-model adapter (`rgfn_adapter` in-process; `scent_adapter` → `scent_worker` cross-env), recovers
+the §2 flow (`glue/metrics/lsdflow_flow.py` + `uncertainty.py`), builds the DAG
+(`validation/lsdflow/dag/` rich; `glue/samplers/lsdflow/dag.py` `LiteHubDAG`), and persists
+`records.csv` + `compositions.json` (+ optional `enumerated_records.csv`); (2) **the count-once
+library-cost campaign** — `experiments/lsd_hubs/campaign/*.py` run `campaign.py`'s
+`BestCandidateStrategy` vs `HubBatchingStrategy` (with `child_select` / `mode_select`) and score them
+on the count-once cost (`validation/lsdflow/metrics/cost/{dynamic_amortization,compute_time}.py`).
+The hub-selection strategies (`glue/samplers/lsdflow/hub/`) + flow/uncertainty metrics are retained
+as the foundation for the deferred AL acquisition + multi-generator benchmark.
+
+**What changed (docs only; no code touched).** Rewrote `validation/lsdflow/README.md` (current
+two-stage pipeline + accurate layout + status), `experiments/lsd_hubs/README.md` (added `campaign/`
+to the analyses; fixed the primitive routing), the `glue/samplers/lsdflow/__init__.py` docstring
+(campaign strategies are AL-*ready*, not AL-wired), the proposal's §3 layout note + §11 cost
+definition (count-once, not the `depth(h)+k` sketch), and the `docs/RESEARCH_CONTEXT.md` Logs/025
+row. Added the `verify-state-not-docs` auto-memory. No source files were deleted or moved; the
+`.pyc` for the removed modules are gitignored (not tracked).
+
+---
+
+## 2026-07-20 — LSD-Flow acquisition wired into active learning (uncertainty-driven, RGFN in-env)
+
+**Why.** The capstone the campaign primitives were built to feed (Logs/037/038 "next steps"): put
+LSD-Flow hub selection *inside* the active-learning loop so we can measure how fast a real lab run
+finds high-quality candidates per expensive-oracle (docking) call — with the hub-flow **uncertainty
+`U(h)`** as the acquisition's exploration signal (proposal §2 phase-2, §4a).
+
+**What (production `glue/`, model-agnostic).**
+- **`glue/samplers/lsdflow/hub/ucb.py` — new `UcbHubStrategy`** (registered as `ucb`). Ranks hubs by
+  the explore/exploit score `score(h) = z(reward(h)) + λ·z(U(h))`, each term **z-scored across the
+  round's eligible hubs** so `λ` is a scale-free relative weight. `reward_fn` (exploitation) and
+  `uncertainty_fn` (exploration) are swappable by name (small registries) or callable — the
+  researcher's explicit modularity ask. Overrides `rank()` (the score is set-relative, not per-hub);
+  `score_breakdown()` emits per-hub provenance (raw + z + blended).
+- **`glue/samplers/lsdflow/acquisition.py` — `LSDFlowAcquisition` RE-INTRODUCED** (it and a
+  `molecule/` registry were deleted 2026-07-11 when the count-once campaign superseded the *first*
+  acquisition design; this is the AL-wired version the proposal §4a always intended, now built **on**
+  the campaign primitives, not replacing them). A drop-in batch-selection sampler with two arms:
+  `hub_batching` (sample → `LiteHubDAG` → UCB rank → walk hubs best-first, enumerate each hub's
+  one-reaction children scored by the reward-generator `M`, pre-select-K + `free_frag` child policy,
+  accept reward-gated + Tanimoto-diverse **modes** up to a per-round budget) and `best_candidate`
+  (top-`M` sampled terminals under the **same** hit-bar + diversity filter — the control). Returns a
+  flat SMILES batch + routes + dual accounting (**oracle calls** = docked modes; **reward-gen
+  calls** = `M` evaluations on enumerated children) + `avg mols/hub` + per-hub provenance.
+  pre-select-K=20 is **wired but inert on RGFN** (no dynamic library); it becomes load-bearing on the
+  SCENT path.
+- **`glue/active_learning/loop.py`** — additive: `acquisition` now accepts `hub_batching` /
+  `best_candidate` (alongside `policy` / `random`); the two LSD-Flow arms fit `M` + train the GFN
+  (like `policy`) then delegate to `LSDFlowAcquisition`; the fit→train→sample→dock→grow structure is
+  unchanged (§4a v1). Prefers the pure-policy `valid_sampler` for a clean `U(h)`. Writes a per-round
+  `hub_acquisition_round_NNN.csv`.
+- **`glue/active_learning/acquisition_trace.py`** — extended `oracle_calls.csv` with
+  `reward_gen_calls_{round,cumulative}` + `n_hubs_used` + `avg_mols_per_hub` (both cost axes on the
+  Fig.7 substrate). Backward compatible (blank for policy/random).
+- **`scripts/active_learning.py`** — `--acquisition` gains `hub_batching` / `best_candidate`.
+- **`validation/harness/acquisition_curve.py`** — arm colours/labels for the four arms.
+- **`configs/glue/active_learning_6td3_lsdflow.gin`** (new) — RGFN in-env anchor: 6TD3 GPU
+  differential docking, 10 rounds, 100 modes/round, hit bar **−1.5** (the glue/decoy discrimination
+  cut, Logs/002; Youden −1.58, Logs/006), λ=1, similarity 0.5. Plus
+  `experiments/active_learning/6td3/{submit_al_6td3_lsdflow.sh,launch_lsdflow_6td3.sh}`.
+
+**Why RGFN in-env first (build order).** The `glue/` selection primitives can't be imported in the
+`scent` env (its `import rgfn` resolves to SCENT's fork — the existing `scent_worker` *vendors* the
+extraction/enumeration for exactly this reason), so the clean architecture is the existing harness
+pattern: SCENT produces enumeration files in its env, `glue` selection runs in the `rgfn` env on
+them. Validating the whole acquisition + curve **in-env on RGFN** (proposal §10 step 2) locks the
+modular contract with zero cross-env friction; the SCENT headline run (where pre-select-K=20 is real)
+reuses the *same* `LSDFlowAcquisition` via that file bridge — the next build step.
+
+**Compute-time accounting (Logs/039 requirement).** Per-component acquisition wall-clock is measured
+live and CUDA-synchronized: `rgfn_enumerate.enumerate_terminal_children` gained a backward-compatible
+`timing`/`sync` hook splitting `enumeration_s` / `reward_gen_s` / `flow_extract_s`;
+`LSDFlowAcquisition` times `sampling_s` / `flow_extract_s` / `hub_rank_s` / `mode_select_s` around
+those, attaches the breakdown to `AcquisitionResult.timing`, and the loop writes it to
+`active_learning/acquisition_timings.csv` (one row per round: arm, total, six components) + into the
+round metrics. This sits **inside** the loop's `sample_batch` `PhaseTimer` bucket; docking is the
+separate `oracle_score` phase — so the run reports both call-count axes (oracle vs reward-gen) AND
+the wall-clock breakdown behind "how much longer hub-batching works vs best-candidate."
+
+**Verified (login node, `~/bin/rgfn-smoke-env.sh`).** `py_compile` all touched files; `import glue`
++ `ucb` registered + `LSDFlowAcquisition` gin-configurable; unit smoke of UCB ranking (λ=0 →
+best-reward hub first, λ=100 → highest-`U(h)` hub first, λ=1 → z-scored blend) + `score_breakdown` +
+the mode hit-bar/diversity gate; timing plumbing present; both configs parse; `bash -n` on all submit
+scripts.
+
+**Two compute-node smokes, two real bugs caught (the reason to smoke the full loop, not just imports).**
+Both ran clean end-to-end (exit 0) but exposed correctness bugs that compile/import/unit-smoke all
+passed:
+1. **Smoke 71011 → 0 modes (sampled-`U(h)` starvation).** `U(h)` was computed from *sampled* children
+   with a ≥2-child gate; sampling under-counts a hub's children (Logs/025), so the ranker's eligible
+   set was empty. **Fix:** two-stage `_hub_batching` — pick candidate hubs by **visit count** (robust
+   to sparse sampling), **enumerate** each, compute `U(h)`/`reward(h)` from the *enumerated*
+   neighborhood (matches how the campaign/paper compute it), UCB-rank, mode-select. Added knobs
+   `n_candidate_hubs` / `min_hub_visits` / `min_hub_depth` / `max_hub_depth`.
+2. **Smoke 71025 → still 0 modes (units mismatch).** Two-stage ranking worked (`U(h)` well-defined
+   ~22–28), but the `−1.5` **real-ΔVina** hit bar was compared against `M`'s **standardized** output
+   (`LearnedGlueProxy.fit` standardizes labels). Best child std `−1.22` = real `−2.35` (a hit) but
+   `−1.22 ≤ −1.5` is false → everything rejected. **Fix:** `_mode_selector` maps the bar into `M`'s
+   space `(thr−label_mean)/label_std` (the loop passes the proxy's fit stats); z-scored ranking is
+   invariant to the affine map so only the gate changes. Unit-tested: real `−1.5` → std `−0.27`, the
+   std `−1.22` child now accepts, mean/positive reject.
+
+**Measured compute (smoke 71025, the answer to "where does time go").** Acquisition 5 min:
+`enumeration_s` 220 s (73%, RDKit child construction — the dominant cost, per Logs/039), `sampling_s`
+56 s, `flow_extract_s` 18 s, `reward_gen_s` 5.7 s (proxy scoring is cheap); `train_gfn` ~13 s/iter.
+**Full-run sizing set to these rates:** `Trainer.n_iterations` 300→**150**/round (~5.5 h train),
+`max_children_per_hub` 2000→**200** + `n_candidate_hubs` **100** (~17 min/round enum), submit
+`--time` 11→**13 h**. CONFIRM on the first post-maintenance run.
+
+**Status.** Fixed smoke **re-queued as job 71114** (`hub_batching`, held `ReqNodeNotAvail` — auto-runs
+when nodes return; should now yield modes + a full timing breakdown). **Not yet run:** the full 3-arm
+× 10-round run (`launch_lsdflow_6td3.sh 42`, hold until 71114 confirms modes) and the SCENT cross-env
+path (pre-select-K live).
+
+## 2026-07-29 — SCENT recipe logging ON by default (so queued campaign links inherit it)
+
+**Why.** A promoted fragment's synthesis route is observable **only while training** — once the
+dynamic library promotes it, the policy consumes it atomically and it never reappears as a reaction
+product. So a SCENT run trained without `--log-recipes` is permanently stuck on the
+`min_num_reactions` cost approximation: `fragments_<N>.json` carries no `smiles_to_route`, and
+`dynamic_amortization` cannot charge nested fragment-of-fragment builds exactly (Logs/027/028). Only
+the two dedicated recipe re-runs (`scent_{seh,drd2}/2026-07-10_*`, jobs 70180/70184) ever passed the
+flag; **every publication-scale 5k cell** (`scent_{seh,drd2,6td3,clpp}_5k/seed*`) lacks routes.
+`experiments/fixed_reward/scale5k/submit_baseline.sh` was written 2026-07-14, one day *after* the flag
+landed (8ca901f, 07-13), and simply never wired it — checked with `git log -S`: the flag has **never**
+been removed from anything, and Logs/030 contains no decision to omit it.
+
+**Where the default lives, and why not in the submit script.** SLURM **snapshots a batch script at
+submit time** (`scontrol write batch_script <jobid>` proves it), so editing a `submit_*.sh` cannot
+reach an already-queued chain link — and the campaign pre-submits every link up front
+(`launch_chain.sh`, `--dependency=afterany`). The stored script does `cd $REPO` and runs
+`python validation/generators/scent/run_scent_fixed.py`, which is resolved from the working tree **at
+job start**. Flipping the default in that file therefore reaches every link that has not started yet,
+with no cancellation and no loss of queue position.
+
+- `validation/generators/scent/run_scent_fixed.py` — `--log-recipes` now `default=True`, with a new
+  `--no-log-recipes` opt-out (explicit store_true/store_false pair, not `BooleanOptionalAction`, so it
+  is Python-version agnostic). The two existing `submit_fixed_scent_*_recipes.sh` still pass
+  `--log-recipes` explicitly; `enable_recipe_logging()` is idempotent, so that is a no-op.
+- `experiments/fixed_reward/scale5k/submit_baseline.sh` — passes `--log-recipes` explicitly for
+  `GEN=scent`. Redundant with the new default, kept so the campaign script states its own intent.
+- Same file — a **partial-coverage warning**: when route logging is on and the run dir already holds
+  route-less `fragments_*.json` from earlier links, print that this run's final snapshot will mix
+  exact routes with `min_num_reactions` fallbacks. Detection is a chunked byte scan (the snapshots are
+  ~60 MB each and `state_dict` appends the key *last*, so neither a full read nor a prefix check
+  works); ~0.2 s for 240 MB. Prevents a downstream reader from taking "has `smiles_to_route`" as
+  "fully routed" — `reconcile_t15.py --min-recipe-fraction` is the gate that measures coverage.
+
+**Why this cannot perturb training** (the point of the review, since the flag lands on live campaign
+runs): `recipe_logging.enable_recipe_logging()` wraps two `DynamicLibrary` methods.
+(1) `on_end_sampling` — calls the original **first**, then `capture_routes` inside `try/except`;
+`capture_routes` only *reads* (`masked_select` builds a **new** `Trajectories` via
+`itertools.compress`, verified in `external/scent/rgfn/api/trajectories.py:337`) and it re-uses the
+exact same access pattern SCENT's own hook already performs on the same container. It draws no
+randomness, and it runs *after* `seed_everything`, so the RNG stream is unchanged.
+(2) `state_dict` — adds one key. That method is consumed in exactly **one** place
+(`trainer.py:391 → json.dump` into `fragments_<N>.json`); `DynamicLibrary` has **no**
+`load_state_dict` and is **not** part of the torch checkpoint (`make_checkpoint` saves only
+model/optimizer/lr_scheduler/metrics/replay_buffer), so the resume path cannot see the extra key.
+Cost: routes for ~395k seen molecules ≈ 0.2 GB of JSON-equivalent (nodes have 253 GB) and **+0.7 MB**
+per snapshot; the 07-10 recipe run finished *faster* than its route-free 07-07 sibling.
+
+**Pre-existing bug found while auditing, NOT fixed here — the dynamic library resets on requeue.**
+`DynamicLibrary` state is not checkpointed and nothing restores it, so a chain requeue restarts it
+empty. The promoted-fragment counts prove it happened (`chosen_smiles` per snapshot):
+
+| cell | 1000 | 2000 | 3000 | 4000 | |
+|---|---|---|---|---|---|
+| `scent_seh_5k/seed42` | 400 | 800 | 1200 | 1600 | clean |
+| `scent_drd2_5k/seed42` | 400 | 800 | 1200 | 1600 | clean |
+| `scent_clpp_5k/seed42` | 400 | 800 | 1200 | 1600 | clean |
+| `scent_6td3_5k/seed42` | 400 | 800 | **400** | 800 | **reset ×2** |
+| `scent_clpp_5k/seed43,44` | 400 | **400** | 800 | 1200 | **reset ×1** |
+| `scent_6td3_5k/seed43,44` | 400 | 800 | 1200 | *(running)* | clean so far |
+
+Consequences: (a) the final promoted library size varies with requeue timing (800 / 1200 / 1600) — a
+confound for any cross-seed cost comparison; (b) `FragmentOneHotEmbedding.weights` is pre-allocated to
+`418 + max_additional` and indexed by **position**, so after a reset the re-promoted fragments inherit
+the trained embedding rows of the *previous* occupants (no crash, and the content-based
+`FragmentFingerprintEmbedding.all_fingerprints` is a plain attribute so it rebuilds correctly — but
+the one-hot half carries stale identity). A real fix means persisting/restoring the library state,
+which changes training behaviour mid-campaign; left as a decision for the researcher.
+
+---
+
+## 2026-07-30 — Mode-definition ablation seam: `RewardOnlyModeSelector` + `mode_selector_factory` passthrough (Logs/054)
+
+**What changed (two small, additive edits).**
+
+1. `glue/samplers/lsdflow/mode_select.py` — added `RewardOnlyModeSelector` (the **diversity-filter
+   ablation**: reward gate + exact canonical-SMILES duplicate suppression, no Tanimoto test, and it
+   counts what it suppressed via `n_duplicates_suppressed`), and factored the reward gate out of
+   `DiverseThresholdModeSelector._passes_gate` into a module-level `passes_reward_gate()` that both
+   selectors call. The gate rule (None ⇒ admit all, NaN never passes, orientation-aware) is now
+   defined **once**, so the ablated and unablated arms provably differ only in the similarity test.
+   `DiverseThresholdModeSelector` is behaviourally unchanged — the method still exists and delegates.
+
+2. `experiments/lsd_hubs/campaign/run_campaign.py::build_strategy` — added an optional
+   `mode_selector_factory` passthrough. Both strategy classes in `glue/samplers/lsdflow/campaign.py`
+   have always accepted this argument; **no driver had ever used it**. Default `None` ⇒ each strategy
+   builds the canonical `DiverseThresholdModeSelector(reward_threshold, similarity)` exactly as before.
+
+**Why it's here rather than in the experiment dir.** The reward-only selector is a production
+component (`glue/`), reusable as a control arm by the AL loop's `LSDFlowAcquisition`, which consumes
+the same selector seam. The experiment driver (`experiments/lsd_hubs/filter_ablation/`) only *chooses*
+selectors.
+
+**Verified.**
+
+- Default path unchanged: re-ran `run_campaign.py` at the campaign operating point (SCENT×sEH anchor,
+  τ=7.0/cutoff 0.5, free_frag + prebuild-K 20) before and after the edit — `summary.json` identical and
+  both `curve_*.csv` **byte-identical**.
+- All **ten** `build_strategy` callers import cleanly (`sweep_campaign`, `tau_similarity_surface`,
+  `preselect_sweep`, `batch_size_distribution`, `dump_frontier_smiles`, `reconcile_t15`,
+  `s3gfn_frontier`, `matrix16/gate_curve`, `matrix16/tau_curve_all_generators`, `run_campaign`); every
+  one passes keyword arguments after `comps`, so a defaulted keyword is invisible to them.
+- Selector unit checks: reward-gate parity with the existing selector across `{7.0, None, −1.5}` ×
+  `{8.0, 7.0, 6.9, NaN}` and both orientations; accepts a near-identical molecule; rejects a re-spelled
+  duplicate, a below-gate molecule, an unparseable string, and an empty string.
+- The ablation driver self-checks the invariant that matters: at the operating point every member of
+  the delivered library must re-qualify under the canonical definition (300/300 for both strategies).
+
+**Not done.** No config/gin surface for the new selector (nothing needs it yet), and the AL loop was
+not switched over — `LSDFlowAcquisition` can pass the factory when a no-filter control arm is wanted.
+
+---
+
+## 2026-07-30 — INCIDENT: worktree `external/` symlinks were committed and destroyed the clones
+
+**What happened.** The hub-ordering ablation (Logs/053) ran in a git worktree. To give the worktree
+access to the upstream baseline clones, `experiments/lsd_hubs/matrix16/link_worktree_data.sh` creates
+`external/<repo>` symlinks pointing at the main checkout. A `git add -A` in that worktree committed
+six of them (`RxnFlow`, `gflownet`, `multiaiz`, `s3gfn`, `scent`, `sparrow`). Merging the branch then
+checked those links out **in the main checkout**, where they pointed at themselves — and git removed
+the real clone directories to make room. `external/` fell from ~300 MB to 50 KB, breaking the
+`scent` / `rxnflow` / `fraggfn` / `s3gfn` conda envs, whose editable installs (`*.pth`) point into
+those paths.
+
+**Why the ignore rule missed it.** The rule was `external/*/`. A trailing slash matches **directories
+only**, and a symlink is not a directory — so the links were never ignored. Replaced with a
+path-shaped rule that cannot be evaded by file type:
+
+```
+external/*
+!external/setup_*.sh
+```
+
+**Recovery (complete, verified).**
+1. Untracked + deleted the six symlinks; fixed `.gitignore` (commit `7b7df2c`).
+2. Re-cloned all six at the pinned refs from `external/setup_*.sh`
+   (scent `af1fee5`, gflownet `da99940`, RxnFlow/s3gfn/sparrow/multiaiz at `main`).
+3. **Re-cloning does not restore downloaded artifacts.** The sEH proxy weights
+   (`cache/bengio2021flow_proxy.pkl.gz`, fetched from GitHub at first use) live *inside* the clones
+   and were lost. Compute nodes have no internet, so this fails the job at startup with a
+   `ConnectTimeout`. Restored into all three copies that need it:
+   `external/scent/rgfn/gfns/reaction_gfn/proxies/cache/`,
+   `external/gflownet/src/gflownet/models/cache/`, `external/RxnFlow/src/gflownet/models/cache/`.
+   (`fpscores.pkl.gz` was unaffected — it is placed in the env's site-packages, not a clone.)
+4. Verified by re-running the real SCENT enumeration worker on a compute node (job 72014): output is
+   **byte-identical** to the same hubs enumerated before the deletion (474 and 1,399 children).
+
+**No jobs were harmed** — every queued `c5_*` campaign job was still PENDING through the ~11-minute
+window, confirmed via `sacct`.
+
+**For future agents.** Never `git add -A` in a worktree that has run `link_worktree_data.sh`; stage
+paths explicitly, or confirm `git status --porcelain` shows nothing under `external/`. If a clone
+ever has to be re-created, remember it carries first-use downloads that the setup scripts fetch but
+`git clone` does not.
+
+---
+
+## 2026-08-14 — New benchmark baselines: REINVENT 4 (Phase 1a) + shared competitor plumbing
+
+**Why.** The external comparison rests on a single route-less baseline (S3-GFN). Adding more
+entrants — REINVENT 4 and Saturn (route-less, S3-GFN's class), SynFormer (reaction-aware, the cell
+that isolates the *flow field* from mere reaction-grounding), and TANGO — is phased work; this entry
+covers Phase 1a and the plumbing every later phase reuses. Surrogate targets only (sEH, DRD2), N=500
+pools, 3 seeds, deliverable = 100 modes.
+
+**New — shared, generator-agnostic**
+- `experiments/lsd_hubs/campaign/mode_saturation.py` — recovers the pre-flight that Logs/056 ran from
+  scratch and never committed, and promotes it to a **gate**: MultiAiZ is ~2.25 h per N=500 pool and
+  its cache key is the pool, so a pool that cannot reach 100 modes must be caught in seconds, not
+  after the spend. Regression-pinned: reproduces Logs/056's published 41.2% mode rate (206 modes at
+  n=500) on the seed-42 S3-GFN sEH pool exactly.
+- `experiments/lsd_hubs/campaign/submit_competitor_routes.sh` — `submit_s3gfn_replicate_routes.sh`
+  generalized to any route-less entrant (`GENERATOR` × `TARGET` × `SEED`), saturation gate in front.
+  `build_s3gfn_pools.py` needed no change; it was already generator-agnostic (only its name is
+  S3-GFN-specific).
+
+**New — REINVENT 4 adapter** (`validation/generators/reinvent/`, `validation/configs/reinvent_*.yaml`,
+`experiments/lsd_hubs/campaign/submit_reinvent.sh`, `external/setup_reinvent.sh` replacing the stub).
+Follows the S3-GFN adapter shape exactly: per-adapter frozen-reward copy, own env, pool crosses to
+`rgfn` by subprocess, `has_route=0`.
+
+**Three upstream facts that cost time and are recorded so they cost it once.**
+
+1. **v4.5.11 cannot be seeded through its own interface.** `Reinvent.py` reads `seed` from the TOML
+   but gates the call on the *CLI* flag and passes the *config* value, while `ReinventConfig` is
+   `extra="forbid"` with **no `seed` field** — so a TOML carrying `seed` is a hard ValidationError,
+   `input_config.get("seed")` is always `None`, and `set_seed(None)` returns immediately. Every
+   invocation silently fails to seed. `validation/generators/reinvent/_seeded_launcher.py` seeds and
+   then defers to `main_script()` verbatim. Without it our three replicates per cell would have been
+   real but irreproducible.
+2. **Install from the lockfile; `install.py` does not exist at this tag.** v4.5.11 documents
+   `pip install -r requirements-linux-64.lock` then `pip install --no-deps .`. Also read the
+   **lockfile** for what is installed, not `pyproject.toml`: pyproject says `torch==2.5.1+cu124`, the
+   lockfile pins **cu121** (plus `numpy==1.26.4`, Python 3.10). The setup script now asserts the
+   installed torch matches the pyg find-links target, since a mismatch would otherwise surface as a
+   `torch_sparse` import error inside a job hours later.
+3. **The tag is pinned for packaging reasons, not scientific ones** (REINVENT's RL is DAP in every
+   4.x release): `main` pins `torch==2.12.0` with no prebuilt `torch-sparse` wheel — which
+   `bengio2021flow` imports at module level — requires `numpy>=2` (breaks the legacy DRD2 sklearn
+   pickle), and moved the priors to Zenodo (a download that fails on compute nodes).
+
+**Two environment constraints now in force for all later phases.**
+- **New conda envs go on `/scratch`, addressed with `conda run -p`**, never `miniconda3/envs`:
+  `/home/markymoo` is at ~95 G of its 110 G quota with `conda clean -a` reporting nothing to reclaim.
+- **Clone shallow at the tag** (`--branch <tag> --depth 1`). REINVENT4's full history is 1.49 GB of
+  git objects because every prior model is versioned in it.
+
+**Two more upstream constraints found by the first real run, both now encoded:**
+
+4. **`max_score` must be `<= 1.0`** — `RLConfig` rejects anything larger, so the "unreachable score"
+   trick does not work. It is not needed either: `SimpleTerminator` fires on
+   `step > min_steps and score >= max_score`, and `step` never exceeds `max_steps`, so
+   **`min_steps == max_steps` is what actually guarantees a fixed budget**. The score bound is
+   belt-and-braces.
+5. **`gflownet --no-deps` leaves `omegaconf` missing**, and `gflownet/__init__.py` imports it — so
+   *any* `from gflownet.models import bengio2021flow` fails. It is not in REINVENT's lockfile, and
+   our own driver needs it too. `setuptools<81` is also required or several bundled REINVENT
+   components fail to import and the plugin registry silently comes up short (58 vs 59 components),
+   which would make the discovery check weaker than it looks.
+
+**Verified.** Statically: `bash -n`, `py_compile`, no `__init__.py` under `plugins/` (which would
+break namespace-package discovery), repo-root resolution from the plugin file, and both generated
+TOMLs parse with no key `ReinventConfig` forbids. In-env: the setup script's own four checks (sEH
+MPNN loads from the pre-placed cache; the component is *registered and typed*, not merely importable;
+numpy/torch versions; and real molecules scored through the component with NaN — not 0 — for invalid
+input), and the script re-runs idempotently. End-to-end: full RL -> checkpoint -> sampling from the
+trained agent -> ingest, conformant `has_route=0` dataset, on **both** sEH and DRD2.
+
+**Two results from that validation worth keeping:**
+
+- **The seeding fix demonstrably works.** Two seed-42 runs produce a **bit-identical** 40/40 pool;
+  seed 43 shares **0/40** with them. So the three replicates per cell are both reproducible and
+  genuinely independent — which is exactly what would have been silently false without
+  `_seeded_launcher.py`.
+- **The DRD2 oracle is environment-invariant.** It is an SVC pickled with sklearn 0.23, so every env
+  raises `InconsistentVersionWarning`. Measured across `reinvent4` (sklearn 1.7.2), `rgfn` (1.8.0),
+  `fraggfn` (1.7.2, rdkit 2026.03.3) and `scent` (1.2.2): **identical probabilities to 12 decimal
+  places**. This matters beyond REINVENT — each generator runs in its own env, so a version-dependent
+  unpickle would have meant every entrant optimizing a slightly different DRD2, invisibly. Re-run the
+  check if the pickle is ever regenerated.
+
+**Still open:** the first full-scale cell (`reinvent_seh` seed 42, job 73605) and everything
+downstream of it (saturation gate -> MultiAiZ -> frontiers). Saturn, SynFormer and TANGO not started.
+
+### 2026-08-14 (same day, later) — Phase 1a result + Phase 1b: Saturn
+
+**REINVENT 4 sEH seed 42 ran end-to-end** on an A100 (job 73606, `-p debug`): 1000 RL steps in
+**21.2 min** (~1.1 s/step), 2,000 unique valid candidates sampled from the trained agent, ingested
+conformant with `has_route=0`. The mode-saturation gate passes and shows the baseline is **not a
+strawman**: 1,860 of 2,000 clear the 7.0 gate, and at N=500 the pool holds **201 modes (rate 0.402)**
+against S3-GFN's 206 / 0.412 on the same metric — the two route-less entrants are near-identical in
+mode density. 100 modes are reachable from 250 candidates. Downstream (MultiAiZ → both frontiers) is
+job 73610.
+
+**Saturn adapter built** (`validation/generators/saturn/`, `validation/configs/saturn_*.yaml`,
+`experiments/lsd_hubs/campaign/submit_saturn.sh`, `external/setup_saturn.sh`). Validated end-to-end
+on both targets; measured **~19 oracle calls/s**, so a full 10,000-call cell is **~10 min**.
+
+`fixed_reward.py` is byte-for-byte the REINVENT copy — verified by comparing ASTs with docstrings
+stripped, not by eye. Reward parity is now measured on both targets across five envs: the sEH MPNN
+returns 0.0273 for ethanol in `saturn`, `reinvent4` and `s3gfn` alike, and the DRD2 pickle agrees to
+12 decimal places in `saturn` / `reinvent4` / `rgfn` / `fraggfn` / `scent` despite spanning sklearn
+1.2.2 → 1.8.0. Both checks are now assertions inside `setup_saturn.sh` rather than notes.
+
+**Five upstream facts about Saturn, all found by reading source or by a failing smoke:**
+
+1. **The hash Saturn's own README pins for its paper (`fee0179`) is BROKEN.** Its
+   `reinforcement_learning.py` reads `configuration.reinforcement_learning.margin_threshold`, which
+   `ReinforcementLearningParameters` does not define, so `ReinforcementLearningAgent` cannot be
+   constructed — goal-directed generation cannot run at all. Checked across refs: `fee0179` is the
+   *only* one whose RL module mentions `margin_threshold`, and *no* ref defines it, i.e. the line was
+   removed right after and that commit caught the repo mid-edit. **We pin `de5cd7f`** (the TANGO
+   pre-print hash), the next published-paper pin from the same authors, which runs — and which Phase
+   3 needs anyway, so one clone and one pin now serve both arms. `setup_saturn.sh` grew a check that
+   every attribute the RL module reads off the dataclass actually exists, so this class of bug fails
+   at setup rather than hours into a job.
+2. **`ReinforcementLearningAgent.__init__` gained a leading `logging_frequency`** between the two
+   hashes. The driver now passes every argument by keyword; a positional call would have silently
+   bound the log path to the frequency.
+3. **`Oracle.construct_oracle` does `OracleComponentParameters(**component)`**, so `components` must
+   be plain dicts — passing the dataclass the signature advertises is a TypeError.
+4. **A C compiler is a RUNTIME dependency.** Mamba's layer-norm goes through Triton, which JIT-builds
+   a launcher stub on first use and dies with "Failed to find C compiler". This cluster has no
+   `/usr/bin/gcc` and `module load gcc` does not populate PATH non-interactively, so `gcc_linux-64`
+   goes into the env — which is what Saturn's README recommends anyway. `conda run -p` exports `CC`.
+5. **Saturn seeds correctly** via `set_seed_everywhere` — no launcher needed, unlike REINVENT.
+
+**Deliberate deviation from upstream `setup.sh`: torch 2.1.0+cu118, not 1.12.1+cu113.** Two
+independent constraints, neither about Saturn's science: `bengio2021flow` needs a prebuilt
+`torch_sparse`, and `mamba-ssm`/`causal-conv1d` publish wheels for cu118/cu122 across torch 1.12–2.3
+but **none for cu113 at any torch version** — under cu113 both would compile against nvcc 11.3, which
+this cluster does not have (that is their documented Issue #1). torch 2.1.0+cu118 is the combination
+where every wheel exists, so there is **no CUDA compile at all**. We also skip openbabel and
+xtb-python: the only hard import in Saturn's eager oracle chain is `morfeus`, and openbabel is needed
+solely by GEAM's docking oracle, which `_stubs.py` stubs (same technique as the S3-GFN adapter's
+`unidock_vina` stub).
+
+**Queue etiquette.** Both submit scripts now accept `CELLS="seh:43 drd2:42 ..."` and run the cells
+sequentially in one job. The account's QOS caps submitted jobs at 60 and three other agents share it,
+so eleven short cells submitted individually would crowd them out for no gain.
+
+### 2026-08-14 (same day, later still) — Phase 2: SynFormer, the reaction-aware entrant
+
+**Why it is the most valuable of the four new baselines.** REINVENT, Saturn and S3-GFN are all
+route-LESS. SynFormer generates molecules AS SYNTHETIC PATHWAYS, so its molecules carry a route by
+construction (`has_route=1`) exactly as ours do. It is therefore the only cell that separates the two
+things the headline conflates — is the advantage the **flow field**, or merely **reaction-grounding**?
+No ablation on our own generators can answer it, and `LSD_FLOW_BENCHMARK_PLAN.md` §7 names the gap.
+It also skips MultiAiZ entirely (~2.25 h/pool the route-less entrants pay).
+
+**New:** `external/setup_synformer.sh` (replacing the placeholder stub),
+`validation/generators/synformer/{__init__,fixed_reward,route_convert,run_synformer_fixed}.py`,
+`validation/configs/synformer_{seh,drd2}_fixed.yaml`, `experiments/lsd_hubs/campaign/submit_synformer.sh`,
+plus a `--route-source external` branch in `sparrow_select_frontier.py`.
+
+**No Enamine licence needed**, despite the README. That caveat governs re-PREPROCESSING; the
+preprocessed `fpindex.pkl` / `matrix.pkl` and the trained checkpoint are on HuggingFace, and the
+sampler reads only those (confirmed in source — it never touches the raw SDF).
+
+**The route converter is the substantive piece.** The obvious source, the `synthesis` column, is
+`Stack.get_action_string()` — postfix tokens naming the leaves and the reactions but **not the
+intermediate products**, and a reaction network is precisely a graph of intermediates. Recovering
+them by re-running templates in RDKit would reimplement the model's own bookkeeping with a fresh
+chance to be wrong. Instead `route_convert.py` patches `StatePool.get_dataframe` to serialize
+`Stack.get_tree()`, which already carries every intermediate. Legitimate because the sampler's
+workers are `mp.Process` under Linux's default **fork**, so a parent-side patch is inherited (their
+CUDA init happens after the fork, which is what makes fork safe). One trap encoded: `get_tree`
+appends children by POPPING a stack, so `children[0]` is the LAST reactant — they are reversed before
+emitting `reactant`/`fragments`, the difference between a correct route and a silently transposed one.
+
+**`--route-source external` is additive and validated.** It folds a `routes.jsonl` into the same
+`{canonical_smiles: [route, ...]}` shape the multiaiz artifact uses, so `build_network`, the MILP and
+the pricing are literally the same code path; `is_native` deliberately excludes it, so no recipe
+expansion is attempted (every leaf is purchasable). Verified on a synthetic two-molecule fixture
+sharing one intermediate: **5 compound nodes, 2 reaction nodes, the shared acid collapsing to a
+single node** — i.e. the merge that the whole cost model depends on actually happens.
+
+**Deviations from upstream, both forced and documented.** We do not install `pytdc`: their GA driver
+builds `tdc.Oracle("SA")` at import, and TDC self-downloads into `./oracle`, which fails on a compute
+node. Our driver reproduces their GA loop verbatim (`sanitize`, `make_mating_pool`, `reproduce`
+copied; `crossover`/`mutate` imported unchanged; same population/offspring/mutation settings) against
+our frozen reward, and replaces their patience-based early stop with a fixed oracle budget so the
+training budget does not depend on how easy the target is. The starting population is their own
+bundled `data/chembl_filtered_1k.txt` rather than TDC's ZINC — no download, and ChEMBL matches
+REINVENT's and Saturn's priors.
+
+**Four environment traps, each of which cost a build:**
+
+1. **numpy must be `<2`.** torch 2.1.0 is built against the numpy 1.x C API; numpy 2 makes `import
+   torch` warn "Failed to initialize NumPy: _ARRAY_API not found" and then fail at the first
+   `torch.tensor(<np array>)` with "Could not infer dtype of numpy.float32" — surfacing while loading
+   the sEH weights, far from the cause.
+2. **Pin scipy in the SAME pip command as numpy.** Installing numpy alone and letting a later package
+   pull scipy yields a numpy-2-built scipy that fails with "numpy._core.multiarray failed to import";
+   recovering needs a clean uninstall.
+3. **Cap BLAS/OMP threads for the WHOLE script, not just verification.** The login node's
+   `RLIMIT_NPROC` is 1024 and OpenBLAS spawns one thread per core, segfaulting the interpreter — and
+   this bites during *installation*, because synformer's pyproject uses
+   `version = {attr = "synformer.__version__"}`, so `pip install -e .` imports the package.
+4. **`ln -sfn TARGET LINK` does not replace LINK when LINK is a real directory** — it creates the link
+   *inside* it. The clone ships a tracked `data/trained_weights/`, so the 2.8 GB checkpoint ended up
+   one level down and read as "missing". The setup now removes a real directory first, and refuses if
+   it holds anything but a `.gitignore`.
+
+**The 6.8 GB lives on `$SCRATCH`** and is symlinked into the clone, because the checkpoint stores its
+data paths RELATIVE and resolves them against cwd. Symlinks under `external/` were once genuinely
+dangerous here; the ignore rule is now `external/*`, which covers them, and that was re-verified
+behaviourally with `git check-ignore` before relying on it.
+
+**Not yet verified:** any SynFormer run at all — the first smoke is in flight. Wall-clock is unknown
+and the submit script's 6 h is a guess, because the bottleneck is projection (transformer decode at
+search_width 24 over ~200 molecules/generation, 4 GB index per worker), not the oracle.
+
+---
+
+## 2026-08-21 — the route contract: making "no synthesis route" a checked, declared condition
+
+**Problem.** Recovering a synthesis route after a run is over costs a full re-run, and we have paid
+that twice. `enum_children.json` `children[].reaction` was omitted by `rgfn_worker` for months and
+cost six 24-hour re-enumerations to repair. `routes.json` was worse: empty for **36 of 40** sampled
+cell-seeds, and **not repairable at all** — the trajectory is discarded when sampling ends and
+`compositions.json` keeps only `num_reactions`, so there is nothing left to reconstruct from. Only
+SCENT ever emitted routes. Every non-SCENT cell needs a re-sample before it can feed the competitor
+arm.
+
+Neither failure crashed. Both were a **silent default**:
+
+```python
+routes: Dict[str, dict] = field(default_factory=dict)
+# "Empty for adapters that don't emit routes yet (e.g. RGFN)."
+```
+
+Three of four adapters took the default, `rxnflow_worker` and `fraggfn_worker` hardcoded
+`json.dump({})`, every run wrote a well-formed `routes.json` containing `{}`, exited 0, and the
+harvester promoted it. The defect was never the missing implementation — that is ordinary — it was
+that **nothing anywhere asserted the artifact was usable.**
+
+**Change.** A route contract, enforced at write time.
+
+- **`validation/lsdflow/adapters/workers/_routes.py`** (new) — declares per generator whether its
+  output is route-bearing, and validates the artifact against that declaration. Writes
+  `route_status.json` beside the artifacts (machine-readable, so harvest/frontier can refuse a cell in
+  seconds) and raises on unambiguous violation. Stdlib-only, imported by the same sibling convention
+  as `_artifacts` so it works unchanged in all four generator envs.
+- **"Not applicable" is now a declared answer with a reason, not an empty dict.** FragGFN's move is a
+  fragment *attachment*, not a reaction (`docs/LSD_FLOW_PROPOSAL.md` L274), so a FragGFN route is not
+  a synthesis plan and SPARROW would price a library nobody can make. That is a different fact from
+  "nobody implemented it", and on disk today the two look identical. Now they don't.
+- **RGFN route emission implemented** (`rgfn_adapter._collect_routes`) — the machinery already existed
+  in `glue/` and was already used by the AL acquisition path; this is plumbing, not new science.
+- **RxnFlow route emission implemented** (`rxnflow_worker._collect_routes`) — replaces the
+  `json.dump({})` whose comment promised "routes extractable later (`ctx.read_traj`)". That was never
+  implemented and "later" was never possible. Everything needed was already in hand: `d["traj"]` is
+  the `(state, action)` sequence and every state carries `.smi`.
+- **Both emit for EVERY molecule, not just terminals.** A hub is an interior node chosen later by
+  `pick_hubs`, and the hub prefix is exactly the half `enum_children.json` cannot supply. SCENT
+  already did this (its routes span depths 1–4), and `sparrow_select_frontier.py` L130 measures "64 of
+  64 hub_keys" present — so matching it is what makes hub lookup work at all.
+- **Keys come from `rgfn_extract._stripped_key`,** the same function the flow records use. A route
+  keyed even slightly differently from its hub is *worse* than no route: the lookup returns nothing
+  and the caller prices the hub instead of the child, with no error.
+- **Canonical schema** (`glue/samplers/lsdflow/route_steps`) for both new emitters, so the competitor
+  arm reads one shape across generators.
+- **`sparrow_select_frontier.py`** gained the missing half of its own guard. Its `n_no_rxn` aborts are
+  gated on `if routes`, so they could not fire when the HUB side was empty: an empty `routes.json`
+  skips every hub, leaves `routes` empty, and hands SPARROW a pool it prices as optimal at zero cost —
+  the same wrong-and-flattering answer reached from the other direction.
+- **`experiments/lsd_hubs/matrix16/check_route_readiness.py`** (new) — one command answers "which
+  cell-seeds can feed the competitor arm?". That question previously took a session of manual
+  archaeology across three scratch trees.
+
+**Design rule, deliberate and worth keeping:** *a validator must never be why a good run dies.* These
+are 24-hour GPU jobs. So the checks raise only on unambiguous evidence (a route-bearing stage that
+produced **zero** routes / zero reaction coverage), soft cases are reported rather than enforced, and
+every internal error in the check itself is caught and downgraded to a warning. A guard that kills a
+good 24-hour job gets switched off within a week, and then protects nothing. Verified: a corrupt
+`enum_children.json` yields `state=check_failed` and a warning, not an exception.
+
+**Unknown generators default to route-bearing (REQUIRED),** so a new adapter added without a thought
+about routes fails loudly on its first run — a five-minute fix. The opposite default is what produced
+this entry.
+
+**Also fixed while in here: `rgfn_worker` declared `--seed` and never applied it** — alone among the
+four (scent, rxnflow and fraggfn all call `manual_seed`/`np.random.seed` at setup). So every RGFN
+sample was irreproducible while *reporting* a seed, which is the worst of both: a "seed 43" cell was
+not reproducibly seed 43, and a lost or route-less sample could not be regenerated even in principle.
+That is the same class of defect as the routes gap — the artifact looked complete and wasn't — so it is
+fixed rather than noted.
+
+**`--seed` alone does NOT reproduce an RGFN sample — but `--seed` plus `PYTHONHASHSEED=0` does, and
+both halves were measured.** Two runs at `--seed 42`, same checkpoint, same trajectories, same device,
+gave **377 vs 387 routes sharing only 8 keys**. `Categorical(...).sample()` draws from torch's global
+RNG and `manual_seed` does seed it, so the divergence was outside torch: per-process set/dict iteration
+order feeding action-space construction, where an identical draw over a differently-ordered action list
+picks a different action. Adding `PYTHONHASHSEED=0` closed it completely — `--seed 42` twice on a debug
+GPU gave **730/730 byte-identical routes**.
+
+`submit_cell.sh` and `submit_docking_cell.sh` now export `PYTHONHASHSEED=0`, so **future RGFN samples
+are regenerable**. (Editing those is safe with jobs queued: SLURM snapshots the batch script at submit
+time, so already-queued jobs run the version they were submitted with.)
+
+What this does NOT buy: every sample already on disk was taken before either knob was live, so those
+remain one-of-a-kind and recoverable only from backup (TIER 2). It also means re-sampling a route-less
+RGFN cell still draws a genuinely different pool — changing its hubs and its published number — so the
+23 route-less cell-seeds are not repairable for free even now that the emitter exists.
+
+**Verified, on real runs:**
+
+- All eight validator paths: raise on empty, ok, partial, N/A-with-reason, unknown-generator default,
+  enum zero-coverage raise, enum full-coverage ok, and corrupt-input **warn** (not raise).
+- **RGFN emission end-to-end**, 200 trajectories against the trained seed-42 sEH checkpoint:
+  `routes.json` 524 KB where it had been 2 bytes (`{}`), **667 routes / 667 distinct nodes = 100%
+  coverage**, **180/180 hub_keys carry a route**, 615/615 final products equal their key
+  (stereo-stripped), 908/908 step-chain integrity (`product[i] == input[i+1]`, so these are connected
+  chains and not a bag of steps), 0 canonical-schema violations, and depths 0–4 all populated.
+- **The first smoke caught a real gap**: 2 of 193 hub_keys were **depth-0** — bare purchasable
+  building blocks with no reaction steps — and had no entry at all. `hub_routes.get(hk)` returns None
+  there, and the frontier skips such a hub *and every child hanging off it*, silently. Depth-0
+  molecules now get an explicit zero-step route (52 of them in the re-run), which took hub coverage
+  99.0% → **100%**. Worth recording because it is exactly the kind of near-miss that only a live run
+  surfaces: the code was "working" at 99%.
+- **The enumerate-mode check against real enumerations of all four generators**, run as the queued
+  slices will run it: rgfn 104,589 children at 100%, scent 644,759 at 100%, rxnflow 232,213 at 100%,
+  fraggfn correctly `not_applicable`. (Copied into a tempdir first — never validated into a live run
+  dir.) The call site was confirmed by inspection to sit inside `else:  # enumerate`, because the live
+  end-to-end enumerate smoke was killed by the login CPU limit after one hub.
+- `py_compile` across every touched file; the readiness checker against all three scratch trees
+  (10 SPARROW-ready, 23 route-bearing cell-seeds with no routes, 14 control).
+- Enumerate-side reaction coverage is **100% wherever an enumeration exists**, matrix-wide — the
+  enumeration repairs held, and the entire remaining gap is sample-side.
+
+**RxnFlow emitter: SMOKED AND VERIFIED, twice, independently.** My own debug run gave 611/611 coverage
+with 196/196 hub_keys routed after the depth-0 and seed fixes; a co-agent independently ran it in the
+`rxnflow` env against the real `rxnflow_seh_5k/seed42` checkpoint (job 74693, 15:02, i.e. after the
+14:44 fix) and got **1,150 routes at 100% of terminals** on 400 trajectories. Two environments, two
+operators, same verdict.
+
+**A SECOND BLOCKER EXISTS THAT ROUTES DO NOT FIX, and it is worth understanding before anyone plans
+native-route work.** A co-agent extended `check_route_readiness.py` with the recipe/snapshot dimension
+it had no visibility into, and SPARROW-ready drops **10 → 5**. Six cell-seeds have routes AND 100%
+reaction coverage and still cannot be priced natively, because their training snapshot has no
+`smiles_to_route` at all — recipe logging was off for runs launched 2026-07-14..07-26:
+
+    seed 42   scent_seh, scent_drd2, scent_clpp, scent_6td3   <- ALL of seed 42
+    seed 43   scent_clpp
+    seed 44   scent_clpp
+
+This is NOT repairable by re-sampling or re-enumerating: a promoted fragment's recipe is observable only
+while it is being BUILT (`recipe_logging.py` writes onto `dl._smiles_to_route` during training), so
+those cells would need a re-TRAIN — ~10-15 h each, ~78 GPU-h for the six, and re-training changes the
+model, so every published number on those cells moves and the whole cell has to be rebuilt behind it.
+Independently confirmed: an earlier audit of mine had already found `smiles_to_route` absent for every
+seed-42 cell.
+
+**But it does not block the comparison, and this is the operative point.** Recipe expansion is consulted
+only under `--route-source native|enum` (verified: the logic and both new provenance aborts sit inside
+`if is_native:`). The DEFAULT source is `multiaiz`, which routes every molecule independently through
+AiZynth and needs no snapshot, no recipes, and no `routes.json`. That is the plan's own MVP path, and
+T1.3/T1.4 were written for exactly this — "returns `total_reactions` for a MIXED (routed + route-less)
+library". So all 18 competitor-scope cells are priceable today at zero GPU cost.
+
+**There is also a FAIRNESS reason to prefer the from-scratch source for the headline, independent of
+cost.** Native routes measured 1.22 rxn/mode against from-scratch 1.85. Pricing SCENT natively while
+rgfn/rxnflow go from-scratch would let SCENT win on route PROVENANCE rather than chemistry — the same
+confound the project already polices on the mode metric (one metric reapplied to all four). One source
+across all four generators; native stays a supplementary result. Note the supplementary result can only
+be reported on **seeds 43/44** — none of the five route-and-recipe-complete cells is seed 42.
+
+**Not verified:** whether a fresh sample rediscovers a cell's original hubs, which is what the cheap
+`enum` route-source repair would depend on. A free proxy is discouraging: 200-trajectory debug samples
+of `rgfn_seh` s42 cover **0 of its 200 production hubs** — 1/150th the trajectory count, so not a bound,
+but not encouraging either. RxnFlow is the better bet there (its `--seed` was genuinely applied), and a
+co-agent is measuring it on one cell before committing the other eight.
+
+**Explicitly NOT fixed by any of this:** the 23 existing route-less cell-seeds. They need a
+**re-sample** — re-running the enumeration does nothing, because `routes.json` is written by the
+sample stage. And because RGFN sampling was unseeded, an RGFN re-sample draws a *different pool*, so it
+would change that cell's hubs and its published number; it is not a free repair. Those cells can still
+feed the **from-scratch** SPARROW arm today via AiZynth recovery
+(`validation/lsdflow/eval/route_recovery.py`), which is a different and already-planned comparison
+(measured: from-scratch 1.85 vs native 1.22 rxn/mode) — but not the native-route arm. Whether to spend
+the compute is a decision for the user, not a code change.
+
+**Deliberately not built:** copying the hub routes into `enum/` to make that directory self-contained
+against a `$SCRATCH` purge. `sample/` is already covered by the backup script's TIER 2, so the marginal
+value is low, and it would mean editing `submit_cell.sh` while 18 jobs are live.
+
+---
+
+## 2026-08-24 — the RGFN reaction repairs verified, and a metric that is not as stable as it looks
+
+**All four completed repairs may stand** — `rgfn_seh` s42 and `rgfn_drd2` s42/s43/s44, each 200/200 hubs
+at 100% reaction coverage with the recorded final product reconstructing the child (stereo-stripped) on
+400/400 sampled. `rgfn_seh` s42's count-once summary came out bit-identical to the committed value.
+
+**The three DRD2 seeds "failed" check 3, and the failure was uninformative.** Every headline field was
+bit-identical — `reactions_per_mode` (1.197 / 1.310 / 1.243), `total_reactions`, `total_modes`,
+`case1_modes_at_100rxn` (82 / 84 / 89), `distinct_hubs_used`, `total_reward_gen_calls`. Only
+`n_scaffolds` (±1–2 of ~270) and `median_reward` (±0.002) moved.
+
+The chemistry was verified identical rather than assumed: same 200 hubs, same **168,006** distinct
+children, **zero** hubs whose child set differs — while child ORDER differed in **200/200** hubs. Greedy
+mode selection takes the first of any equally-good candidates, so a reordering swaps membership without
+changing count or cost. Recorded as correctness trap 3 in `docs/RESEARCH_CONTEXT.md`, with the reason it
+hits DRD2 and not sEH: **51.6%** of DRD2's enumerated children share a reward with another child (top
+value ×302) versus **30.4%** on sEH (top value ×6) — a saturated classifier versus a continuous proxy.
+
+**What this says about the verifier, and why I have NOT changed it yet.** Check 3 has only two tiers: a
+field is either in `VOLATILE` (ignored) or must be bit-identical. `n_scaffolds` is neither — exempting it
+would hide a genuine 50-scaffold regression, while demanding bit-identity cries wolf on a tie. The fix is
+a third tier:
+
+    headline     reactions_per_mode, total_reactions, total_modes, case1_modes_at_100rxn,
+                 case2_reactions_at_300modes, distinct_hubs_used, total_reward_gen_calls
+                 -> bit-identical or FAIL
+    descriptive  n_scaffolds, median_reward, best_reward
+                 -> print the drift; FAIL only beyond what tie-breaking can produce (±3 / ±0.01)
+    volatile     compute_time, wall_s, enum_timings_meta  -> ignore
+
+The bound is the point. It passes today's tie noise and still fails real breakage, which is precisely
+what moving these fields into `VOLATILE` would give up. Left unimplemented pending the user's call,
+because relaxing a gate so that a currently-failing artifact passes is not a change to make on my own
+judgement — the gate exists to be strict, and I have already been over-confident once today.
+
+**Not verified:** whether any published figure or table currently quotes `n_scaffolds` or
+`median_reward` for a DRD2 or docking cell. Both appear in eight analysis scripts
+(`analyze_matrix.py`, `hub_stats.py`, `preselect_sweep.py`, `strategy_compute_summary.py`,
+`run_campaign.py`, `audit_greedy_libraries.py`, `plot_greedy.py`, `compare_hub_order.py`); I checked
+that they are referenced, not what consumes their output.
+
+---
+
+## 2026-08-26 — competitor-campaign guards, and the SynFormer control harness
+
+### Three fixes to campaign code (each would have produced a false claim about a baseline)
+
+**`mode_saturation.py` gated docking cells on the training reward.** It accepted `--lower-is-better`
+but hardcoded `row.get("score")`; for docking that column is `clip(-vina)`, positive 0..11, so the
+ClpP gate of -8.0 admitted nothing and all sixteen ClpP chain-cells aborted as "fewer than 10 modes
+— nothing to measure", a message phrased as a POOL-SIZE finding. 645 of 2,000 molecules were in fact
+passing on `raw_score`. Now takes `--score-column`, defaulting to `raw_score` under
+`--lower-is-better` — the same rule `build_s3gfn_pools.py` already used — and prints the resolved
+column every run. Commit `c5f428e`.
+
+**`build_s3gfn_pools.py` skipped any NAIVE pool short of N**, writing no directory, so the cell died
+downstream on `FATAL: pool not built`. Eight of thirty-five cells fall short and seven are S3-GFN
+(154/65/168 distinct above the sEH gate, against Saturn's ~1,900), so the skip deleted exactly the
+cells where a baseline is weakest. Now clamps to availability and names the directory for the size
+written (`_N65`), with `pool_limited: true` in `pool_meta.json`; `--strict-naive` restores the old
+behaviour. `submit_competitor_routes.sh` resolves a clamped directory for both variants now, not
+only pruned. Commit `5ffe0e9`. **This overrides a documented decision** — the original rationale was
+that an `_N500` directory holding 300 misstates the pool, which is an argument against misnaming,
+answered by naming honestly.
+
+**`DockingServerClient.dock` sent unbounded batches.** `timeout` bounds one round-trip while the
+caller's batch is not bounded at all; the final 2,000-molecule pool scoring at ~4 s/mol could never
+return inside the 3,600 s socket timeout, and it lost `saturn_clpp` seed 43 after that run had spent
+its full 10,000-call training budget. Now chunks at 200 per round-trip in the shared client rather
+than in each of the six adapters. Commit `e6b6a1d`.
+
+### SynFormer: diagnosis corrected twice, still one thing open
+
+Nine cells died at hour 9-12 of 72 h. SLURM logs `oom_kill` events on every one. **Two explanations I
+published and then had to withdraw**: "blocked in `submit()` on a bounded queue" (the queue is
+`task_qsize=0`, i.e. unbounded) and "the fetch guard should have fired" (it was present since commit
+`7442376` and never fired). Seven of eight cells stopped INSIDE the projection fetch loop, 16-39
+molecules short; one had already degraded to 246 s/molecule against a healthy 3. **The exact frame
+the parent blocks in is still unknown** and needs a live stack (`py-spy` is not installed in either
+env), not more reasoning.
+
+What IS established: upstream tears the worker pool down every generation and children return to
+**0.0-0.1 GiB**, so their cadence bounds the leak completely. Holding the pool open across
+generations is our divergence and the cause of the ~260 GiB growth. Our `recycle()` cannot substitute
+because it forks after the reward model exists — see `[[fork-after-torch-deadlock]]`; and
+`set_start_method("spawn")` is disqualified rather than merely imperfect, because a spawned worker
+re-imports synformer and loses `patch_get_dataframe()`, emptying every route column while every other
+check passes.
+
+`experiments/synformer_baseline/` is new: upstream's own GraphGA-SF loop with one flag per divergence
+(`--workers`, `--routes`, `--torch-in-parent`) so each can be blamed or cleared alone. The route
+variant asserts the column is POPULATED, not that the run finished.
+
+**Not verified:** whether memory stays flat beyond three teardown cycles (74999, 16 generations,
+queued); whether fork-after-torch blocks under upstream's cadence (75029, on debug); whether routes
+survive that cadence (75001, queued). Nine SynFormer cells (~170 GPU-h) stay unsubmitted until those
+answer. Four defects were found in this control harness itself — missing `tdc` import, relative
+`fpindex` path, a `sys.modules` stub that loky children never saw, and a missing population
+truncation that upstream performs at its line 332 — all mine, none SynFormer's.
+
+### 2026-08-27 addendum — the fourth fork hazard, and what "verified" required
+
+`_free_gpu_cache()` gated on `torch.cuda.is_available()`, which OPENS six `/dev/nvidia*` descriptors
+(`is_initialized()` opens none). Reached from `_dock` on every docking batch, so it poisoned
+SynFormer's per-generation pool rebuild on the ClpP cells and only there — DRD2 never docks. Now gates
+on `is_initialized()`; where a CUDA context genuinely exists the Logs/014 behaviour is unchanged.
+Commit `f35f82b`.
+
+**Caught by instrumentation, not by a corpse.** `_cuda_probe` printed
+`nvidia_fds=6 threads=3 <-- FORK IS POISONED` at the rebuild site before any worker died. The three
+preceding hazards each cost a smoke plus a diagnosis. The probe can only do this because it counts
+`/proc/<pid>/fd` nvidia links directly and never calls `is_available()`/`device_count()` — those
+create the fault they would be measuring.
+
+**Verification status of every change made 2026-08-26/27** (this is the list to trust, not the commit
+messages):
+
+| change | evidence |
+|---|---|
+| `DockingServerClient.dock` chunking | real server: `n_requests` 10 for 2,000 molecules, `saturn_clpp:43` recovered and completed |
+| `mode_saturation.py --score-column` | ClpP 0 -> 587 distinct above gate; sEH saturn s42 unchanged at 18/338 |
+| naive-pool clamping | `s3gfn_seh_seed43` writes `_N65` with `pool_limited: true`; `reinvent_seh_seed42` `_N500` bit-identical to the pool its cached routes were planned over |
+| lazy `bengio2021flow` import | DRD2 smoke: 5 recycles, budget reached, routes written, candidates ingested |
+| `is_available` -> `is_initialized` | job 75094 ClpP through the production chain: gen 1 233/400, recycle, gen 2 353/400, children 40.1 -> 22.0 GiB, fds=0 at every rebuild |
+
+**NOT verified, and stated as such:** the smokes run 120-400 molecule budgets where production cells
+use 10,000, and the original nine-cell failure only surfaced at hour 10. These results support "safe
+to launch", not "will finish". sEH remained blocked entirely — job 75080 showed any in-parent proxy
+load breaks fork regardless of fd/thread hygiene, so it needs subprocess scoring and
+`scripts/score_batch.py` registers only docking oracles.
+
+> **sEH UNBLOCKED 2026-09-06** (`9efe9bc`). The missing entry point now exists as
+> `validation/generators/synformer/score_seh_subprocess.py`, with `SEHBridgeReward` as its
+> client, opt-in via `reward.subprocess`. It does NOT cross an env boundary — the synformer env
+> imports `bengio2021flow` and the rgfn env does not, so only the PROCESS differs, which is what
+> the fork hazard cares about. Verified against an accidental in-process control:
+>
+> | job | after pool fork | after build_provider |
+> |---|---|---|
+> | 75747 in-process | fds=0 threads=1 | **fds=6 threads=5 POISONED** |
+> | 75750 bridge | fds=0 threads=1 | fds=0 threads=1 |
+>
+> Smoke 75750 ran to completion: three generations, three worker forks AFTER scoring, parent at
+> fds=0 throughout, reward mean rising 4.862 → 5.029 across generations (so the bridge preserves
+> the signal, not just the values), 300/300 scored, 363 routed, candidates written with
+> has_routes=True. Production seeds queued as 75753/54/55.
+> STILL a 300-molecule smoke against a 10,000 budget — [074]'s own caveat applies unchanged.
+
+**A retraction.** An earlier entry attributed `s3gfn_drd2_seed43`'s greedy failure to the mode target
+exceeding the pool (46 modes available, 50 requested). The saved solve says otherwise:
+`milp_status=Error, total_reactions=None, n_targets_selected=0, n_targets_requested=25` — the arm died
+at m=25, well below 46, so it was the unsynthesizable-target bug (`c802026`), not pool size. The
+`m25/` artifacts on disk were a recorded failure, not a success. Both mechanisms are real and can
+appear in one cell; they separate on whether the failing mode point is above or below
+`modes available` — SKIPs are pool size, Errors are stock coverage.
+
+---
+
+## 2026-08-28 → 08-31 — FragGFN into Stage 2, and Stage 3 for the upsampled pools
+
+Branch `worktree-fraggfn-stage2` (11 commits, **not merged into Hub-Analysis**). Science in
+[Logs/077] (Stage 2) and [Logs/078] (Stage 3).
+
+### Structural changes
+
+| change | file | why it is not cosmetic |
+|---|---|---|
+| `fraggfn` case + explicit per-target config map | `submit_stage2_upsample.sh` | the `${GEN}_${TGT}_fixed.yaml` convention resolves for fraggfn to a file that EXISTS and is WRONG (the old 5,000-step build); the resume guard `remaining = n_train_steps - loop._it` would have silently re-trained 4,843 steps inside a sampling stage |
+| docking server, per cell | `submit_stage2_upsample.sh` | without `RGFN_DOCK_SOCKET` the reward bridge falls back to a `score_batch.py` subprocess PER STEP and writes no `dock_server_stats.json`, so the compute accounting loses its docking component silently |
+| `sampler-capped` stop reason | `upsample_to_modes.py` | a round returning the SAME distinct count means the runner hit `max_sample_batches`, not that the generator ran out of chemistry; it was being recorded as `stalled`, a claim about the GENERATOR |
+| `CANDS` override | `submit_competitor_routes.sh` | Stage 3 was hard-wired to the budget-faithful pool and could not consume what Stage 2 produces |
+| `USE_STAGE2`, `REPO_DIR`, + a snapshot assertion | `submit_competitor_routes_chain.sh` | the chain `cd`s to a fixed root and snapshots THAT tree's cell script, so a worktree's fix silently did not load |
+| `CFG_FORCE` | `submit_stage2_upsample.sh` | run one cell against a divergent config, loudly |
+| `submit_native_routes.sh` (NEW) | — | Stage 3 for a generator carrying its own routes; `--route-source external` existed but no launcher used it |
+
+### NOT verified / left open
+
+* **The competitor comparison has not started.** REINVENT, Saturn, TANGO are **0 of 58** route runs.
+  21 jobs sit at `PD (Priority)`: five of nine nodes went to a reservation and our fairshare read
+  `EffectvUsage 0.279` against `NormShares 0.023`. Left to drain by decision, not oversight.
+* **Seven cells need a follow-up Stage 3** once their Stage 2 lands (jobs 75192/75193/75194):
+  `reinvent:clpp:44`, `s3gfn:clpp:42/43/44`, `s3gfn:drd2:43/44`, `s3gfn:seh:43`. They were
+  deliberately excluded from the submitted chains rather than queued against incomplete inputs.
+* **`s3gfn_drd2` seeds 43/44 carried a FALSE `stalled` label — RESOLVED, and the re-run IS worth it.**
+  The diagnostic (75287 died on a missing oracle symlink, see below; re-run as 75674) settled it on
+  seed 44: at `max_sample_batches=4000` that cell records **168 modes / `stalled`**; at 20000 it
+  reaches **394**. The original round 2 returned the IDENTICAL 8,192 distinct — a cap, adding nothing.
+  The diagnostic's round 5 added 438 genuinely NEW molecules for only 6 new modes — a REAL plateau,
+  which is why 20000 is the right cap and not higher.
+  Both runs print `stalled`; only one of them means it. That is precisely what the `sampler-capped`
+  stop reason now distinguishes.
+  * seed 44 is CORRECTED already — `stage2_bigbatch/s3gfn_drd2_seed44` is a complete run, adopt it.
+  * seed 43 re-runs as job 75692 at the same cap; its recorded 422 is not quotable.
+  * seed 42 keeps the default config: it reached 500 `target-reached`, so the cap never bound.
+  * COST, and it belongs in the Stage-2 surcharge table: 10.8 h of sampling against 1.3 h. Two of the
+    three seeds in that band paid it and the third did not — our artifact, not the generator's.
+* **Quote `n_targets_priced`, never `n_modes`.** They are equal on every multiaiz cell and diverge
+  ~11-13% on native routes. Whether the greedy arm SHOULD force all N targets is an open methodology
+  decision that changes the headline for every route-carrying entrant.
+* **The route-less frontier ladder still starts at 25**, so a cell delivering fewer modes writes no
+  row at all (`fraggfn_drd2_seed43`, 12 modes). `submit_native_routes.sh` starts at 5. Re-running the
+  frontier is minutes — discovery is cached — so this is a cheap sweep, not a re-run.
+* **`fraggfn:drd2:44 pruned` was deliberately not resubmitted**: naive and pruned share 499/500
+  molecules on that generator+target, so it is a provable duplicate. The overlap itself is the result.
+* Chain walltimes were sized on a 3.67 h/cell reference; measured cost is **6-12 h/cell**. Five chains
+  timed out at 20 h having done one cell each. The resubmitted chains are sized on the measurement.
+
+### A results directory can be named for a pool size that never existed
+
+`submit_competitor_routes.sh` builds its output paths from `$N` -- the **requested** pool size -- while
+`POOL_DIR` is re-resolved a few lines earlier to the size the generator could actually supply. For a
+pool-limited cell those disagree, so `s3gfn_clpp_seed42_stage2_pruned` writes its frontier into
+`..._greedy_N500/` next to a pool directory called `..._N138`.
+
+Nothing is lost and no run is wrong -- but **any tally that looks up results by the pool's size finds
+nothing and reports the cell as empty**, and pool-limited cells are precisely the ones carrying the
+mode-collapse and generator-ceiling findings. Three S3-GFN ClpP cells read as "no frontier" this way
+while holding perfectly good ladders (25@57 / 50@110 / 75@147 and siblings).
+
+DELIBERATELY NOT FIXED IN THE LAUNCHER. Renaming the output directory now would orphan every result
+already written under the current convention, across the whole campaign, which is a worse failure
+than an odd directory name. Analysis code must GLOB `<tag>_greedy_N*` rather than key on the pool
+size. Fixed that way in the campaign's summary tooling; anything new that reads these results needs
+the same treatment.
+
+### A worktree does not carry untracked files, and one oracle is resolved by RELATIVE path
+
+Job 75287 died in 53 s with `FileNotFoundError: 'oracle/drd2_current.pkl'`. That path is RELATIVE, so
+it resolves against the working directory — and `REPO_DIR` (added so a launcher stops silently running
+the shared checkout's code) changes exactly that. The file is a 35 MB UNTRACKED pickle living only in
+the shared checkout, so a fresh git worktree does not have it.
+
+Only s3gfn+DRD2 hits this: sEH resolves proxy weights and ClpP a docking socket, which is why every
+other REPO_DIR job ran fine. Fixed with a symlink `oracle -> <shared checkout>/oracle`.
+
+**That symlink must never be committed.** A symlink into the shared checkout was committed on this
+project once before and a later merge DELETED the real directories behind it. It shows as `?? oracle`;
+stage files explicitly, never `git add -A`, in any worktree of this repo.
+
+---
+
+## 2026-09-12 — `glue/export/`: the route dataset gets an implementation
+
+`docs/ROUTE_DATASET_SCHEMA.md` had been a specification with no code since 2026-08-24. It now has
+one, split the way `CLAUDE.md` requires: the reusable core in **`glue/export/`** (naming, route
+assembly, the AiZynth-tree and flat-table views, the writers, the batch scheme), and a thin driver
+**`experiments/lsd_hubs/campaign/export_library.py`** that locates a cell's artifacts and wires them
+to it. The core opens no run directory and hardcodes no path — it takes a `CampaignResult`, a map of
+logged routes and a catalogue — so `benchmark_v2` needs a new driver, not a new exporter. The name
+is neutral on purpose: it is meant to migrate to the publication repo as `hubbatching.export`.
+
+Nothing was reimplemented. The selection comes from `run_campaign._load_candidates` +
+`build_strategy`; the enumerated hubs from `parallel_groups.load_hubs_with_reactions` (which
+parity-checks itself against `run_campaign._load_enumerated_hubs` before anything is written); route
+linearization is lifted verbatim from `synthesis_routes.linearize`; the scheme is
+`render_route_scheme.py`'s rendering generalised from one molecule to one batch.
+
+### Two files outside `glue/export/` changed, both additively
+
+* **`experiments/lsd_hubs/campaign/reaction_names.py` is now a shim.** The template→named-reaction
+  table moved to `glue/export/naming.py`, because the exporter needs exactly those names and
+  `glue/` may not import from `experiments/`. `parse_template` / `named_reaction` /
+  `is_single_reactant` / `RULES` / `FGI` are re-exported verbatim and every existing caller
+  (`parallel_groups.py`, `yield_by_strategy.py`, `plot_acid_amine_families.py`) is unchanged; the
+  audit CLI `emit_review_table()` stays in `experiments/`. A second copy of the table would let one
+  template acquire two names in two artifacts, which is the one failure a reading aid must not have.
+* **`parallel_groups.RxChild` gained `template` and `product`** (plain strings, defaulted, so the
+  class stays hashable and every grouping is byte-identical). `product` is the only record of an
+  enumerated child's stereo-aware form — `smiles` is the stereo-stripped key — and `template` is
+  what §4.3 puts in the route tree's metadata.
+
+### Verified, on real data (cell `scent_seh_seed43`, frozen `_enum_snapshot_20260820`)
+
+* **The exported selection reproduces the committed campaign exactly.** At the gate the committed
+  `parallel_groups` run used (5.0), both arms match `results/parallel_groups/scent_seh_seed43/
+  modes_*.csv` sliced to `cum_reactions <= 100`: same count (79 / 27), same order, same SMILES,
+  same `cum_reactions`, same `reactions_added`.
+* **`routes.json` is readable by AiZynthFinder itself** — 75/75 and 27/27 parse through
+  `ReactionTree.from_dict` in the `aizynth` env, and `is_solved` (AiZynth's own "every leaf is in
+  stock" test) is True for all 102. Its reaction count agrees with `steps.csv` and with
+  `molecules.csv.n_steps` for every molecule.
+* 31 `scheme.png` rendered; 0 unpurchasable leaves in either arm.
+
+### One spec correction the implementation forced
+
+§4.3's illustrative JSON gives a reaction node only `metadata` and `children`. AiZynth's
+`ReactionTreeFromDict._parse_tree_dict` reads `rxn_tree_dict["smiles"]` with **no default**, so a
+file that followed the example literally raises `KeyError` on load — measured: 0 of 75 trees parsed
+before a retro-direction `"smiles": "<product>>><reactants>"` was added to each reaction node, 75 of
+75 after. The exporter writes it; the doc's example should show it. The doc was NOT edited.
+
+### Not done / not verified
+
+* Only the one cell has been exported. The other three route-complete v1 cells
+  (`scent_seh_seed44`, `scent_drd2_seed43/44`) are the same command with different paths.
+* The output tree is in `$SCRATCH/rgfn_runs/lsdflow-routes/`, not committed — 30 MB of PNGs.
+* `glue/export/` is deliberately NOT registered in `glue/registry.py`: nothing in it is
+  `@gin.configurable`, and registry membership exists so gin can resolve a name.

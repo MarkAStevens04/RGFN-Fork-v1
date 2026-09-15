@@ -33,7 +33,7 @@
   year      = {2022},
   eprint    = {2201.13259},
   archivePrefix = {arXiv},
-  note      = {The training objective RGFN optimizes (configs/objectives/trajectory_balance.gin): learns P_F, P_B and a single global Z, but no per-state flow F(s). Basis for the balance-based flow estimate F(h)=R(x)P_B(h|x)/P_F(x|h) in glue/analysis/tb_flow.py.}
+  note      = {The training objective RGFN optimizes (configs/objectives/trajectory_balance.gin): learns P_F, P_B and a single global Z, but no per-state flow F(s) -- which is why per-state flow must be recovered post-hoc from the balance condition F(h)=R(x)P_B(h|x)/P_F(x|h).}
 }
 
 % --- Baselines: synthesis-aware generators we compare against ---
@@ -107,6 +107,24 @@
   note    = {SA score (1=easy..10=hard). Cheap RDKit-native companion to AiZynth, computed in the same synthesizability evaluator. RDKit ships the implementation as the contrib `sascorer`.}
 }
 
+@article{kim2026s3gfn,
+  title   = {Synthesizable Molecular Generation via Soft-constrained {GFlowNets} with Rich Chemical Priors},
+  author  = {Kim, Hyeonah and Kim, Minsu and Roget, Celine and Biton, Dionessa and Vaillancourt, Louis and Brun, Yves V. and Bengio, Yoshua and Hernandez-Garcia, Alex},
+  journal = {arXiv preprint arXiv:2602.04119},
+  year    = {2026},
+  url     = {https://arxiv.org/abs/2602.04119},
+  note    = {S3-GFN: a SEQUENCE (SMILES) GFlowNet that induces synthesizability by SOFT
+             regularization -- off-policy replay with a contrastive signal from separate buffers of
+             synthesizable vs unsynthesizable samples, plus priors from large SMILES corpora -- NOT
+             reaction templates. Claims >95% per-molecule synthesizability with higher rewards.
+             THE marquee foil for the LSD-Flow library-efficiency benchmark (docs/
+             LSD_FLOW_BENCHMARK_PLAN.md T3.1-T3.2): its molecules are per-molecule synthesizable but
+             carry NO shared-route structure, so a library must recover shared intermediates post-hoc
+             (AiZynth+SPARROW) -- the headline shows S3-GFN + best planner still loses to a
+             reaction-GFN + hub-batching on reactions-per-mode. Mila/Bengio lineage (same as
+             [bengio2021gflownet]). PDF: pdfs/kim2026s3gfn.pdf.}
+}
+
 @article{bengeoffrey2025molde,
   title   = {Molecular Glue-Design-Evaluator ({MOLDE}): An Advanced Method for In-Silico Molecular Glue Design},
   author  = {Ben Geoffrey, A. S. and Agrawal, Deepak and Kulkarni, Nagaraj M. and Gunasekaran, Manonmani},
@@ -118,4 +136,245 @@
   doi     = {10.1021/acsomega.4c08049},
   url     = {https://pubs.acs.org/doi/10.1021/acsomega.4c08049},
   note    = {In-silico molecular-glue design/evaluation. Reference for glue design and the choice of the 6TD3 system (see Logs/002_6td3-cr8-validation-and-discrimination.md).}
+}
+
+@article{fromer2025diversity,
+  title   = {Optimal Compound Downselection To Promote Diversity and Parallel Chemistry},
+  author  = {Fromer, Jenna C. and Volkova, Alexandra D. and Coley, Connor W.},
+  journal = {Journal of Chemical Information and Modeling},
+  year    = {2025},
+  volume  = {65},
+  number  = {12},
+  pages   = {5989--5997},
+  doi     = {10.1021/acs.jcim.5c00606},
+  url     = {https://pubs.acs.org/doi/10.1021/acs.jcim.5c00606},
+  note    = {SPARROW v2 -- the SAME GROUP's follow-up to [fromer2024sparrow], and the paper that
+             answers the objection our BC-SB / BC-Enum-SB arms raise (Logs/059): that we only ever
+             compared against a DIVERSITY-BLIND optimizer. Three additions. (1) EXPECTED CUMULATIVE
+             REWARD: maximize sum_t U_t c_t prod_i L_i^(u_it), i.e. discount each candidate's reward
+             by the success probability of every step in its route, so a risky reaction is penalized
+             once PER ROUTE THAT USES IT rather than once globally. Nonlinear; the authors note it
+             needs Gurobi and is not guaranteed globally optimal, and they therefore use the LINEAR
+             formulation (with an iterative lambda_rew scheme, SI S1.3) for all their analysis --
+             which matters for us because we run PuLP/CBC with no Gurobi licence. (2) CLUSTER
+             DIVERSITY: add lambda_div * (number of clusters represented) to the scalarized
+             objective, or impose it as a constraint on clusters represented. Clusters are arbitrary
+             (they use Butina on count-Morgan at 0.8, but note they may be defined by scaffold,
+             predicted protein interaction, or any project-specific criterion). (3) PARALLEL
+             CHEMISTRY: an inequality constraint capping the number of distinct REACTION CLASSES
+             selected, so a batch can be run in parallel. Their Fig. 3C finding is directly relevant
+             to us: raising lambda_div REDUCED the number of selected reactions and RAISED mean
+             reaction score in their case study -- diversity was not bought with extra steps.
+             IMPORTANT for this repo: external/sparrow is already at this version (clone dated
+             2025-06-30; selector/{linear,nonlinear,bayesian}, and LinearSelector already exposes
+             clusters/N_per_cluster/rxn_classes/max_rxn_classes with weights =
+             [reward, start_cost, reaction, diversity, class]). We simply never enabled the last two
+             weights. PDF: pdfs/fromer2025diversity.pdf.}
+}
+
+@article{fromer2024sparrow,
+  title   = {An algorithmic framework for synthetic cost-aware decision making in molecular design},
+  author  = {Fromer, Jenna C. and Coley, Connor W.},
+  journal = {Nature Computational Science},
+  year    = {2024},
+  volume  = {4},
+  pages   = {440--450},
+  doi     = {10.1038/s43588-024-00639-y},
+  eprint  = {2311.02187},
+  archivePrefix = {arXiv},
+  url     = {https://www.nature.com/articles/s43588-024-00639-y},
+  note    = {SPARROW ("Synthesis Planning And Rewards-based Route Optimization Workflow",
+             coleygroup/sparrow): a mixed-integer linear program over a MERGED retrosynthetic graph
+             that jointly chooses WHICH candidate molecules to make and WHICH routes to make them by,
+             scalarizing three terms with weights lambda = [l1, l2, l3] -- cumulative reward of the
+             selected candidates (maximized), starting-material cost, and a per-reaction penalty
+             inversely proportional to success probability (both minimized). Because compounds are
+             deduplicated by canonical SMILES, shared intermediates collapse to one node and are
+             amortized automatically. We use it in TWO distinct roles and conflating them misreads
+             every result (docs/RESEARCH_CONTEXT.md, "How library cost is measured"):
+             (1) SPARROW-VERIFIER (SV) -- independent auditor of a library we already chose
+             (constrain_all_targets=True, reward weight 0); the source of "count-once is within
+             0.0-3.1% of provably optimal" (Logs/042 gate, Logs/049). (2) SPARROW-BATCHING (SB) --
+             a genuine COMPETITOR that picks the batch itself under a hard --max-rxns budget
+             (constrain_all_targets=False, reward-bearing objective); the competitor's selector in
+             the headline (Logs/056) and in the BC-SB / BC-Enum-SB arms (Logs/059). Objective sign
+             convention verified against LinearSelector.set_objective: it MINIMIZES
+             -w0*sum(reward*selected) + w1*sum(SM cost) + w2*sum(reaction penalty), so
+             weights=[1,0,0,0,0] plus a hard max_rxns maximizes selected reward under a reaction
+             budget (a hard budget was chosen over a reaction penalty deliberately -- a penalty
+             requires inventing an exchange rate between reward units and reactions). CRITICAL for
+             our argument: the objective has NO diversity term, and the paper says so itself --
+             "SPARROW currently does not consider marginal information gain related to molecular
+             diversity and matched molecular pairs" -- which is why the distinctness of an SB
+             selection is always MEASURED, never assumed, and why SB concentrates its picks on a
+             handful of intermediates (Logs/059: 78% from one at the tightest budget). Practical
+             limit: the MILP is superlinear in pool size (~1 s per budget point at 500 targets,
+             >110 s at 2,000), so a pool that fails to solve is itself a reportable datapoint.
+             Own `sparrow` conda env (external/setup_sparrow.sh) + PuLP/CBC; crossed by subprocess
+             via validation/lsdflow/adapters/workers/sparrow_worker.py.
+             PDF: pdfs/fromer2024sparrow.pdf.}
+}
+
+@article{ianez2026multiaiz,
+  title   = {Joint synthesis planning by leveraging common intermediates},
+  author  = {I{\'a}{\~n}ez Picazo, Pablo and Voronov, Alexey and Genheden, Samuel and Westerlund, Annie M.},
+  journal = {Artificial Intelligence in the Life Sciences},
+  year    = {2026},
+  doi     = {10.1016/j.ailsci.2026.100175},
+  url     = {https://www.sciencedirect.com/science/article/pii/S2667318526000231},
+  note    = {MultiAiZ (MolecularAI/multiaiz): extends AiZynthFinder to MULTI-TARGET retrosynthesis by
+             iteratively appending discovered intermediates to the stock (the paper uses 5 cycles) so
+             targets converge on shared intermediates, then ranks them by the novel "intermediate
+             score". The SECOND competitor route-planner for the LSD-Flow library-efficiency benchmark
+             (docs/LSD_FLOW_BENCHMARK_PLAN.md T4.1): each acquisition function's accepted-mode pool is
+             priced in ISOLATION by MultiAiZ->SPARROW (shared intermediates found within a pool are NOT
+             shared to other pools) to test whether smarter shared-intermediate discovery lowers
+             reactions-per-mode vs plain AiZynth->SPARROW. Molecular AI / AstraZeneca (same group as
+             AiZynthFinder). PDF: pdfs/ianez2026multiaiz.pdf.}
+}
+
+% --- Information-theoretic active learning: the BALD / BatchGFN family ---
+
+@inproceedings{malik2023batchgfn,
+  title     = {{BatchGFN}: Generative Flow Networks for Batch Active Learning},
+  author    = {Malik, Shreshth A. and Lahlou, Salem and Jesson, Andrew and Jain, Moksh and Malkin, Nikolay and Deleu, Tristan and Bengio, Yoshua and Gal, Yarin},
+  booktitle = {ICML Workshop on Structured Probabilistic Inference \& Generative Modeling (SPIGM)},
+  year      = {2023},
+  eprint    = {2306.15058},
+  archivePrefix = {arXiv},
+  url       = {https://github.com/s-a-malik/batchgfn},
+  note      = {Pool-based batch active learning with a GFlowNet whose STATE is the query batch under
+               construction and whose ACTIONS add pool points; reward = exp(JMI/T) where JMI is
+               BatchBALD's joint mutual information I[y_1:B, theta | x_1:B, D_train], computed in
+               CLOSED FORM under an exact GP. Sampling is O(B) (B forward passes) versus BatchBALD's
+               joint entropies over the whole pool. Evaluated ONLY on a toy 1D regression task (pool
+               2000, seed 10, query 10); baselines random / BALD / stochastic-BALD / BatchBALD.
+               KEY RESULT FOR US (their Sec. 4.2-4.3): BatchGFN is "on par with BatchBALD" and beats
+               BALD + random -- i.e. its contribution is AMORTIZING the greedy objective, not
+               improving it, so greedy BatchBALD UPPER-BOUNDS it. That is why docs/
+               LSD_FLOW_BENCHMARK_PLAN.md Sec. 11 implements greedy BatchBALD rather than a
+               subset-GFlowNet. Their own speed-up is modest in-setting (~10% for a single sample).
+               No cost model: every pool point costs the same to label -- the axis LSD-Flow owns.
+               ICML 2023 workshop paper (10pp), explicitly "early results".
+               PDF: pdfs/malik2023batchgfn.pdf.}
+}
+
+@misc{zhang2025baldgfn,
+  title         = {Why Pool When You Can Flow? Active Learning with {GFlowNets}},
+  author        = {Zhang, Renfei and Pandey, Mohit and Cherkasov, Artem and Ester, Martin},
+  year          = {2025},
+  eprint        = {2509.00704},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.LG},
+  note          = {BALD-GFlowNet: the GENERATIVE successor to pool-based information acquisition, and
+                   the stronger of the two benchmark targets for docs/LSD_FLOW_BENCHMARK_PLAN.md
+                   Sec. 11. Replaces "which pool point is most informative?" with "what does an
+                   informative sample LOOK like?" -- a GFlowNet is trained to sample proportional to
+                   the BALD reward, so acquisition cost is INDEPENDENT of pool size. NOTE it uses
+                   SINGLE-POINT BALD, I(y; omega | x, D) over an ensemble -- NOT BatchBALD's joint MI
+                   -- so it inherits BALD's batch-redundancy weakness and leans on GFlowNet diversity
+                   + a composite reward to offset it. That composite reward is MULTIPLICATIVE:
+                   Reward(x) = MI(x) * TPSA(x) * QED(x) * SAS(x) * Rings(x) -- our precedent for
+                   giving the information baseline a quality term so we are not beating a strawman
+                   (Sec. 11.2 decision 7). Surrogate = an ensemble binary classifier on an imbalanced
+                   docking-score task. Experiments: a 2D grid + JAK2 virtual screening (Enamine REAL),
+                   finetuning a pretrained ATOM-LEVEL graph-Transformer GFlowNet. Results: comparable
+                   F1 to the BALD baseline (>90% of BALD's max F1 at the oracle cost of one BALD
+                   iteration), 12.5% runtime reduction at a 12M library, more structurally diverse
+                   molecules. Its generator is atom-level with no reaction grounding and no synthesis
+                   cost, so it has the same library-economics blind spot as [kim2026s3gfn].
+                   SFU / UBC Vancouver Prostate Centre / Diagen AI. PDF: pdfs/zhang2025baldgfn.pdf.}
+}
+
+@article{loeffler2024reinvent4,
+  title   = {{REINVENT} 4: Modern AI-driven generative molecule design},
+  author  = {L{\"o}ffler, Hannes H. and He, Jiazhen and Tibo, Alessandro and Janet, Jon Paul and
+             Voronov, Alexey and Mervin, Lewis H. and Engkvist, Ola},
+  journal = {Journal of Cheminformatics},
+  year    = {2024},
+  volume  = {16},
+  pages   = {20},
+  doi     = {10.1186/s13321-024-00812-5},
+  url     = {https://github.com/MolecularAI/REINVENT4},
+  note    = {AstraZeneca's production de-novo design tool: a ChEMBL-pretrained RNN over SMILES
+             tokens fine-tuned by reinforcement learning (DAP) against a weighted multi-component
+             score, with an explicit diversity filter. A ROUTE-LESS entrant in the LSD-Flow
+             library-efficiency benchmark, in the same class as [kim2026s3gfn] but by a different
+             mechanism: S3-GFN induces per-molecule synthesizability by soft regularization,
+             REINVENT does not model synthesizability at all. Its molecules carry has_route=0, so a
+             library built from its pool must have shared intermediates recovered post-hoc
+             (MultiAiZ -> SPARROW). Included because it is the baseline a reviewer names first.
+             Adapter: validation/generators/reinvent/ (own `reinvent4` prefix env, external/
+             setup_reinvent.sh). PINNED TO v4.5.11 for packaging reasons, NOT scientific ones -- the
+             RL algorithm is DAP in every 4.x release, but `main` pins torch==2.12.0 for which no
+             prebuilt torch-sparse wheel exists (bengio2021flow imports it at module level), requires
+             numpy>=2 (the legacy DRD2 sklearn pickle is not reliably loadable there), and moved the
+             priors to Zenodo (a download that fails on a compute node). Reward parity is enforced by
+             a scoring-component plugin exposing the SAME frozen sEH MPNN / TDC DRD2 oracle every
+             other entrant optimizes.}
+}
+
+@article{guo2026saturn,
+  title   = {Sample-efficient generative molecular design using memory manipulation},
+  author  = {Guo, Jeff and Schwaller, Philippe},
+  journal = {Nature Machine Intelligence},
+  year    = {2026},
+  eprint  = {2405.17066},
+  archivePrefix = {arXiv},
+  url     = {https://github.com/schwallergroup/saturn},
+  note    = {Saturn: a Mamba-based SMILES language model trained with the Augmented Memory algorithm
+             (data augmentation + experience replay), explicitly optimized for SAMPLE EFFICIENCY --
+             few oracle calls per unit of reward. A second ROUTE-LESS entrant beside
+             [loeffler2024reinvent4] and [kim2026s3gfn]. Its sample efficiency is the interesting
+             axis for us: it is the strongest case for "you do not need many oracle calls", which is
+             the axis we LOSE on and report (Logs/056's candidates-you-must-score trade). Because it
+             is reward-maximizing RL, its diversity filters are enabled deliberately -- a collapsed
+             pool cannot reach the benchmark's 100-mode deliverable, and that would only surface
+             after ~2.25 h of route discovery. Same repo and conda env as [guo2026tango]; the README
+             pins a git hash per paper (Saturn fee0179, TANGO de5cd7f).}
+}
+
+@article{guo2026tango,
+  title   = {{TANGO}: direct optimization of constrained synthesizability for generative molecular design},
+  author  = {Guo, Jeff and Schwaller, Philippe},
+  journal = {Nature Computational Science},
+  year    = {2026},
+  eprint  = {2410.11527},
+  archivePrefix = {arXiv},
+  url     = {https://arxiv.org/abs/2410.11527},
+  note    = {"It Takes Two to Tango". TANGO (TANimoto Group Overlap) is a REWARD FUNCTION layered on
+             a general-purpose generator ([guo2026saturn]), not a separate model: it turns the sparse
+             binary signal "is this molecule retrosynthesizable from a SPECIFIED building-block set"
+             into a dense, learnable one, using a retrosynthesis model (syntheseus) in the loop. It
+             is the first generative approach to CONSTRAINED synthesizability (starting-material,
+             intermediate and divergent-synthesis constraints). Uniquely valuable here because the
+             constraint set is caller-supplied: TANGO can be run on the same public ZINCFrag
+             catalogue as the other baselines AND, separately, constrained to our own 418
+             glue_standard_v1 blocks -- the second arm forecloses the "different catalogue" objection
+             to the head-to-head outright, since both sides then build from identical chemistry.}
+}
+
+@article{gao2025synformer,
+  title   = {Generative artificial intelligence for navigating synthesizable chemical space},
+  author  = {Gao, Wenhao and Luo, Shitong and Coley, Connor W.},
+  journal = {Proceedings of the National Academy of Sciences},
+  year    = {2025},
+  doi     = {10.1073/pnas.2415665122},
+  eprint  = {2410.03494},
+  archivePrefix = {arXiv},
+  url     = {https://github.com/wenhao-gao/synformer},
+  note    = {SynFormer: a transformer + diffusion-based building-block selector that generates
+             molecules AS SYNTHETIC PATHWAYS (postfix notation over reaction templates and
+             purchasable blocks), so its output carries a route by construction (has_route=1).
+             THE reaction-aware, non-GFN entrant -- the cell docs/LSD_FLOW_BENCHMARK_PLAN.md section
+             7 names as the one that would isolate the contribution of the FLOW FIELD from mere
+             reaction-grounding, which no ablation on our own generators can do. Oracle-guided
+             optimization comes from experiments/graphga_sf_opt.py (a Graph GA proposes, SynFormer
+             projects into synthesizable space, the oracle scores) whose Oracle.assign_evaluator seam
+             takes our frozen reward directly. Successor to ChemProjector (Luo et al., ICML 2024); both were
+             deprecated by their authors in Dec 2025 in favour of PrexSyn (arXiv 2512.00384), which
+             is NOT usable here because v1 dropped the property-based queries an oracle-guided run
+             needs. NO ENAMINE LICENCE REQUIRED: the preprocessed catalogue (fpindex.pkl, matrix.pkl)
+             and the encoder-decoder checkpoint are on HuggingFace at whgao/synformer, which is what
+             GraphGA-SF consumes.}
 }

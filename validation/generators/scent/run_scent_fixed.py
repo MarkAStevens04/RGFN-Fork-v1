@@ -47,6 +47,53 @@ def main() -> None:
         default=None,
         help="base run dir (absolute). On Balam set to $SCRATCH/rgfn_runs/experiments.",
     )
+    ap.add_argument(
+        "--run-dir",
+        default=None,
+        help="EXACT run dir (stable, no timestamp) to reuse across 3-day auto-requeue chain "
+        "links (campaign Logs/030). If it holds a train/checkpoints/last_gfn.pt, SCENT's Trainer "
+        "resumes from it (forward policy + logZ + optimizer; guidance sidecar recovers P_B). "
+        "Overrides --root-dir + the config-stem run name.",
+    )
+    # ON BY DEFAULT since 2026-07-29. Recipes are only observable *during* training (once a
+    # fragment is promoted the model uses it atomically), so a run without them can never be
+    # retro-fitted — it is permanently stuck on the `min_num_reactions` cost approximation. The
+    # default flipped here rather than in the submit scripts on purpose: SLURM snapshots a batch
+    # script at submit time, so editing a `submit_*.sh` cannot reach an already-queued chain link,
+    # while this file is resolved from the repo at job start and therefore is inherited by every
+    # link that has not run yet (campaign Logs/030 chains). `--no-log-recipes` opts out.
+    ap.add_argument(
+        "--log-recipes",
+        dest="log_recipes",
+        action="store_true",
+        default=True,
+        help="log each promoted dynamic-library fragment's synthesis route into the "
+        "fragments_<N>.json snapshot (for exact nested LSD-Flow cost + chemist routes, entry 027). "
+        "Monkeypatches DynamicLibrary; SCENT clone untouched. DEFAULT ON.",
+    )
+    ap.add_argument(
+        "--no-log-recipes",
+        dest="log_recipes",
+        action="store_false",
+        help="disable route logging (the pre-2026-07-29 default). Training is unaffected either "
+        "way — capture is a read-only post-hook that consumes no RNG — so this is only for "
+        "reproducing a route-free snapshot exactly.",
+    )
+    ap.add_argument(
+        "--n-iterations", type=int, default=None, help="override Trainer.n_iterations (smoke)"
+    )
+    ap.add_argument(
+        "--n-samples", type=int, default=None, help="override ScentFixedRewardRun.n_samples (smoke)"
+    )
+    ap.add_argument(
+        "--gin-binding",
+        action="append",
+        default=[],
+        help="extra gin binding applied AFTER the config (repeatable), e.g. "
+        "'dynamic_library/DynamicLibrary.every_n_iterations=3' to make promotions fire inside a "
+        "short run. Mirrors scripts/fixed_reward.py; needed to TEST the promotion path without a "
+        "1,000-iteration run.",
+    )
     args = ap.parse_args()
 
     if not _SCENT_ROOT.exists():
@@ -61,12 +108,26 @@ def main() -> None:
         raise SystemExit(f"config not found: {cfg_abs}")
     root_dir = Path(args.root_dir).resolve() if args.root_dir else (_REPO_ROOT / "experiments")
 
-    # Derive the run-dir name from the config stem so sEH vs DRD2 runs don't collide
-    # (scent_seh_fixed.gin -> scent_seh; scent_drd2_fixed.gin -> scent_drd2).
-    variant = cfg_path.stem.replace("_fixed", "")
-    run_name = f"fixed_reward/{variant}/{_timestamp()}"
-    run_dir = (root_dir / run_name).resolve()
+    if args.run_dir:  # stable dir for auto-requeue chain links (resume into the same place)
+        run_dir = Path(args.run_dir).resolve()
+        run_name = (
+            str(run_dir.relative_to(root_dir))
+            if str(run_dir).startswith(str(root_dir))
+            else run_dir.name
+        )
+    else:
+        # Derive the run-dir name from the config stem so sEH vs DRD2 runs don't collide
+        # (scent_seh_fixed.gin -> scent_seh; scent_drd2_fixed.gin -> scent_drd2).
+        variant = cfg_path.stem.replace("_fixed", "")
+        run_name = f"fixed_reward/{variant}/{_timestamp()}"
+        run_dir = (root_dir / run_name).resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
+
+    # Resume: if a prior chain link left a checkpoint, tell SCENT's Trainer to resume from it
+    # (forward policy + logZ + optimizer + replay buffer). The guidance sidecar
+    # (guidance_models.pt) recovers the cost-guided P_B (Logs/024); the adapter loads it.
+    _resume_ckpt = run_dir / "train" / "checkpoints" / "last_gfn.pt"
+    _resume_path = str(_resume_ckpt) if _resume_ckpt.exists() else None
 
     os.chdir(_SCENT_ROOT)
     gin.add_config_file_search_path(str(_SCENT_ROOT))
@@ -87,6 +148,45 @@ def main() -> None:
     import rgfn  # noqa: F401  (side effect: registers most SCENT gin components)
     from rgfn.trainer.trainer import Trainer  # noqa: F401  (registers @Trainer)
 
+    if args.log_recipes:
+        import recipe_logging  # sibling module (validation/generators/scent)
+
+        recipe_logging.enable_recipe_logging()
+
+        # Partial-coverage warning. A fragment's route is observable only while it is still being
+        # *built* from smaller pieces; once promoted, the model consumes it atomically, so it never
+        # reappears as a reaction product. Enabling capture partway through a chain (earlier links
+        # ran route-free) therefore recovers routes ONLY for fragments promoted from here on — the
+        # final snapshot mixes exact routes with min_num_reactions fallbacks. Say so loudly rather
+        # than let a downstream reader read "has smiles_to_route" as "fully routed"
+        # (reconcile_t15.py --min-recipe-fraction is the gate that checks coverage).
+        def _has_routes(path: Path, needle: bytes = b'"smiles_to_route"') -> bool:
+            """Is the key present? Chunked scan — these snapshots are ~100 MB (386k reward entries)
+            and ``state_dict`` appends the key LAST, so neither a full read nor a prefix check will
+            do. Overlap by ``len(needle)-1`` so a match spanning a chunk boundary is still found."""
+            tail = b""
+            with open(path, "rb") as fh:
+                while chunk := fh.read(1 << 20):
+                    if needle in tail + chunk:
+                        return True
+                    tail = chunk[-(len(needle) - 1) :]
+            return False
+
+        _prior = sorted((run_dir / "additional_fragments").glob("fragments_*.json"))
+        _routeless = [p.name for p in _prior if not _has_routes(p)]
+        if _routeless:
+            print(
+                f"[SCENT-FR] WARNING resuming a run whose earlier snapshots have no routes "
+                f"({', '.join(_routeless)}): only fragments promoted from THIS link on can be "
+                f"routed, so this run's final fragments_<N>.json may be partially routed. Cost "
+                f"accounting stays valid either way (min_num_reactions per unrouted fragment), but "
+                f"measure coverage with reconcile_t15.py --min-recipe-fraction before claiming "
+                f"exact nested cost. (Coverage can also come out complete: the library state is not "
+                f"checkpointed, so a resume resets it — see the 2026-07-29 REFACTOR_LOG entry — and "
+                f"the surviving fragments are then exactly the ones promoted after capture began.)",
+                flush=True,
+            )
+
     bindings = [
         f'user_root_dir="{root_dir}"',
         f'run_name="{run_name}"',
@@ -98,6 +198,14 @@ def main() -> None:
         f'DockingBridgeProxy.repo_root="{_REPO_ROOT}"',
         f'DockingBridgeProxy.workdir="{run_dir / "reward_bridge"}"',
     ]
+    if _resume_path is not None:
+        bindings.append(f'Trainer.resume_path="{_resume_path}"')
+        print(f"[SCENT-FR] resuming from checkpoint {_resume_path}", flush=True)
+    if args.n_iterations is not None:  # smoke override
+        bindings.append(f"Trainer.n_iterations={args.n_iterations}")
+    if args.n_samples is not None:
+        bindings.append(f"ScentFixedRewardRun.n_samples={args.n_samples}")
+    bindings.extend(args.gin_binding)  # last, so an explicit binding overrides the config
     gin.parse_config_files_and_bindings([str(cfg_abs)], bindings=bindings)
     print(
         f"[SCENT-FR] cfg={cfg_abs.name} run_dir={run_dir} seed={args.seed}\n"

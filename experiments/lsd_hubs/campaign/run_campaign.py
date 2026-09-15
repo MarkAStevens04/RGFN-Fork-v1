@@ -1,0 +1,890 @@
+#!/usr/bin/env python
+"""Hub-batching vs best-candidate campaign on a SCENT analysis (Logs/028).
+
+Loads a completed SCENT hub-analysis dir (``records.csv`` = candidate pool, ``compositions.json`` =
+per-molecule promoted fragments), a scent-env enumeration (``enum_children.json`` = each ranked
+hub's children + the fragment added in the final reaction), and the recipe snapshot
+(``fragments_<N>.json``), then runs both strategies to the full modes-vs-reactions curve and reads
+off Case 1 (modes at a reaction budget) + Case 2 (reactions at a mode budget). Pure CPU.
+
+    source ~/bin/rgfn-smoke-env.sh
+    python experiments/lsd_hubs/campaign/run_campaign.py \
+        --analysis-dir /scratch/.../lsdflow/scent_seh_70189 \
+        --enum-children /scratch/.../campaign_enum/enum_children.json \
+        --snapshot /scratch/.../scent_seh/<ts>/additional_fragments/fragments_4000.json \
+        --reward-threshold 7.0 --tag scent_seh
+"""
+import argparse
+import csv
+import json
+import time
+from dataclasses import replace
+from pathlib import Path
+
+from glue.samplers.lsdflow.campaign import (
+    RANK_METHODS,
+    BestCandidateStrategy,
+    Candidate,
+    EnumChild,
+    EnumeratedHub,
+    HubBatchingStrategy,
+    rank_fragments,
+)
+from glue.samplers.lsdflow.child_select import make_child_policy
+from validation.lsdflow.metrics.cost.compute_time import EnumTimings as _EnumTimings
+from validation.lsdflow.metrics.cost.compute_time import account_strategy, head_to_head
+from validation.lsdflow.metrics.cost.dynamic_amortization import (
+    load_cost_table_from_snapshot,
+)
+from validation.lsdflow.plot_style import pareto_marker, title_with_ideal
+
+HERE = Path(__file__).resolve().parent
+
+# ----------------------------------------------------------------- compute-time helpers (Logs/039)
+# Shared by all four campaign drivers: measure each strategy's live CPU selection wall-clock, load
+# the worker's MEASURED per-hub enum timings, and attribute them over the strategy's actual walk.
+
+
+def run_timed(strategy, budget):
+    """Run a strategy and measure its live CPU wall-clock — the real Stage-4 mode-selection +
+    book-keeping over the cached rewards. Returns ``(CampaignResult, selection_seconds)``."""
+    t0 = time.perf_counter()
+    res = strategy.run(budget=budget)
+    return res, time.perf_counter() - t0
+
+
+def load_enum_timings(enum_children_path, explicit=None):
+    """Measured per-hub enum timings (Logs/039), defaulting to ``enum_timings.json`` beside
+    ``enum_children.json``. Returns ``None`` if absent → the compute-time section is skipped
+    (backward-compatible with pre-Logs/039 enumerations)."""
+    p = Path(explicit) if explicit else Path(enum_children_path).parent / "enum_timings.json"
+    return _EnumTimings.load(p) if p.exists() else None
+
+
+def resolve_hub_pick_timing(enum_children_path, explicit=None) -> Path:
+    """THE one place that says where ``pick_hubs_timing.json`` is. Do not inline this rule again.
+
+    It exists because it was inlined twice. ``load_hub_pick_s`` honoured the ``--hub-pick-timing``
+    override while the depth-provenance block fifteen lines away re-derived the path from
+    ``--enum-children`` and ignored the flag, so a caller that passed it got compute-time from one
+    file and depth fields from a path that did not exist. B's pilot then ran a campaign against an
+    enumeration produced elsewhere -- `hubs_head.csv` at the cell root, no sidecar beside
+    `enum/enum_children.json` -- and every depth field came back null while the run reported success.
+
+    That is the same shape as locating a checkpoint by naming convention instead of reading the
+    manifest: the artifact is found by DESCRIBING where it should be rather than being told where it
+    is, and the miss is silent.
+    """
+    return Path(explicit) if explicit else Path(enum_children_path).parent / "pick_hubs_timing.json"
+
+
+def load_hub_pick_s(enum_children_path, explicit=None):
+    """Stage-2 hub-pick wall-clock from ``pick_hubs_timing.json`` beside ``enum_children.json``
+    (0.0 if absent). Charged to hub-batching only (best-candidate never picks hubs)."""
+    p = resolve_hub_pick_timing(enum_children_path, explicit)
+    if not p.exists():
+        return 0.0
+    try:
+        return float(json.load(open(p)).get("hub_pick_s", 0.0))
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def compute_time_section(hb, hb_sel, bc, bc_sel, enum_timings, hub_pick_s):
+    """Differentiated compute-time breakdown for a hub-batching / best-candidate pair + the
+    head-to-head. Returns ``None`` when no measured timings are available."""
+    if enum_timings is None:
+        return None
+    hb_bd = account_strategy(hb, enum_timings, selection_s=hb_sel, hub_pick_s=hub_pick_s)
+    bc_bd = account_strategy(bc, enum_timings, selection_s=bc_sel)
+    return {
+        "enum_timings_meta": enum_timings.meta,
+        "hub_batching": hb_bd.to_dict(),
+        "best_candidate": bc_bd.to_dict(),
+        "head_to_head": head_to_head(hb_bd, bc_bd),
+    }
+
+
+def _load_candidates(analysis_dir: Path, higher_is_better: bool):
+    """Candidate pool from ``records.csv`` + ``compositions.json``. Each candidate also carries its
+    observed immediate-parent hub keys (all distinct ``hub_key`` it was seen under) so best-candidate
+    can credit "accidental" hub-batching (Logs/033)."""
+    comps = json.load(open(analysis_dir / "compositions.json"))
+    best: dict = {}  # child_key -> reward (best)
+    parents: dict = {}  # child_key -> set of observed parent hub keys
+    with open(analysis_dir / "records.csv") as fh:
+        for r in csv.DictReader(fh):
+            c, reward = r["child_key"], float(r["reward"])
+            if c not in best or (reward > best[c]) == higher_is_better:
+                best[c] = reward
+            hk = r.get("hub_key")
+            if hk:
+                parents.setdefault(c, set()).add(hk)
+    cands = []
+    for c, reward in best.items():
+        comp = comps.get(c, {}) or {}
+        cands.append(
+            Candidate(
+                smiles=c,
+                reward=reward,
+                num_reactions=int(comp.get("num_reactions", 1)),
+                promoted=tuple(comp.get("promoted", ())),
+                parents=tuple(sorted(parents.get(c, ()))),
+            )
+        )
+    return cands, comps
+
+
+def build_strategy(
+    name: str,
+    pool,
+    cost_table,
+    comps: dict,
+    *,
+    similarity: float,
+    target: str,
+    reward_threshold: float,
+    higher_is_better: bool,
+    assignment_policy=None,
+    child_policy=None,
+    prebuilt_fragments=None,
+    mode_selector_factory=None,
+):
+    """Construct either strategy on the ONE count-once cost model (Logs/033). Best-candidate gets the
+    compositions (to cost shared parent hubs) + a swappable hub-assignment policy; hub-batching needs
+    only its enumerated hubs + an optional within-hub ``child_policy`` (Logs/037: reward = naive /
+    free_frag) and ``prebuilt_fragments`` (pre-select-K). Shared by ``run_campaign`` and
+    ``sweep_campaign``.
+
+    ``mode_selector_factory`` overrides the mode definition itself (both strategies build one selector
+    per run from it) — the seam the filter ablation uses (Logs/054) to drop the reward gate or the
+    Tanimoto test. Left ``None``, both strategies build the canonical
+    ``DiverseThresholdModeSelector(reward_threshold, similarity)`` from the args above, so every
+    existing caller is unchanged."""
+    common = dict(
+        target=target,
+        reward_threshold=reward_threshold,
+        similarity=similarity,
+        higher_is_better=higher_is_better,
+        mode_selector_factory=mode_selector_factory,
+    )
+    if name == "hub_batching":
+        return HubBatchingStrategy(
+            pool,
+            cost_table,
+            child_policy=child_policy,
+            prebuilt_fragments=prebuilt_fragments,
+            **common,
+        )
+    return BestCandidateStrategy(
+        pool,
+        cost_table,
+        hub_compositions=comps,
+        assignment_policy=assignment_policy,
+        **common,
+    )
+
+
+def _load_enumerated_hubs(enum_children_path: Path, comps: dict):
+    data = json.load(open(enum_children_path))
+    hubs = []
+    for h in data.get("hubs", []):
+        hub_comp = comps.get(h["hub_key"], {}) or {}
+        hubs.append(
+            EnumeratedHub(
+                hub_key=h["hub_key"],
+                hub_input=h.get(
+                    "hub_input", h["hub_key"]
+                ),  # unique id for compute-time join (Logs/039)
+                depth=int(h["depth"]),
+                promoted=tuple(hub_comp.get("promoted", ())),
+                children=[
+                    EnumChild(
+                        smiles=c["smiles"],
+                        reward=float(c["reward"]),
+                        added_promoted=tuple(c.get("added_promoted", ())),
+                    )
+                    for c in h["children"]
+                ],
+                uncertainty=h.get("uncertainty"),  # U(h), carried for later (not used by selection)
+                n_effective=int(h.get("n_effective", 0)),
+            )
+        )
+    return hubs
+
+
+def _readouts(result, budget_reactions: int, budget_modes: int) -> dict:
+    """Case 1 (modes at a reaction budget) + Case 2 (reactions at a mode budget) off the curve."""
+    modes_at_rxn = max(
+        (p.cum_modes for p in result.accepted if p.cum_reactions <= budget_reactions), default=0
+    )
+    rxn_at_modes = next(
+        (p.cum_reactions for p in result.accepted if p.cum_modes >= budget_modes), None
+    )
+    rgc = result.total_reward_gen_calls
+    return {
+        "strategy": result.strategy,
+        "total_modes": result.total_modes,
+        "total_reactions": result.total_reactions,
+        "reactions_per_mode": round(result.total_reactions / result.total_modes, 3)
+        if result.total_modes
+        else None,
+        "total_reward_gen_calls": rgc,
+        "reward_gen_calls_per_mode": round(rgc / result.total_modes, 2)
+        if result.total_modes
+        else None,
+        "distinct_promoted_fragments": result.distinct_promoted_fragments,
+        "distinct_hubs_used": result.distinct_hubs_used,
+        "n_scaffolds": result.n_scaffolds,
+        "best_reward": round(result.best_reward, 3)
+        if result.best_reward == result.best_reward
+        else None,
+        "median_reward": round(result.median_reward, 3)
+        if result.median_reward == result.median_reward
+        else None,
+        f"case1_modes_at_{budget_reactions}rxn": modes_at_rxn,
+        f"case2_reactions_at_{budget_modes}modes": rxn_at_modes,
+        "stop_reason": result.stop_reason,
+    }
+
+
+def _write_curve(path: Path, result) -> None:
+    with open(path, "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(
+            [
+                "strategy",
+                "step",
+                "cum_reactions",
+                "cum_modes",
+                "cum_reward_gen_calls",
+                "reactions_added",
+                "reward",
+                "source_hub",
+            ]
+        )
+        for p in result.accepted:
+            w.writerow(
+                [
+                    result.strategy,
+                    p.step,
+                    p.cum_reactions,
+                    p.cum_modes,
+                    p.cum_reward_gen_calls,
+                    p.reactions_added,
+                    round(p.reward, 4),
+                    p.source_hub or "",
+                ]
+            )
+
+
+def _delivered_depth_mix(result, hub_depth: dict, budget_reactions: int) -> dict:
+    """Depth mix of the modes actually DELIVERED inside the reaction budget.
+
+    WHY THE DELIVERED SHARE AND NOT THE HUB COUNT. They differ by more than an order of magnitude
+    and only one of them is the claim. Measured on v1: 2 depth-0 hubs of 200 (1% of the hub set)
+    delivered 35 of 96 modes at R=100 -- **36.5% of the library**. Counting hubs understates the
+    reliance ~36x. Under `--pool all` the walked set holds 11 depth-0 hubs where the v1
+    reward-pre-filtered set held 2, so that 36.5% is a LOWER bound here, not an estimate.
+
+    WHY IT MATTERS AT ALL. A depth-0 hub is a bought building block. That is legitimate and priced
+    correctly -- a chemist buys it, and `shallow_couplings(depth=0, promoted=()) == 0` -- but
+    depth-0 catalogue picking is this metric's own named degenerate optimum. A library whose modes
+    mostly hang off bought scaffolds is doing something different from one that amortises built
+    intermediates, and the two must not be reported as the same result.
+
+    ``unmapped`` counts accepted picks whose source hub is not in the enumerated set -- for
+    best-candidate that is every pick (it walks no hubs), which is correct and expected.
+    """
+    hist: dict = {}
+    unmapped = 0
+    kept = 0
+    for p in result.accepted:
+        if p.cum_reactions > budget_reactions:
+            break  # accepted list is in acceptance order, so the budget is a prefix
+        kept += 1
+        hub = p.source_hub or ""
+        if hub in hub_depth:
+            d = hub_depth[hub]
+            hist[d] = hist.get(d, 0) + 1
+        else:
+            unmapped += 1
+    mapped = kept - unmapped
+    return {
+        "budget_reactions": budget_reactions,
+        "n_modes_at_budget": kept,
+        "n_from_hubs": mapped,
+        "n_unmapped": unmapped,
+        "modes_by_hub_depth": dict(sorted(hist.items())),
+        # The headline number. Denominator is modes that CAME from a hub, so best-candidate (which
+        # walks none) reports null rather than a misleading 0.0.
+        "depth0_mode_frac": round(hist.get(0, 0) / mapped, 4) if mapped else None,
+    }
+
+
+def _plot(path: Path, results, tag: str) -> None:
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception as exc:  # noqa: BLE001
+        print(f"[campaign] plot skipped ({exc})")
+        return
+    fig, ax = plt.subplots(figsize=(6, 4.2))
+    for res in results:
+        xs = [p.cum_reactions for p in res.accepted]
+        ys = [p.cum_modes for p in res.accepted]
+        ax.plot(xs, ys, marker=".", ms=3, lw=1.5, label=res.strategy)
+    ax.set_xlabel("cumulative reactions (true nested cost, count-once)")
+    ax.set_ylabel("cumulative modes (diverse hits)")
+    # Both axes are objectives (spend reactions, gain modes), so this gets ONE diagonal pointing at
+    # the desirable corner rather than two arrows the reader has to combine. Neither axis is inverted
+    # here, so cheaper-and-more-diverse resolves to up-left.
+    # The "SCENT" prefix here was hardcoded from when this driver only ever ran SCENT; the tag already
+    # names the generator, and keeping it labelled 12 of the 16 matrix cells wrongly ("SCENT
+    # fraggfn_drd2").
+    ax.set_title(f"{tag}: hub-batching vs best-candidate " + pareto_marker(x="lower", y="higher"))
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(path, dpi=130)
+    print(f"[campaign] wrote {path}")
+
+
+# The differentiated compute-time components, in display order (matches ComputeTimeBreakdown).
+COMPUTE_COMPONENTS = [
+    ("setup_s", "setup (load+freeze)", "#8a4fbf"),
+    ("hub_pick_s", "hub pick", "#577590"),
+    ("enumeration_s", "enumeration", "#2a9d8f"),
+    ("reward_gen_s", "reward-gen", "#b23a48"),
+    ("flow_extract_s", "flow-extract", "#e9a20c"),
+    # RGFN's enumeration is one opaque adapter call -> exact per-hub total, no observable split.
+    # Grey so it reads as "measured but unsplit" rather than as a named pipeline stage.
+    ("unattributed_s", "enum+reward+flow (unsplit)", "#9aa0a6"),
+    ("mode_selection_s", "mode-select", "#2a6f97"),
+]
+
+
+def plot_compute_time(path: Path, section: dict, tag: str) -> None:
+    """Stacked horizontal bar of the differentiated compute-time per strategy (Logs/039). Shows where
+    the wall-clock goes and how much longer hub-batching runs than best-candidate."""
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception as exc:  # noqa: BLE001
+        print(f"[campaign] compute-time plot skipped ({exc})")
+        return
+    strategies = [("hub_batching", "Hub Batching"), ("best_candidate", "Best Candidate")]
+    fig, ax = plt.subplots(figsize=(9.0, 3.2))
+    for row, (skey, slabel) in enumerate(strategies):
+        bd = section.get(skey, {})
+        left = 0.0
+        for comp, clabel, color in COMPUTE_COMPONENTS:
+            val = float(bd.get(comp, 0.0) or 0.0)
+            if val <= 0:
+                continue
+            ax.barh(
+                row,
+                val,
+                left=left,
+                color=color,
+                edgecolor="white",
+                height=0.62,
+                label=clabel if row == 0 else None,
+            )
+            left += val
+        ax.text(left, row, f" {left:.1f}s", va="center", ha="left", fontsize=9)
+    ax.set_yticks(range(len(strategies)))
+    ax.set_yticklabels([s[1] for s in strategies])
+    ax.set_xlabel("measured compute time (seconds)")
+    h2h = section.get("head_to_head", {})
+    extra = h2h.get("extra_compute_s")
+    ratio = h2h.get("ratio_hub_over_best")
+    sub = ""
+    if extra is not None:
+        sub = f"  (+{extra:.0f}s"
+        sub += f", {ratio:g}× vs best-candidate)" if ratio else ")"
+    # These are HORIZONTAL bars (barh), so the metric lives on the x-axis: axis="x" gives (<-),
+    # "shorter bars are better". A (v) here would have no vertical axis to refer to.
+    ax.set_title(
+        title_with_ideal(f"{tag}: measured compute time by component{sub}", "lower", axis="x"),
+        fontsize=10,
+    )
+    ax.legend(fontsize=7, ncol=6, loc="upper center", bbox_to_anchor=(0.5, -0.22), framealpha=0.9)
+    fig.tight_layout()
+    fig.savefig(path, dpi=130)
+    print(f"[campaign] wrote {path}")
+
+
+def write_compute_time_csv(path: Path, section: dict) -> None:
+    """One row per strategy: each component (s) + total_s + the counts, for the paper table.
+
+    Two columns exist purely so this file cannot be misread, because it twice has been:
+
+    ``component_split`` -- "full" = the three components were timed separately; "lumped" = the
+    generator could only measure a per-hub TOTAL, which lands in ``unattributed_s``. A lumped cell
+    therefore shows three 0.0 columns beside one very large bucket, which looks *exactly* like broken
+    attribution. It is not: the total is exact, only the breakdown is coarse. The marker was already
+    recorded in enum_timings.json and simply never propagated here, so every reader had to go and find
+    it -- and two did not, and filed the zeros as a defect instead.
+
+    ``n_hubs_enumerated`` -- the denominator for ``n_hubs_walked``. Time is attributed only over the
+    hubs a strategy actually WALKED, which is correct (you do not pay to enumerate a hub you never
+    used) but means this file's total is legitimately a FRACTION of the total in enum_timings.json:
+    measured on rgfn_6td3, 184,069 s here against 551,682 s there, because the walk touched 68 of 200
+    hubs. Without the denominator that gap reads as lost time.
+    """
+    comps = [c[0] for c in COMPUTE_COMPONENTS]
+    meta = section.get("enum_timings_meta") or {}
+    split = meta.get("component_split", "unknown")
+    n_avail = meta.get("n_hubs", "")
+    with open(path, "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(
+            [
+                "strategy",
+                *comps,
+                "total_s",
+                "n_hubs_walked",
+                "n_hubs_enumerated",
+                "n_children_scored",
+                "component_split",
+            ]
+        )
+        for skey in ("hub_batching", "best_candidate"):
+            bd = section.get(skey, {})
+            w.writerow(
+                [skey]
+                + [bd.get(c, 0.0) for c in comps]
+                + [
+                    bd.get("total_s", 0.0),
+                    bd.get("n_hubs_walked", 0),
+                    n_avail,
+                    bd.get("n_children_scored", 0),
+                    split,
+                ]
+            )
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--analysis-dir", required=True)
+    ap.add_argument(
+        "--enum-children", required=True, help="enum_children.json from the scent worker"
+    )
+    ap.add_argument(
+        "--snapshot",
+        default="",
+        help="SCENT fragments_<N>.json (promoted-fragment recipes) for the nested cost model. "
+        "Omit for generators with no dynamic library (RGFN/FragGFN/RxnFlow) -> the cost model "
+        "falls back to min_num_reactions (no promoted fragments to nest).",
+    )
+    ap.add_argument("--reward-threshold", type=float, required=True)
+    ap.add_argument(
+        "--similarity", type=float, default=0.5
+    )  # the campaign default cutoff (Logs/029)
+    ap.add_argument("--higher-is-better", type=lambda s: s.lower() != "false", default=True)
+    ap.add_argument("--budget-reactions", type=int, default=100, help="Case 1 reaction budget")
+    ap.add_argument("--budget-modes", type=int, default=300, help="Case 2 mode budget")
+    ap.add_argument(
+        "--child-policy",
+        default="reward",
+        choices=["reward", "free_frag"],
+        help="within-hub child selection for hub-batching (Logs/037); best-candidate is unaffected. "
+        "reward = naive hub-batching (no fragment-cost awareness); free_frag = keep only "
+        "already-available-fragment children (base + prebuilt stock).",
+    )
+    ap.add_argument(
+        "--prebuild-k",
+        type=int,
+        default=0,
+        help="pre-select-K (Logs/037): pre-synthesize the top-K fragments (by --rank-by), charge them "
+        "upfront, then run the child policy (use with free_frag).",
+    )
+    ap.add_argument(
+        "--rank-by",
+        default="build_score",
+        choices=list(RANK_METHODS),
+        help="pre-select ranking: build_score = (reward-bar)*fanout/build_reactions (default); "
+        "fanout / reward isolate one signal (ablations).",
+    )
+    ap.add_argument(
+        "--enum-timings",
+        default=None,
+        help="measured per-hub compute timings (Logs/039); default = enum_timings.json beside "
+        "--enum-children. Absent → compute-time section skipped.",
+    )
+    ap.add_argument(
+        "--hub-pick-timing",
+        default=None,
+        help="pick_hubs_timing.json (Stage-2 hub-pick wall-clock); default = beside --enum-children.",
+    )
+    ap.add_argument(
+        "--min-synth-depth",
+        type=int,
+        default=0,
+        help="DELIVERABLE SPECIFICATION (default 0 = off, every existing result unchanged). Keep only "
+        "molecules whose FULLY-NESTED reaction count from purchasable material is >= this. "
+        "0/1 admit everything a depth-0 (purchasable) hub can make in one step -- the metric's "
+        "degenerate optimum, where the competitor pipeline saturates at 1.00 reactions/mode. Raising "
+        "it asks the question that number can no longer answer: who wins when the library must "
+        "consist of molecules you cannot simply buy-and-couple? "
+        "PARITY WARNING: our depth counts reactions from the 418-block library, while the "
+        "competitor's counts reactions from ZINC's 17.4M. ZINC contains most of our blocks and far "
+        "more, so the SAME molecule scores a LOWER depth on their axis -- the constraint is harder "
+        "for them than for us at every threshold, and a crossover point read off the two is not yet "
+        "a like-for-like number. State this wherever the two are plotted together.",
+    )
+    ap.add_argument(
+        "--zinc-depth-cache",
+        default="",
+        help="JSONL from aiz_stock_ladder.py (stock=zinc): {smiles, solved, min_steps}. Supplies each "
+        "candidate's distance from the COMPETITOR's catalogue, so the deliverable spec can be stated "
+        "in one shared unit instead of two. Molecules absent from the cache pass through UNJUDGED -- "
+        "the driver routes whatever got selected and re-runs, so only the delivered set is ever "
+        "planned (346,762 candidates clear the sEH gate; routing them all is ~1,070 CPU-hours).",
+    )
+    ap.add_argument(
+        "--min-zinc-depth",
+        type=int,
+        default=0,
+        help="0 = off. Keep only molecules at least this many reactions from ZINC-purchasable "
+        "material. UNLIKE --min-synth-depth this is measured in the competitor's own units, which is "
+        "the whole point: our depth counts from 418 blocks, theirs from 17.4M compounds, and a "
+        "crossover read off two different origins is not a number.",
+    )
+    ap.add_argument(
+        "--unroutable",
+        default="drop",
+        choices=["drop", "deep"],
+        help="what to do with a molecule AiZynthFinder could not route against ZINC. `drop` "
+        "(default, the conservative reading) removes it -- but note it removes exactly the molecules "
+        "FURTHEST from the competitor's catalogue, i.e. the ones the spec is trying to select for, so "
+        "it understates us. `deep` counts them as passing every threshold -- the opposite bias. Run "
+        "both and report the pair; the truth is between them and neither alone is honest.",
+    )
+    ap.add_argument(
+        "--catalogue-distinct",
+        action="store_true",
+        help="CATALOGUE-DISTINCT MODES on our side, matching build_s3gfn_pools.py's flag of the same "
+        "name. Requires every candidate to be Tanimoto-< --similarity from every purchasable building "
+        "block (ZINCFrag + our 418), not just from the modes already accepted. ONE knob governs both "
+        "tests, so sweeping --similarity moves them together and the sweep is directly comparable to "
+        "the competitor's pools built the same way.",
+    )
+    ap.add_argument(
+        "--block-sim-cache",
+        default="",
+        help="--catalogue-distinct: JSONL {smiles, max_block_sim} from block_similarity_cache.py. "
+        "READ ONLY — this process has already imported the heavy diversity stack, and forking a "
+        "worker pool after that hangs (job bf5n600kr). Build the cache in a clean process first.",
+    )
+    ap.add_argument("--tag", required=True)
+    ap.add_argument(
+        "--out-dir",
+        default="",
+        help="results dir (default: <campaign>/results/<tag>); matrix16 routes cells to "
+        "experiments/lsd_hubs/matrix16/results/<tag>",
+    )
+    a = ap.parse_args()
+
+    adir = Path(a.analysis_dir)
+    cands, comps = _load_candidates(adir, a.higher_is_better)
+    enum_hubs = _load_enumerated_hubs(Path(a.enum_children), comps)
+    snapshot = json.load(open(a.snapshot)) if a.snapshot else {}
+    cost_table = load_cost_table_from_snapshot(snapshot)
+    print(
+        f"[campaign] {len(cands)} candidates, {len(enum_hubs)} enumerated hubs, "
+        f"{len(cost_table.promoted_set)} promoted fragments (recipes={bool(cost_table.recipes)})"
+    )
+
+    if a.min_synth_depth > 0:
+        # Both pools filtered on the SAME quantity so the two strategies stay comparable.
+        #   best-candidate: `Candidate.num_reactions` is already SCENT's fully-nested count.
+        #   hub-batching:   a child is one coupling past its hub, plus the nested build of any
+        #                   promoted fragment IT attaches -- `shared_build_cost` charges the closure
+        #                   once, the same term `shallow_couplings` subtracts. `hub.depth` is
+        #                   already fully nested, so it needs no adjustment.
+        n_c0, n_h0 = len(cands), sum(len(h.children) for h in enum_hubs)
+        cands = [c for c in cands if int(c.num_reactions) >= a.min_synth_depth]
+        kept_hubs = []
+        for h in enum_hubs:
+            keep = [
+                ch
+                for ch in h.children
+                if h.depth
+                + 1
+                + (
+                    cost_table.shared_build_cost(ch.added_promoted)[0]
+                    if (cost_table and ch.added_promoted)
+                    else 0
+                )
+                >= a.min_synth_depth
+            ]
+            if keep:  # a hub with no surviving child cannot contribute and must not be counted
+                kept_hubs.append(replace(h, children=keep))
+        n_h1 = sum(len(h.children) for h in kept_hubs)
+        print(
+            f"[campaign] min-synth-depth {a.min_synth_depth}: "
+            f"best-candidate pool {n_c0} -> {len(cands)}; "
+            f"hub children {n_h0} -> {n_h1} over {len(enum_hubs)} -> {len(kept_hubs)} hubs"
+        )
+        enum_hubs = kept_hubs
+        if not cands or not enum_hubs:
+            print("[campaign] POOL COLLAPSED at this depth — nothing left to select. Flag it.")
+
+    if a.min_zinc_depth > 0:
+        if not a.zinc_depth_cache:
+            raise SystemExit("[campaign] --min-zinc-depth requires --zinc-depth-cache")
+        zc = {}
+        # A MISSING cache is the correct round-1 state, not an error: nothing has been routed yet, so
+        # every candidate is unjudged and flows through. Failing here would make the driver's first
+        # round impossible and force a chicken-and-egg pre-route of the whole pool.
+        _cache_p = Path(a.zinc_depth_cache)
+        for line in _cache_p.open() if _cache_p.exists() else []:
+            line = line.strip()
+            if not line:
+                continue
+            r = json.loads(line)
+            if r.get("stock") != "zinc":
+                continue
+            zc[r["smiles"]] = r  # last write wins; a re-route supersedes an earlier one
+
+        def _zinc_ok(smi):
+            r = zc.get(smi)
+            if r is None:
+                return True  # UNJUDGED -> flows through, the driver routes it next round
+            if not r.get("solved"):
+                return a.unroutable == "deep"
+            return int(r.get("min_steps") or 0) >= a.min_zinc_depth
+
+        n_c0, n_h0 = len(cands), sum(len(h.children) for h in enum_hubs)
+        cands = [c for c in cands if _zinc_ok(c.smiles)]
+        kept_hubs = []
+        for h in enum_hubs:
+            keep = [ch for ch in h.children if _zinc_ok(ch.smiles)]
+            if keep:
+                kept_hubs.append(replace(h, children=keep))
+        n_h1 = sum(len(h.children) for h in kept_hubs)
+        judged = sum(1 for h in enum_hubs for ch in h.children if ch.smiles in zc)
+        print(
+            f"[campaign] min-zinc-depth {a.min_zinc_depth} (unroutable={a.unroutable}, "
+            f"cache={len(zc)} routed): best-candidate {n_c0} -> {len(cands)}; "
+            f"hub children {n_h0} -> {n_h1} ({judged} judged, {n_h0 - judged} unjudged)"
+        )
+        enum_hubs = kept_hubs
+
+    if a.catalogue_distinct:
+        if not a.block_sim_cache or not Path(a.block_sim_cache).exists():
+            raise SystemExit(
+                "[campaign] --catalogue-distinct needs --block-sim-cache built first:\n"
+                "  python block_similarity_cache.py --enum-children <json> --gate <g> --out <cache>"
+            )
+        _bs = {}
+        for _line in Path(a.block_sim_cache).open():
+            _line = _line.strip()
+            if _line:
+                _r = json.loads(_line)
+                _bs[_r["smiles"]] = _r["max_block_sim"]
+        # An UNCACHED molecule is dropped, not admitted. Admitting it by default would let through
+        # exactly the molecules the filter exists to exclude -- a candidate that IS a building block.
+        n_c0, n_h0 = len(cands), sum(len(h.children) for h in enum_hubs)
+        # Report the two reasons a child disappears SEPARATELY. The cache covers only gate-passing
+        # molecules, so "uncached" is overwhelmingly just below-gate children being pre-dropped
+        # (which the reward gate would reject anyway) -- lumping them in with block rejections made
+        # the filter look ~2000x more aggressive than it is.
+        n_unc = sum(1 for h in enum_hubs for ch in h.children if ch.smiles not in _bs)
+        n_gated = n_h0 - n_unc
+        cands = [c for c in cands if _bs.get(c.smiles, 1.0) < a.similarity]
+        kept_hubs = []
+        for h in enum_hubs:
+            keep = [ch for ch in h.children if _bs.get(ch.smiles, 1.0) < a.similarity]
+            if keep:
+                kept_hubs.append(replace(h, children=keep))
+        n_h1 = sum(len(h.children) for h in kept_hubs)
+        print(
+            f"[campaign] catalogue-distinct (tau={a.similarity}, cache={len(_bs)}): "
+            f"best-candidate {n_c0} -> {len(cands)}; hub children {n_h0} total, {n_gated} above "
+            f"gate, {n_h1} also block-distinct (block test removed {n_gated - n_h1} = "
+            f"{(n_gated - n_h1) / max(n_gated, 1):.2%} of gate-passing children; {n_unc} below-gate "
+            f"pre-dropped) over {len(enum_hubs)} -> {len(kept_hubs)} hubs"
+        )
+        enum_hubs = kept_hubs
+        if not cands or not enum_hubs:
+            print("[campaign] POOL COLLAPSED — nothing clears the block test. Flag it.")
+
+    child_policy = make_child_policy(a.child_policy)
+
+    # Pre-select-K (Logs/037): synthesize the top-K fragments by --rank-by up front, charge once.
+    prebuilt = None
+    if a.prebuild_k > 0:
+        ranked = rank_fragments(
+            enum_hubs,
+            cost_table,
+            a.reward_threshold,
+            method=a.rank_by,
+            higher_is_better=a.higher_is_better,
+        )
+        prebuilt = {f for f, _ in ranked[: a.prebuild_k]}
+        upfront = cost_table.shared_build_cost(prebuilt)[0] if cost_table else 0
+        print(
+            f"[campaign] pre-select-K: {len(prebuilt)} fragments pre-synthesized "
+            f"(top {a.rank_by}), {upfront} reactions charged upfront"
+        )
+
+    common = dict(
+        target=a.tag,
+        reward_threshold=a.reward_threshold,
+        similarity=a.similarity,
+        higher_is_better=a.higher_is_better,
+    )
+    # Run to the mode budget (greedy diversity is O(modes^2); Case 1's reaction point is reached
+    # well before Case 2's mode budget, so this single curve covers both readouts).
+    curve_budget = ("modes", a.budget_modes)
+    # Time each run live (selection wall-clock) for the compute-time accounting (Logs/039).
+    bc, bc_sel = run_timed(
+        build_strategy("best_candidate", cands, cost_table, comps, **common), curve_budget
+    )
+    hb, hb_sel = run_timed(
+        build_strategy(
+            "hub_batching",
+            enum_hubs,
+            cost_table,
+            comps,
+            child_policy=child_policy,
+            prebuilt_fragments=prebuilt,
+            **common,
+        ),
+        curve_budget,
+    )
+    enum_timings = load_enum_timings(a.enum_children, a.enum_timings)
+    hub_pick_s = load_hub_pick_s(a.enum_children, a.hub_pick_timing)
+    ct_section = compute_time_section(hb, hb_sel, bc, bc_sel, enum_timings, hub_pick_s)
+    if bc.total_reactions < a.budget_reactions or hb.total_reactions < a.budget_reactions:
+        print(
+            f"[campaign] WARNING a curve stopped below the Case-1 reaction budget "
+            f"({a.budget_reactions}); raise --budget-modes for a valid Case-1 readout."
+        )
+
+    # -- depth provenance -----------------------------------------------------------------------
+    # hub_key -> depth, from the enumerated hubs themselves (authoritative: it is what the walk
+    # actually charged against), plus whatever pick_hubs recorded about the band it applied. Both
+    # are best-effort: an older enum dir has no timing sidecar, and the summary should still be
+    # written rather than the run dying at the last step.
+    _hub_depth = {h.hub_key: h.depth for h in enum_hubs}
+    _hub_pick_meta: dict = {}
+    # ONE resolver, shared with the compute-time section -- see resolve_hub_pick_timing.
+    _hp_path = resolve_hub_pick_timing(a.enum_children, a.hub_pick_timing)
+    _depth_provenance = "ok"
+    if _hp_path.is_file():
+        try:
+            _hub_pick_meta = json.loads(_hp_path.read_text())
+        except Exception as _e:  # noqa: BLE001
+            _depth_provenance = f"UNREADABLE: {_hp_path} ({_e})"
+    else:
+        _depth_provenance = f"MISSING: {_hp_path}"
+
+    # SAY SO, LOUDLY. benchmark_v2's README lists the walked hubs' depth distribution and the
+    # depth-0 mode share as a REQUIRED per-cell output, so a cell that finishes without them has not
+    # finished. Silent nulls made a run that was missing a deliverable look identical to one that
+    # was not -- which is how this survived its first real execution.
+    #
+    # It WARNS rather than aborting: by this point the campaign has already done all its work, and a
+    # validator that kills a good multi-hour job gets switched off within a week (the rule _routes.py
+    # states). The hard gate belongs in verify_cell, where re-running costs nothing. The marker below
+    # is what that gate reads, so the failure is machine-detectable rather than a log line.
+    if _depth_provenance != "ok":
+        print(
+            "\n[campaign] *** DEPTH PROVENANCE MISSING ***\n"
+            f"[campaign]   looked for: {_hp_path}\n"
+            "[campaign]   hub_pool / min_hub_depth / max_hub_depth / walked_depth_hist will be NULL.\n"
+            "[campaign]   benchmark_v2 requires the walked-hub depth distribution per cell, so this\n"
+            "[campaign]   cell is INCOMPLETE even though the campaign itself succeeded.\n"
+            "[campaign]   Fix: pass --hub-pick-timing <path>, or run pick_hubs so its sidecar lands\n"
+            "[campaign]   beside enum_children.json. summary.json records depth_provenance for the\n"
+            "[campaign]   verifier.\n",
+            flush=True,
+        )
+
+    out = Path(a.out_dir) if a.out_dir else HERE / "results" / a.tag  # dir carries the tag
+    out.mkdir(parents=True, exist_ok=True)
+    _write_curve(out / "curve_best_candidate.csv", bc)
+    _write_curve(out / "curve_hub_batching.csv", hb)
+    summary = {
+        "tag": a.tag,
+        "reward_threshold": a.reward_threshold,
+        "similarity": a.similarity,
+        "budget_reactions": a.budget_reactions,
+        "budget_modes": a.budget_modes,
+        "child_policy": a.child_policy,
+        "prebuild_k": a.prebuild_k,
+        "rank_by": a.rank_by if a.prebuild_k > 0 else None,
+        # -- identity of the run, so an arm is distinguishable from its CONTENTS and not just its
+        # directory name. A depth-filtered sensitivity arm and the default arm were otherwise
+        # indistinguishable once their paths were lost.
+        "min_synth_depth": a.min_synth_depth,
+        # "ok" | "MISSING: <path>" | "UNREADABLE: <path> (...)". Machine-readable so verify_cell can
+        # reject a cell whose required depth output is absent, instead of the nulls below reading as
+        # a legitimately empty answer.
+        "depth_provenance": _depth_provenance,
+        "hub_pool": _hub_pick_meta.get("pool"),
+        "min_hub_depth": _hub_pick_meta.get("min_hub_depth"),
+        "max_hub_depth": _hub_pick_meta.get("max_hub_depth"),
+        "walked_depth_hist": _hub_pick_meta.get("walked_depth_hist"),
+        # SCENT's promoted-library size is a fact about the run, not a constant: it is 0 at arm A
+        # (the first promotion needs 64,000 oracle calls against arm A's 10,000), and in v1 it also
+        # varied with REQUEUE TIMING, because the DynamicLibrary is not in the checkpoint and every
+        # requeue restarts it empty. Reporting it per cell is what makes both visible instead of
+        # silently averaged.
+        "n_promoted_fragments": len(cost_table.promoted_set) if cost_table else 0,
+        "best_candidate": _readouts(bc, a.budget_reactions, a.budget_modes),
+        "hub_batching": _readouts(hb, a.budget_reactions, a.budget_modes),
+        "depth_mix": {
+            "best_candidate": _delivered_depth_mix(bc, _hub_depth, a.budget_reactions),
+            "hub_batching": _delivered_depth_mix(hb, _hub_depth, a.budget_reactions),
+        },
+        "compute_time": ct_section,  # None if no measured enum_timings.json found
+    }
+    (out / "summary.json").write_text(json.dumps(summary, indent=2))
+    # The accepted SMILES, in acceptance order. The curve CSV records only counts, so
+    # any downstream analysis of WHICH molecules were chosen (similarity distributions,
+    # scaffold audits, chemistry galleries) previously had to re-derive them -- and the
+    # last such dump was written to a temp directory and lost with it.
+    for name, res in (("best_candidate", bc), ("hub_batching", hb)):
+        (out / f"selection_{name}.json").write_text(
+            json.dumps(
+                {
+                    "tag": a.tag,
+                    "strategy": name,
+                    "reward_threshold": a.reward_threshold,
+                    "similarity": a.similarity,
+                    "child_policy": a.child_policy,
+                    "prebuild_k": a.prebuild_k,
+                    "budget_reactions": a.budget_reactions,
+                    "n_accepted": len(res.accepted),
+                    "accepted_smiles": [p.smiles for p in res.accepted],
+                    "accepted_rewards": [p.reward for p in res.accepted],
+                },
+                indent=2,
+            )
+        )
+    _plot(out / "curve.png", [bc, hb], a.tag)
+    if ct_section is not None:
+        write_compute_time_csv(out / "compute_time.csv", ct_section)
+        plot_compute_time(out / "compute_time.png", ct_section, a.tag)
+        h2h = ct_section["head_to_head"]
+        print(
+            f"[campaign] compute-time: hub-batching {h2h['hub_total_s']:.1f}s vs best-candidate "
+            f"{h2h['best_total_s']:.1f}s → +{h2h['extra_compute_s']:.1f}s extra "
+            f"({h2h['ratio_hub_over_best']}× )"
+        )
+    else:
+        print("[campaign] compute-time: no enum_timings.json found → section skipped")
+    print(json.dumps(summary, indent=2))
+    print(f"\n[campaign] wrote summary.json + curve_*.csv to {out}")
+
+
+if __name__ == "__main__":
+    main()

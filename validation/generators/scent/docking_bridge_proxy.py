@@ -36,6 +36,22 @@ from rgfn.gfns.reaction_gfn.api.reaction_api import (
 from rgfn.shared.proxies.cached_proxy import CachedProxyBase
 
 
+def _load_dock_server_client(repo_root):
+    """Path-import the stdlib ``DockingServerClient`` from ``glue/oracles/docking_server.py``
+    and return ``client_from_env()`` (client if ``RGFN_DOCK_SOCKET`` set, else ``None``). Loads
+    the file directly — its client half is stdlib-only, so it never imports the glue package
+    (nor SCENT's own ``rgfn`` fork). Campaign Logs/030."""
+    import importlib.util
+
+    p = Path(repo_root) / "glue" / "oracles" / "docking_server.py"
+    if not p.exists():
+        return None
+    spec = importlib.util.spec_from_file_location("_rgfn_dockserver", str(p))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.client_from_env()
+
+
 @gin.configurable()
 class DockingBridgeProxy(CachedProxyBase[ReactionState]):
     """Dock each batch via the rgfn-env ``score_batch.py`` bridge; expose a GFN reward."""
@@ -46,6 +62,7 @@ class DockingBridgeProxy(CachedProxyBase[ReactionState]):
         repo_root: str,
         norm: float = 1.0,
         failed_score: float = 0.0,
+        higher_is_better: bool = False,
         conda_env: str = "rgfn",
         oracle_args: Optional[Dict] = None,
         workdir: Optional[str] = None,
@@ -55,11 +72,37 @@ class DockingBridgeProxy(CachedProxyBase[ReactionState]):
         self.repo_root = Path(repo_root)
         self.norm = float(norm)
         self.failed_score = float(failed_score)
+        # RAW ORIENTATION -- see the twin in validation/generators/rxnflow/fixed_reward.py. The
+        # transform below negates the raw score, which is right for dvina and Vina and catastrophic
+        # for 6TD3-B: its reward is gnina's cnn_vs, HIGHER is better, roughly [0, 9], so an
+        # unconditional `max(-raw/norm, 0)` maps every molecule to exactly 0.0 and trains the policy
+        # against a flat reward without raising anything. Default False keeps every existing config
+        # bit-identical; a higher-is-better target must SAY so.
+        self.sign = 1.0 if higher_is_better else -1.0
         self.conda_env = conda_env
         self.oracle_args = dict(oracle_args or {})
         self.workdir = Path(workdir) if workdir else (self.repo_root / "reward_bridge_scent")
         self.workdir.mkdir(parents=True, exist_ok=True)
         self._step = 0
+        # Persistent docking server (campaign Logs/030): dock over RGFN_DOCK_SOCKET if set, else
+        # per-step score_batch.py spawn. Client path-imported (stdlib) — no glue import (SCENT's
+        # package is itself named `rgfn`, so importing the glue package here is doubly forbidden).
+        self._client = _load_dock_server_client(self.repo_root)
+        if self._client is not None:
+            if not self._client.wait_until_ready(timeout=900):
+                raise RuntimeError(
+                    "RGFN_DOCK_SOCKET is set but the docking server never became ready "
+                    f"({self._client.socket_path})."
+                )
+            print(
+                f"[dock-bridge-scent] persistent docking server @ {self._client.socket_path}",
+                flush=True,
+            )
+        else:
+            print(
+                "[dock-bridge-scent] no RGFN_DOCK_SOCKET -> per-step score_batch.py subprocess",
+                flush=True,
+            )
         # early-terminal (invalid) -> worst reward; dict form so all cache entries match.
         self.cache = {
             ReactionStateEarlyTerminal(None): {
@@ -72,6 +115,18 @@ class DockingBridgeProxy(CachedProxyBase[ReactionState]):
     def is_non_negative(self) -> bool:
         return True
 
+    # ONE NAME, TWO MEANINGS -- THE SHADOWING BELOW IS AVOIDED DELIBERATELY.
+    # This attribute describes the OUTPUT: the recorded value is clip(sign*raw/norm), which is
+    # higher-is-better for every target, always True. The __init__ argument of the SAME NAME
+    # describes the RAW INPUT, and is False for dvina/Vina. They are not the same fact and they
+    # disagree on every existing docking config.
+    #
+    # So the constructor argument is stored as `self.sign`, NOT as `self.higher_is_better`. The
+    # obvious tidy-up -- assigning it to the matching name -- would overwrite this attribute with
+    # the raw orientation. ScentFixedRewardRun.run reads it
+    # (validation/generators/scent/fixed_reward.py:103) and sorts top-k with
+    # `reverse=higher_is_better` at line 188, so the flip would make every lower-is-better cell
+    # select the WORST 100 molecules instead of the best, silently. Do not "fix" the naming.
     @property
     def higher_is_better(self) -> bool:
         return True  # the recorded VALUE (clip(-raw/norm)) is higher-is-better
@@ -95,7 +150,9 @@ class DockingBridgeProxy(CachedProxyBase[ReactionState]):
             if raw != raw:  # nan
                 out.append({"value": self.failed_score, "raw_score": float("nan")})
             else:
-                out.append({"value": max(-float(raw) / self.norm, 0.0), "raw_score": float(raw)})
+                out.append(
+                    {"value": max(self.sign * float(raw) / self.norm, 0.0), "raw_score": float(raw)}
+                )
         return out
 
     def _dock(self, smiles: List[str]) -> List[float]:
@@ -103,19 +160,23 @@ class DockingBridgeProxy(CachedProxyBase[ReactionState]):
         if not smiles:
             return []
         self._step += 1
-        smi_path = self.workdir / f"step_{self._step:05d}.smi"
-        lbl_path = self.workdir / f"step_{self._step:05d}_labels.csv"
-        smi_path.write_text("\n".join(smiles) + "\n")
-        cmd = [
-            "conda", "run", "--no-capture-output", "-n", self.conda_env,
-            "python", "scripts/score_batch.py",
-            "--oracle", self.oracle, "--in", str(smi_path), "--out", str(lbl_path),
-        ]  # fmt: skip
-        for k, v in self.oracle_args.items():
-            cmd += ["--oracle-arg", f"{k}={v}"]
-        self._free_gpu_cache()  # let the bridge's QuickVina2-GPU allocate (Logs/014)
-        subprocess.run(cmd, check=True, cwd=str(self.repo_root))
-        labels = self._read_labels(lbl_path, smiles)
+        self._free_gpu_cache()  # free this proc's cache so the docking GPU can allocate (Logs/014)
+        if self._client is not None:
+            lab_raw, _ = self._client.dock(smiles)
+            labels = [float(x) if x is not None else float("nan") for x in lab_raw]
+        else:
+            smi_path = self.workdir / f"step_{self._step:05d}.smi"
+            lbl_path = self.workdir / f"step_{self._step:05d}_labels.csv"
+            smi_path.write_text("\n".join(smiles) + "\n")
+            cmd = [
+                "conda", "run", "--no-capture-output", "-n", self.conda_env,
+                "python", "scripts/score_batch.py",
+                "--oracle", self.oracle, "--in", str(smi_path), "--out", str(lbl_path),
+            ]  # fmt: skip
+            for k, v in self.oracle_args.items():
+                cmd += ["--oracle-arg", f"{k}={v}"]
+            subprocess.run(cmd, check=True, cwd=str(self.repo_root))
+            labels = self._read_labels(lbl_path, smiles)
         if smiles and all(lab != lab for lab in labels):
             print(
                 f"[dock-bridge-scent] WARNING step {self._step}: all {len(smiles)} docks "

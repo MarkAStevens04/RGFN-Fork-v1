@@ -78,7 +78,7 @@ class DockingSEHOracle(GlueOracle):
         receptor_name: str = "sEH",
         vina_mode: str = "QuickVina2",
         exhaustiveness: int = 8000,
-        docking_batch_size: int = 25,
+        docking_batch_size: int = 200,  # exp 036: one process/step -> 3.3x faster ClpP, batch-invariant scores (Logs/036)
         n_conformers: int = 1,
         gnina: bool = False,
         conformer_attempts: int = 20,
@@ -98,7 +98,17 @@ class DockingSEHOracle(GlueOracle):
             vina_mode: Vina-GPU implementation (``QuickVina2`` default).
             exhaustiveness: QuickVina ``thread`` count (upstream default 8000; min
                 1000). Higher = more thorough but slower.
-            docking_batch_size: SMILES per QuickVina2-GPU invocation.
+            docking_batch_size: SMILES per QuickVina2-GPU invocation. Default **200** so a whole
+                training step docks in ONE process (>= the per-step sample count). Exp 036
+                (Logs/036) measured this is **3.3x faster** than chunking at 25 (1.31 -> 0.40
+                s/mol on ClpP), at NO extra VRAM (~20 GB either way) and with **byte-identical
+                scores** (batch-invariant — ligands dock sequentially inside the process). Two
+                concurrent QV2 processes give nothing (exp 036 Part B), so batch size is the only
+                free docking lever. History: the seed-42 leg of the 16-cell campaign (Logs/030)
+                ran at 25 to avoid a mid-campaign config split; the extra seeds (43/44, this
+                orchestrated re-run) and all future runs use 200 — scores stay comparable across
+                seeds by batch-invariance. The 6TD3 *differential* oracle ignores this arg (it
+                already docks the whole step in one process). See Logs/036.
             n_conformers: conformers generated/docked per molecule; the best score
                 is kept (upstream behaviour). 1 = fastest.
             gnina: rescore poses with gnina (upstream option; off by default).

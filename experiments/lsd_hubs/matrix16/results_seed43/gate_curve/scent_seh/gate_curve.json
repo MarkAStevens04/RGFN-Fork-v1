@@ -1,0 +1,50 @@
+{
+  "cell": "scent_seh",
+  "child_policy": "free_frag",
+  "prebuild_k": 20,
+  "similarity": 0.5,
+  "budget_modes": 300,
+  "higher_is_better": true,
+  "n_enumerated_hubs": 200,
+  "points": [
+    {
+      "gate": 5.0,
+      "best_modes": 300,
+      "best_rxn_per_mode": 3.183,
+      "best_stop_reason": "modes",
+      "hub_modes": 300,
+      "hub_rxn_per_mode": 1.087,
+      "hub_stop_reason": "modes",
+      "edge": 2.928,
+      "hub_hubs_used": 6,
+      "hub_reward_gen_calls": 33609,
+      "pool_limited": false
+    },
+    {
+      "gate": 6.0,
+      "best_modes": 300,
+      "best_rxn_per_mode": 3.183,
+      "best_stop_reason": "modes",
+      "hub_modes": 300,
+      "hub_rxn_per_mode": 1.103,
+      "hub_stop_reason": "modes",
+      "edge": 2.886,
+      "hub_hubs_used": 14,
+      "hub_reward_gen_calls": 63840,
+      "pool_limited": false
+    },
+    {
+      "gate": 7.0,
+      "best_modes": 300,
+      "best_rxn_per_mode": 3.183,
+      "best_stop_reason": "modes",
+      "hub_modes": 300,
+      "hub_rxn_per_mode": 1.217,
+      "hub_stop_reason": "modes",
+      "edge": 2.615,
+      "hub_hubs_used": 42,
+      "hub_reward_gen_calls": 190976,
+      "pool_limited": false
+    }
+  ]
+}

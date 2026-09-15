@@ -1,0 +1,79 @@
+# Fixed-reward (single-shot) RGFN on 6TD3-B — gnina CNN_VS, the CDK12-DDB1 training reward.
+#
+# Same protein, same docking, same poses as fixed_reward_6td3.gin; DIFFERENT reward. 6TD3's
+# Vina Tier2-Tier1 differential is retained unchanged for reproducibility but is SUPERSEDED for
+# training (Logs/072): the generator games it — its candidates clear the differential's own gate
+# 78% of the time against 67% for real glues, while clearing a CNN gate 0 times out of 400.
+# 6TD3-B rewards gnina's CNN_VS = CNNaffinity x CNNscore on the selected Tier-2 pose instead.
+#
+# ⚠ USE THE PRODUCT, NEVER THE AFFINITY HEAD ALONE. `cnnaff_t2` on its own is BLIND to exactly
+# the failure this reward exists to fix: AUROC 0.521 — a coin flip — separating real glues from
+# our own reward-optimised candidates (gnina's affinity head is hinge-trained on high-RMSD poses
+# and penalised only for over-predicting, so an affinity read off a low-confidence pose is weakly
+# supervised). `cnn_vs` gives 0.917 vs property-matched decoys and 0.946 vs our candidates. A
+# config that reached for the affinity term because it sounds like the physical quantity would
+# produce a model optimising a coin flip — and the reward would NOT be flat, so it would look
+# like it was working. The oracle's `score()` returns `cnn_vs`; do not repoint it.
+#
+# ORIENTATION IS NOT SET HERE, ON PURPOSE. cnn_vs is HIGHER-is-better where dvina/Vina are lower.
+# OracleRewardProxy resolves the sign from the oracle object itself
+# (`_sign = +1 if oracle.higher_is_better else -1`, oracle_reward_proxy.py:82) and
+# Docking6TD3BGpuOracle declares `higher_is_better = True`. So there is exactly one source of
+# truth and no orientation literal in this file to drift out of sync with it.
+#
+# BETA / NORM UNCHANGED FROM THE 6TD3 TEMPLATE — a decision, not a copied line. The reward the
+# GFN sees spans roughly [0, 9] for cnn_vs against roughly [0, 8] for clip(-dvina): a ~12%
+# difference in range, which does not justify re-tuning an inverse temperature that was matched
+# to the RGFN docking benchmark. norm = 1.0 is "no rescaling" in both. Keeping beta = 4 is also
+# what makes 6TD3-B numbers directly comparable to the 6TD3 and ClpP cells.
+#
+# Run:  python scripts/fixed_reward.py --cfg configs/glue/fixed_reward_6td3b.gin --seed 42
+# (Balam compute node only: needs a GPU + QuickVina2-GPU + gnina + the 6TD3 receptors.)
+
+include 'configs/rgfn_base.gin'
+include 'configs/envs/reaction_docking.gin'   # docking-capable reaction env (max_num_reactions=4)
+
+# --- Reward generator: the 6TD3-B CNN_VS oracle wrapped as a GFN reward ------------------
+# Identical wiring to fixed_reward_6td3.gin except the oracle class. Tier 1 is still docked
+# (a ~4 s fixed gnina model load, 2.3% of a 400-molecule batch) so every run emits BOTH
+# oracles' signals and a 6TD3 / 6TD3-B pair of the same molecules gives the same poses.
+proxy/gin.singleton.constructor = @OracleRewardProxy
+train_proxy = @proxy/gin.singleton()
+valid_proxy = %train_proxy
+OracleRewardProxy.oracle = @Docking6TD3BGpuOracle()
+OracleRewardProxy.norm = 1.0
+OracleRewardProxy.free_gpu_cache = True
+
+beta = 4   # see BETA / NORM note above
+
+# --- Shared SMALL library (glue_standard_v1) via GlueReactionDataFactory -----------------
+# Overrides the docking env's @ReactionDataFactory singleton so RGFN builds from the SAME
+# 418-fragment / 112-template standard set as RxnFlow / SCENT (docs/CHEM_LIBRARY_FORMAT.md).
+data_factory/gin.singleton.constructor = @GlueReactionDataFactory
+GlueReactionDataFactory.library_dir = 'data/libraries/glue_standard_v1'
+GlueReactionDataFactory.docking = True
+
+# Docking-in-the-loop is ~0.8-1.0 s/mol; cap iterations so the run fits the SLURM walltime
+# (~9-11h at 400 iters x ~120 mol/iter; benchmark 69691). Matches the sEH-docking cap.
+Trainer.n_iterations = 400
+
+# Lean live metrics (metric audit, Logs/020): keep only cheap per-step reductions; QED /
+# scaffolds / modes / diversity are recomputed post-hoc by glue/metrics/dataset_metrics.py.
+train_metrics = [@StandardGFNMetrics(), @FractionEarlyTerminate(), @UniqueMolecules()]
+
+# --- Fixed-reward pipeline wiring (Trainer + reward share ONE proxy instance) ------------
+trainer/gin.singleton.constructor = @Trainer
+trainer = @trainer/gin.singleton()
+FixedRewardPipeline.trainer = %trainer
+FixedRewardPipeline.reward_generator = %train_proxy
+FixedRewardPipeline.n_samples = 200
+FixedRewardPipeline.sample_oversample = 6.0
+FixedRewardPipeline.top_k = 100
+FixedRewardPipeline.system = '6td3b'
+FixedRewardPipeline.generator_name = 'rgfn'
+# '6td3b' matches BOTH matrix16/targets.py (Target.reward_name = "6td3b", gate 6.718) and the
+# worker vocabularies (_DOCKING_REWARDS / _HIGHER_IS_BETTER_BY_REWARD key on "6td3b"). Note the
+# 6td3 sibling writes '6td3_diff' where targets.py says "6td3" — a pre-existing mismatch that is
+# deliberately NOT copied forward here.
+FixedRewardPipeline.reward_name = '6td3b'
+FixedRewardPipeline.score_units = 'cnn_vs = CNNaffinity x CNNscore (higher is better; raw cnn_vs in raw_score column)'
