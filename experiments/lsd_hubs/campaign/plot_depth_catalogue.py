@@ -56,14 +56,14 @@ def _read_ladder():
 
 
 def _read_zinc_axis():
-    """{(seed, policy): {depth: modes}} — the LAST round of each driver run is its result."""
+    """{(target, seed, policy): {depth: (modes, unjudged)}} — the LAST round of a run is its result."""
     out = defaultdict(dict)
     conv = {}
-    for d in sorted(RES.glob("zinc_axis_seed*_d*_*")):
-        m = re.search(r"zinc_axis_seed(\d+)_d(\d)_(drop|deep)$", d.name)
+    for d in sorted(RES.glob("zinc_axis_*_d*_*")):
+        m = re.search(r"zinc_axis_(?:(\w+?)_)?seed(\d+)_d(\d)_(drop|deep)$", d.name)
         if not m:
             continue
-        seed, depth, pol = int(m.group(1)), int(m.group(2)), m.group(3)
+        tgt, seed, depth, pol = (m.group(1) or "seh"), int(m.group(2)), int(m.group(3)), m.group(4)
         dr = d / "driver_rounds.json"
         if not dr.exists():
             continue
@@ -73,25 +73,155 @@ def _read_zinc_axis():
         if not sm:
             continue
         s = json.loads((sm[-1] / "summary.json").read_text())
-        out[(seed, pol)][depth] = s["hub_batching"]["case1_modes_at_100rxn"]
-        conv[(seed, pol, depth)] = j["rounds"][-1]["n_unjudged"] == 0
+        out[(tgt, seed, pol)][depth] = s["hub_batching"]["case1_modes_at_100rxn"]
+        conv[(tgt, seed, pol, depth)] = j["rounds"][-1]["n_unjudged"] == 0
     return out, conv
 
 
+# GENERATIONS OF THE SAME CELL SIT SIDE BY SIDE ON DISK, and the newest is not the one a plain
+# sorted() glob picks. `s3gfn_seh_seed42_{CLEAN,UNION,big_pruned_N239,stage2_pruned_N500}_depth1_select`
+# all match one glob and all key on (seh, 42, 1); sorted() takes `stage2...` last because lowercase
+# sorts after uppercase, so the figure silently drew the OLDEST pool. Precedence has to be stated,
+# not inferred from a name, and the chosen generation has to be printed -- a wrong pick here is
+# invisible in the output, which is exactly how the _big pools were published and then retracted.
+_GEN_ORDER = ("CLEAN", "UNION", "stage2fix", "stage2", "big", "pruned")
+
+
+def _gen_rank(tag: str) -> tuple[int, str]:
+    """(rank, generation-name) for a cell's tag segment; higher rank wins."""
+    for i, g in enumerate(reversed(_GEN_ORDER), start=1):
+        if g in tag:
+            return i, g
+    return 0, tag or "?"
+
+
+def _pick_generation(cands: dict, what: str):
+    """cands: {key: {(rank, gen): value}} -> {key: value}, printing what was chosen and dropped."""
+    out, chosen = {}, defaultdict(set)
+    for key, by_gen in cands.items():
+        rank, gen = max(by_gen)
+        out[key] = by_gen[(rank, gen)]
+        chosen[key[:-1] if len(key) > 1 else key].add(gen)
+        dropped = sorted(g for r, g in by_gen if g != gen)
+        if dropped:
+            print(f"[plot] {what} {key}: using {gen}, superseding {', '.join(dropped)}")
+    mixed = {k: sorted(v) for k, v in chosen.items() if len(v) > 1}
+    for k, v in mixed.items():
+        print(f"[plot] WARNING {what} {k} mixes generations {v} across depths")
+    per_target = defaultdict(set)
+    for k, v in chosen.items():
+        per_target[k[0]].update(v)
+    for t, v in sorted(per_target.items()):
+        if len(v) > 1:
+            print(
+                f"[plot] WARNING {what}: target {t} mixes generations {sorted(v)} ACROSS SEEDS -- "
+                f"seeds are not comparable to each other until the laggard re-runs"
+            )
+    return out
+
+
 def _read_competitor_depth():
-    """{seed: {depth: (modes, capped)}} from the depth-pruned stage-2 cells."""
-    out = defaultdict(dict)
-    for d in sorted(RES.glob("s3gfn_seh_seed*_stage2_pruned_N500_depth*_select")):
-        m = re.search(r"seed(\d+)_stage2_pruned_N500_depth(\d)_select$", d.name)
+    """{(target, seed): {depth: (modes, capped, used, budget)}} from the depth-pruned cells."""
+    cands = defaultdict(dict)
+    for d in sorted(RES.glob("s3gfn_*_depth*_select")):
+        m = re.search(r"s3gfn_(\w+?)_seed(\d+)_(.*)_depth(\d)_select$", d.name)
         f = d / "select_frontier.csv"
         if not m or not f.exists():
             continue
         for r in csv.DictReader(f.open()):
             if r["budget_rxns"] == "100":
-                out[int(m.group(1))][int(m.group(2))] = (
+                key = (m.group(1), int(m.group(2)), int(m.group(4)))
+                # cost_kept_rxns, not used_rxns: outside the budget-binding regime used_rxns inflates
+                # and the gap between the two IS the exhaustion detector (CLAUDE.md, reaction-budget rule).
+                cands[key][_gen_rank(m.group(3))] = (
                     int(r["n_modes_kept"]),
                     r["time_capped"] == "True",
+                    float(r["cost_kept_rxns"]),
+                    float(r["budget_rxns"]),
                 )
+    flat = _pick_generation(cands, "fig2")
+    out = defaultdict(dict)
+    for (tgt, seed, dep), v in flat.items():
+        out[(tgt, seed)][dep] = v
+    return out
+
+
+def _read_budget(target):
+    """({seed: {R: modes}}, {seed: {R: (modes, used, budget, capped)}}) for one target.
+
+    Our side is read off the campaign curve, and ONLY at budgets the curve actually reaches -- past
+    its end the campaign stopped for its own mode budget, and reading that as a plateau would
+    truncate US rather than them.
+    """
+    ours, theirs = {}, {}
+    # sEH was measured in TWO passes: R=50-500 before the scripts were target-parameterised (dirs
+    # without a target segment) and R=600-2000 after (dirs with one). Both are the same cells at the
+    # same gate, so the globs are merged -- reading only the newer pattern silently drops the entire
+    # low-budget half of the curve, which is exactly where the crossover lives.
+    pats_ours = [f"budget_scale_ours_{target}_seed*"]
+    # The clean-pool re-runs write `budget_scale_s3gfn_<target>CLEAN_seed<N>` with NO underscore
+    # before the generation, so `..._{target}_seed*` does not match them at all -- the fixed pools
+    # would have been omitted from fig4 in silence rather than merely mis-ranked.
+    pats_th = [f"budget_scale_s3gfn_{target}_seed*", f"budget_scale_s3gfn_{target}[A-Z]*_seed*"]
+    if target == "seh":
+        pats_ours.append("budget_scale_ours_seed*")
+        pats_th.append("budget_scale_s3gfn_seed*")
+    for d in sorted(x for pat in pats_ours for x in RES.glob(pat)):
+        m = re.search(r"seed(\d+)$", d.name)
+        f = d / "curve_hub_batching.csv"
+        if not m or not f.exists():
+            continue
+        rows = list(csv.DictReader(f.open()))
+        if not rows:
+            continue
+        reach = int(rows[-1]["cum_reactions"])
+        cur = {}
+        for R in (50, 100, 150, 200, 300, 400, 500, 600, 800, 1000, 1500, 2000):
+            if R > reach:
+                continue
+            n = 0
+            for r in rows:
+                if int(r["cum_reactions"]) <= R:
+                    n = int(r["cum_modes"])
+                else:
+                    break
+            cur[R] = n
+        ours.setdefault(int(m.group(1)), {}).update(cur)
+    cands = defaultdict(dict)
+    for d in sorted(set(x for pat in pats_th for x in RES.glob(pat))):
+        m = re.search(rf"budget_scale_s3gfn_(?:{target})?(.*?)_seed(\d+)$", d.name)
+        f = d / "select_frontier.csv"
+        if not m or not f.exists():
+            continue
+        cur = {}
+        for r in csv.DictReader(f.open()):
+            # used_rxns inflates once the pool is exhausted; cost_kept_rxns is the true price of the
+            # selected set, and used-minus-cost is how the plot tells exhaustion from binding.
+            cur[int(float(r["budget_rxns"]))] = (
+                int(r["n_modes_kept"]),
+                float(r["cost_kept_rxns"]),
+                float(r["budget_rxns"]),
+                r["time_capped"] == "True",
+            )
+        cands[(target, int(m.group(2)))][_gen_rank(m.group(1))] = cur
+    for (_, seed), cur in _pick_generation(cands, f"fig4:{target}").items():
+        theirs.setdefault(seed, {}).update(cur)
+    return ours, theirs
+
+
+def _read_known():
+    """{set: (n_input, n_solved, n_one_step)} -- how deep are molecules people actually make."""
+    out = {}
+    for f in sorted(LAD.glob("known/*_zinc.jsonl")):
+        rs = [json.loads(l) for l in f.open() if l.strip()]
+        sol = [r for r in rs if r["solved"] and r.get("min_steps")]
+        if not rs or not sol:
+            continue
+        out[f.name.replace("_zinc.jsonl", "")] = (
+            len(rs),
+            len(sol),
+            sum(1 for r in sol if r["min_steps"] == 1),
+        )
     return out
 
 
@@ -183,78 +313,72 @@ def main() -> None:
         plt.close(fig)
         print(f"[plot] fig1: {len(cells)} cells -> {out}/fig1_catalogue_ladder.png")
 
-    # ---- FIG 2: depth-cost on ONE axis (the headline) ----------------------------------------
+    # ---- FIG 2: depth-cost on ONE axis, per target -------------------------------------------
     za, conv = _read_zinc_axis()
     comp = _read_competitor_depth()
-    if za:
-        fig, ax = plt.subplots(figsize=(7.4, 5.0))
-        seeds = sorted({s for s, _ in za})
-        depths = sorted({d for v in za.values() for d in v})
-        for s in seeds:
-            lo = [za.get((s, "drop"), {}).get(d) for d in depths]
-            hi = [za.get((s, "deep"), {}).get(d) for d in depths]
-            if all(x is not None for x in lo + hi):
-                _band(
-                    ax,
-                    depths,
-                    lo,
-                    hi,
-                    OURS,
-                    f"hub-batching, seed {s} (drop..deep)" if s == seeds[0] else None,
-                )
-        for s in sorted(comp):
-            xs = sorted(comp[s])
-            ys = [comp[s][d][0] for d in xs]
-            ax.plot(
-                xs,
-                ys,
-                "-s",
-                color=THEIRS,
-                ms=5,
-                lw=2,
-                label="S3-GFN + MultiAiZ + SPARROW" if s == sorted(comp)[0] else None,
-            )
-            for d in xs:
-                if comp[s][d][1]:
-                    ax.annotate(
-                        "capped\n(lower bound)",
-                        (d, comp[s][d][0]),
-                        fontsize=6,
-                        color=THEIRS,
-                        xytext=(4, -14),
-                        textcoords="offset points",
+    targets = sorted({t for t, _, _ in za})
+    if targets:
+        fig, axes = plt.subplots(1, len(targets), figsize=(5.0 * len(targets), 4.8), squeeze=False)
+        for ax, tgt in zip(axes[0], targets):
+            seeds = sorted({sd for t, sd, _ in za if t == tgt})
+            depths = sorted({d for (t, sd, p), v in za.items() if t == tgt for d in v})
+            for sd in seeds:
+                # The `deep` edge is the CONVERGED one; `drop` rungs mostly hit the round cap and are
+                # upper bounds on the conservative reading, so `deep` is the line and `drop` the floor.
+                hi = [za.get((tgt, sd, "deep"), {}).get(d) for d in depths]
+                lo = [za.get((tgt, sd, "drop"), {}).get(d) for d in depths]
+                if all(x is not None for x in hi):
+                    if all(x is not None for x in lo):
+                        ax.fill_between(depths, lo, hi, color=OURS, alpha=0.15, lw=0)
+                        ax.plot(depths, lo, "--", color=OURS, lw=1.0, alpha=0.7)
+                    ax.plot(
+                        depths,
+                        hi,
+                        "-o",
+                        color=OURS,
+                        ms=4,
+                        lw=2,
+                        label="hub-batching" if sd == seeds[0] else None,
                     )
-        ax.set_xlabel("minimum synthetic depth (reactions from ZINC-purchasable material)")
-        ax.set_ylabel("distinct molecules delivered at 100 reactions")
-        ax.set_title(
-            "Depth vs delivered library, BOTH sides measured from ZINC\n"
-            "the advantage grows with depth once the axis is shared",
-            fontsize=10,
+            for (t, sd), v in sorted(comp.items()):
+                if t != tgt or len(v) < 2:
+                    continue
+                xs = sorted(v)
+                ax.plot(
+                    xs,
+                    [v[d][0] for d in xs],
+                    "-s",
+                    color=THEIRS,
+                    ms=4,
+                    lw=2,
+                    label="S3-GFN+MultiAiZ+SPARROW"
+                    if sd == min(s2 for t2, s2 in comp if t2 == tgt)
+                    else None,
+                )
+                for d in xs:
+                    modes, capped, used, bud = v[d]
+                    # A cell that could not spend the budget is a CAPACITY limit, not a cost result.
+                    if used < bud - 1:
+                        ax.plot([d], [modes], "x", color="k", ms=9, mew=2)
+            ax.set_title(f"{tgt}", fontsize=11)
+            ax.set_xlabel("min synthetic depth\n(reactions from ZINC)")
+            ax.set_xticks(depths)
+            ax.grid(alpha=0.25)
+            if ax is axes[0][0]:
+                ax.set_ylabel("distinct molecules at 100 reactions")
+                ax.legend(fontsize=7, loc="lower left")
+        fig.suptitle(
+            "Depth vs delivered library — BOTH sides measured from ZINC\n"
+            "band = unroutable policy: solid `deep` (converged, OVERSTATES us) to dashed `drop`\n"
+            "(understates us, and not converged so the true floor is lower still)"
+            "  ·  x = pool-exhausted, a capacity limit not a cost",
+            fontsize=9.5,
         )
-        ax.set_xticks(depths)
-        ax.grid(alpha=0.25)
-        ax.legend(fontsize=8, loc="lower left")
-        ax.text(
-            0.99,
-            0.97,
-            "BAND = the two unroutable policies, which bracket the truth:\n"
-            "  upper (`deep`)  unroutable counts as deep — CONVERGED\n"
-            "  lower (`drop`)  unroutable dropped — hit the 40-round cap, an UPPER bound\n"
-            "Ours routed with plain AiZynth, theirs with MultiAiZ (stronger) — favours them\n"
-            "Superseded hit gates: diagnostic only, not for publication",
-            transform=ax.transAxes,
-            ha="right",
-            va="top",
-            fontsize=6.5,
-            color="#555",
-        )
-        fig.tight_layout()
+        fig.tight_layout(rect=(0, 0, 1, 0.90))
         fig.savefig(out / "fig2_depth_zinc_axis.png", dpi=160)
         fig.savefig(out / "fig2_depth_zinc_axis.pdf")
         plt.close(fig)
-        print(
-            f"[plot] fig2: seeds {seeds}, competitor seeds {sorted(comp)} -> fig2_depth_zinc_axis.png"
-        )
+        print(f"[plot] fig2: targets {targets} -> fig2_depth_zinc_axis.png")
 
     # ---- FIG 3: catalogue-distinct sweep -----------------------------------------------------
     co, ct = _read_cmode()
@@ -325,6 +449,151 @@ def main() -> None:
             f"[plot] fig3: taus {taus}, ours seeds "
             f"{sorted({s for t in co for s in co[t]})} -> fig3_catalogue_distinct.png"
         )
+
+    # ---- FIG 4: budget scaling / capacity ceiling (the headline) ------------------------------
+    for tgt in ("seh", "drd2", "clpp"):
+        bo, bt = _read_budget(tgt)
+        if not bo or not bt:
+            continue
+        fig, (axL, axR) = plt.subplots(1, 2, figsize=(11.0, 4.8))
+        Rs = sorted({R for v in bo.values() for R in v} | {R for v in bt.values() for R in v})
+        for sd, v in sorted(bo.items()):
+            xs = sorted(v)
+            axL.plot(
+                xs,
+                [v[x] for x in xs],
+                "-o",
+                color=OURS,
+                ms=4,
+                lw=2,
+                label="hub-batching" if sd == min(bo) else None,
+            )
+        for sd, v in sorted(bt.items()):
+            xs = sorted(v)
+            axL.plot(
+                xs,
+                [v[x][0] for x in xs],
+                "-s",
+                color=THEIRS,
+                ms=4,
+                lw=2,
+                label="S3-GFN+MultiAiZ+SPARROW" if sd == min(bt) else None,
+            )
+            # mark where the budget stops being spendable -- the ceiling IS the finding
+            ex = [x for x in xs if v[x][1] < v[x][2] - 1]
+            if ex:
+                axL.plot(
+                    ex,
+                    [v[x][0] for x in ex],
+                    "x",
+                    color="k",
+                    ms=9,
+                    mew=2,
+                    label="pool-exhausted (budget unspendable)" if sd == min(bt) else None,
+                )
+        axL.set_xscale("log")
+        axL.set_xlabel("reaction budget (log)")
+        axL.set_ylabel("distinct molecules delivered")
+        axL.grid(alpha=0.25, which="both")
+        axL.legend(fontsize=7, loc="upper left")
+        axL.set_title("delivered library vs budget", fontsize=10)
+        for sd, v in sorted(bo.items()):
+            xs = [x for x in sorted(v) if v[x]]
+            axR.plot(xs, [x / v[x] for x in xs], "-o", color=OURS, ms=4, lw=2)
+        for sd, v in sorted(bt.items()):
+            xs = [x for x in sorted(v) if v[x][0]]
+            axR.plot(
+                xs, [min(v[x][1], v[x][2]) / v[x][0] for x in xs], "-s", color=THEIRS, ms=4, lw=2
+            )
+        axR.set_xscale("log")
+        axR.set_xlabel("reaction budget (log)")
+        axR.set_ylabel("reactions per delivered molecule")
+        axR.axhline(1.0, color="#999", ls=":", lw=1)
+        axR.annotate(
+            "metric floor: 1 reaction per molecule",
+            xy=(0.02, 0.02),
+            xycoords="axes fraction",
+            fontsize=6.5,
+            color="#666",
+        )
+        axR.grid(alpha=0.25, which="both")
+        axR.set_title("cost per molecule vs budget", fontsize=10)
+        fig.suptitle(
+            f"{tgt}: the competitor holds the metric's FLOOR only while cheap molecules last\n"
+            "beyond that its pool runs out and the budget becomes unspendable "
+            "(x) — a capacity ceiling, not a cost",
+            fontsize=9.5,
+        )
+        fig.tight_layout(rect=(0, 0, 1, 0.89))
+        fig.savefig(out / f"fig4_budget_{tgt}.png", dpi=160)
+        fig.savefig(out / f"fig4_budget_{tgt}.pdf")
+        plt.close(fig)
+        print(f"[plot] fig4 {tgt}: ours {sorted(bo)}, theirs {sorted(bt)} -> fig4_budget_{tgt}.png")
+
+    # ---- FIG 5: are the molecules people actually make deep? ---------------------------------
+    kn = _read_known()
+    if kn:
+        label = {
+            "glues_crbn_gspt1": "CRBN/GSPT1\nglues",
+            "glues_ddb1_cdk12": "DDB1/CDK12\nglues",
+            "actives_clpp": "ClpP actives\n(ChEMBL)",
+            "actives_drd2": "DRD2 actives\n(ChEMBL)",
+            "actives_seh": "sEH actives\n(ChEMBL)",
+        }
+        order = [
+            k
+            for k in (
+                "glues_crbn_gspt1",
+                "glues_ddb1_cdk12",
+                "actives_clpp",
+                "actives_drd2",
+                "actives_seh",
+            )
+            if k in kn
+        ]
+        fig, ax = plt.subplots(figsize=(7.6, 4.4))
+        xs = range(len(order))
+        share = [100.0 * kn[k][2] / kn[k][1] for k in order]
+        ax.bar(list(xs), share, color=OURS, width=0.6, label="known molecules")
+        ax.axhline(49, color=THEIRS, ls="--", lw=2, label="S3-GFN's delivered library (49%)")
+        for i, k in enumerate(order):
+            n, sol, one = kn[k]
+            ax.annotate(
+                f"{one}/{sol}\nof {n} routed",
+                (i, share[i]),
+                fontsize=6.5,
+                ha="center",
+                va="bottom",
+                xytext=(0, 3),
+                textcoords="offset points",
+            )
+        ax.set_xticks(list(xs))
+        ax.set_xticklabels([label.get(k, k) for k in order], fontsize=8)
+        ax.set_ylabel("% of routed molecules that are ONE step from ZINC")
+        ax.set_ylim(0, 62)
+        ax.grid(axis="y", alpha=0.25)
+        ax.legend(fontsize=8)
+        ax.set_title(
+            "Molecules people actually make are NOT one step from the catalogue\n"
+            "so requiring depth is a calibration to known chemistry, not a handicap",
+            fontsize=10,
+        )
+        ax.text(
+            0.99,
+            0.97,
+            "CRBN/GSPT1 routes only 4/100 — read as 'not one-step', not as a rate.\n"
+            "Same planner, budget and catalogue as every other panel.",
+            transform=ax.transAxes,
+            ha="right",
+            va="top",
+            fontsize=6.5,
+            color="#555",
+        )
+        fig.tight_layout()
+        fig.savefig(out / "fig5_known_depth.png", dpi=160)
+        fig.savefig(out / "fig5_known_depth.pdf")
+        plt.close(fig)
+        print(f"[plot] fig5: {len(order)} sets -> fig5_known_depth.png")
 
 
 if __name__ == "__main__":

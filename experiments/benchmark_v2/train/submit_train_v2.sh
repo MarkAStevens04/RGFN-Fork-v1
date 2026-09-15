@@ -196,24 +196,10 @@ if [ "$REWARD_TYPE" = docking ]; then
   trap '[ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null' EXIT
 fi
 
-# ---- WARM THE ENV BEFORE THE REAL conda run ------------------------------------------------------
-# MEASURED, not defensive. rxnflow/seh failed SIX times at 9-13 s with `ModuleNotFoundError: No
-# module named gflownet`, from run_rxnflow_fixed -> al_loop -> rxnflow/proxy -> fraggfn/proxy, while
-# rxnflow/clpp trained fine concurrently on the identical import chain. The env reaches `gflownet`
-# through an editable install whose .pth appends external/RxnFlow/src, on $HOME -- networked and
-# read-only from a compute node.
-#
-# A THROWAWAY `conda run` IN THE SAME ENV FIRST MAKES THE REAL ONE WORK. Proven by submitting the
-# same cell, same OUT_ROOT, same --comment, differing only in this line: with it the cell trains,
-# without it the cell dies at the import. Six failures, three successes.
-#
-# STATING WHAT THIS IS NOT: an `ls` of the .pth and its package __init__.py -- which looked like it
-# worked in one bisection run -- does NOT fix it (jobs 76307, 76308, warm block present and counting
-# files, import still dead). So the mechanism is NOT a bare filesystem cache warm, and the earlier
-# commit message saying "it is the filesystem, not conda" was wrong. What the first `conda run`
-# does that a stat does not is unidentified; this is a symptom fix and is recorded as one.
-conda run -n "$CONDA_ENV" python -c "pass" >/dev/null 2>&1
-echo "[v2train] env warm-up for '$CONDA_ENV' rc=$?"
+# NOTE ON THE ENV WARM-UP BELOW: it lives INSIDE each conda-run branch, immediately before the real
+# call, and that adjacency is load-bearing. Placed here -- 23 lines and a docking-server block
+# earlier -- it printed its rc=0 and the import died anyway (jobs 76307, 76308, 76310). Do not hoist
+# it out of the branches to "avoid repetition".
 
 # ---- train ---------------------------------------------------------------------------------------
 # THE "HOW MUCH TRAINING" FLAG IS NOT UNIFORM, and passing the wrong one is an argparse exit 2 nine
@@ -232,22 +218,47 @@ case "$GEN" in
     # --log-recipes: promoted-fragment routes are observable ONLY during training, so a run without
     # them can never be repaired afterwards. Default-on since 2026-07-29; passed explicitly so this
     # script states the campaign's intent rather than inheriting it.
+    # WARM-UP, MEASURED: a throwaway conda run in this env first, or the next one cannot import an
+    # editable install whose .pth points at $HOME. rxnflow/seh died at 9-13 s six times without it
+    # and trains with it (76309), same cell, same OUT_ROOT, differing only in this line. Mechanism
+    # unidentified; an `ls` of the .pth and its package __init__.py does NOT substitute.
+    conda run -n "$CONDA_ENV" python -c "pass"
     conda run --no-capture-output -n "$CONDA_ENV" python "$RUNNER" \
         --cfg "$CFG" --seed "$SEED" --root-dir "$ROOT/train" --run-dir "$RUN_DIR" --log-recipes
     RC=$? ;;
   rxnflow)
+    # WARM-UP, MEASURED: a throwaway conda run in this env first, or the next one cannot import an
+    # editable install whose .pth points at $HOME. rxnflow/seh died at 9-13 s six times without it
+    # and trains with it (76309), same cell, same OUT_ROOT, differing only in this line. Mechanism
+    # unidentified; an `ls` of the .pth and its package __init__.py does NOT substitute.
+    conda run -n "$CONDA_ENV" python -c "pass"
     conda run --no-capture-output -n "$CONDA_ENV" python "$RUNNER" \
         --cfg "$CFG" --seed "$SEED" --run-dir "$RUN_DIR"
     RC=$? ;;
   saturn|tango|synformer)
+    # WARM-UP, MEASURED: a throwaway conda run in this env first, or the next one cannot import an
+    # editable install whose .pth points at $HOME. rxnflow/seh died at 9-13 s six times without it
+    # and trains with it (76309), same cell, same OUT_ROOT, differing only in this line. Mechanism
+    # unidentified; an `ls` of the .pth and its package __init__.py does NOT substitute.
+    conda run -n "$CONDA_ENV" python -c "pass"
     conda run --no-capture-output -n "$CONDA_ENV" python "$RUNNER" \
         --cfg "$CFG" --seed "$SEED" --run-dir "$RUN_DIR" --budget "$ARM_CALLS"
     RC=$? ;;
   reinvent)
+    # WARM-UP, MEASURED: a throwaway conda run in this env first, or the next one cannot import an
+    # editable install whose .pth points at $HOME. rxnflow/seh died at 9-13 s six times without it
+    # and trains with it (76309), same cell, same OUT_ROOT, differing only in this line. Mechanism
+    # unidentified; an `ls` of the .pth and its package __init__.py does NOT substitute.
+    conda run -n "$CONDA_ENV" python -c "pass"
     conda run --no-capture-output -n "$CONDA_ENV" python "$RUNNER" \
         --cfg "$CFG" --seed "$SEED" --run-dir "$RUN_DIR"
     RC=$? ;;
   fraggfn|s3gfn)
+    # WARM-UP, MEASURED: a throwaway conda run in this env first, or the next one cannot import an
+    # editable install whose .pth points at $HOME. rxnflow/seh died at 9-13 s six times without it
+    # and trains with it (76309), same cell, same OUT_ROOT, differing only in this line. Mechanism
+    # unidentified; an `ls` of the .pth and its package __init__.py does NOT substitute.
+    conda run -n "$CONDA_ENV" python -c "pass"
     conda run --no-capture-output -n "$CONDA_ENV" python "$RUNNER" \
         --cfg "$CFG" --seed "$SEED" --run-dir "$RUN_DIR"
     RC=$? ;;
