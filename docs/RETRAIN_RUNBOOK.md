@@ -1445,6 +1445,73 @@ from a no-op.
 
 ---
 
+### 8.10 A job array SERIALISES the tasks; it does not CONTINUE the work
+
+The docking cells do not fit the hard 3-day walltime, so each is submitted as
+`--array=0-N%1`. That gives one squeue line and strict one-at-a-time execution, and it was
+verified that way (array 76382: task 0 killed at its walltime, tasks 1 and 2 started only
+after their predecessor ended, no overlap).
+
+**Serialisation is one of THREE properties a multi-walltime cell needs, and the smoke proved
+only that one.** The other two are RESUME (task N+1 continues task N's model) and NO-OP (a
+task that starts against an already-finished cell does nothing). The smoke ran a toy script,
+so it could not have exercised either. Both were missing on 2026-09-14, and both were
+*documented as present* in the comment sitting directly above the array code — which is what
+made them easy to miss, because an assertion reads exactly like a verified property.
+
+| property | verified by | was it true? |
+|---|---|---|
+| tasks run one at a time | array 76382, task 0 killed | yes |
+| task N+1 resumes task N | nothing | **no, for rgfn** |
+| a task on a finished cell no-ops | nothing | **no, for any generator** |
+
+**What each failure looks like — note that neither one fails LOUDLY.**
+
+* **No resume (rgfn).** `scripts/fixed_reward.py` has always supported `--resume-from`;
+  `submit_train_v2.sh` passed `--run-name` (same run dir) but not `--resume-from`, and upstream
+  `Trainer` leaves `start_iteration = 0` unless `resume_path` is set. So task 1 trained a
+  **random init**. Nothing downstream says so: the trace ROTATES rather than truncates and the
+  arm-B stop unions distinct molecules across `trace.csv` and its `.N` siblings, so the cell
+  still stops at 320,000 and `TRAIN_DONE.json`, the row counts and the manifest all look
+  healthy. You get two part-trained models reported as one full-budget cell.
+  SCENT and RxnFlow were never affected — their resume lives *inside their runners*
+  (`run_scent_fixed.py` sets `Trainer.resume_path` from `run_dir`; rxnflow calls
+  `loop.load_checkpoint()`). Only rgfn's lives in the launcher. "All three runners resume" was
+  true of the runners and false of the launcher, which is why it survived review.
+* **Arm A re-fires.** `BudgetCheckpointer.fired` is per-PROCESS; arm A is a once-per-CELL
+  event. `BudgetStopper` seeds the writer's own set (`trace._train_seen |= prior`), so on task
+  1 `n_train_distinct` is the CELL-level union — already far past the 10,000 arm-A budget — and
+  the checkpointer fired at the **first iteration boundary**, overwriting `arm_a_10k.pt` with a
+  model that had seen the whole run. This one predates the array: it applies to ANY
+  re-invocation, so the SCENT/RxnFlow docking cells were exposed through the chain design too.
+* **No no-op.** A task starting against a finished cell resumed, trained one more iteration
+  (the stop fires at a BOUNDARY, so never before the first one), then re-sampled and
+  overwrote `candidates.csv` with a second draw from the same model. The cell stayed valid;
+  its provenance stopped being legible.
+
+**The fixes and how each was actually checked** (a guard that cannot fail is not evidence —
+§6.10): resume verified on job 76425 against a REAL checkpoint copied out of a live cell —
+epoch 20 in, then the Trainer's own `Loaded checkpoint from 21 iteration`, not 0. The arm-A
+guard verified by COUNTERFACTUAL: same fixture, same seeded union, guard active → arm A
+untouched, guard bypassed → arm A overwritten at iteration 0. The no-op checked on four cases,
+including the one that matters — a walltime kill leaves no `TRAIN_DONE.json`, so an
+interrupted task correctly does **not** look finished.
+
+**⛔ A `.sh` FIX DOES NOT REACH JOBS THAT ARE ALREADY QUEUED.** SLURM **spools the batch script
+at submit time** — confirmed with `scontrol write batch_script <jobid>`, which on a job
+submitted before the fix returns the OLD text. A `.py` fix is resolved at RUNTIME and *does*
+reach them, when their next task starts. So after changing `submit_train_v2.sh` the affected
+cells must be cancelled and resubmitted; after changing `_trace.py` they must not. This is the
+same split as the SCENT recipe-logging lever: edit the runtime-resolved `.py`, never the
+submit-time-snapshotted `.sh`, to change a job that is already in the queue.
+
+**Sizing, once the no-op is real.** An unused walltime then costs nothing, so size for the
+WORST case: `WALLTIMES = {"clpp": 2, "6td3b": 3}`. 6TD3-B gets three because two would be 6
+days against a measured 5.9 — under 2% headroom on an estimate taken from an early, fast
+stretch of a run whose rate DEGRADES as molecules grow (rgfn/clpp measured 90.96 → 94.17 →
+100.90 → 111.28 s/iteration across its first four iterations). Do not read a rate off the
+first ten minutes and treat it as the run's rate.
+
 ## 9. What gets rebuilt downstream
 
 Re-running a cell invalidates everything derived from it. This is the dependency map, so nothing is
