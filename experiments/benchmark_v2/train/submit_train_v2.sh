@@ -211,8 +211,57 @@ fi
 case "$GEN" in
   rgfn)
     conda activate rgfn
+    # ⛔ RESUME, AND IT IS NOT OPTIONAL FOR A DOCKING CELL. rgfn/clpp and rgfn/6td3b need two 3-day
+    # walltimes and therefore run as a 2-task array -- and WITHOUT this block task 1 starts from a
+    # RANDOM INIT. Nothing downstream would say so. The trace ROTATES rather than truncates and the
+    # arm-B stop unions across the rotated siblings, so the cell still stops at its 320,000-molecule
+    # budget and every artifact still looks healthy: TRAIN_DONE.json, the row counts, the manifest.
+    # The only thing wrong is the science -- two part-trained models in place of one trained one,
+    # reported as a full-budget cell.
+    #
+    # THE OTHER TWO GENERATORS ALREADY DO THIS INSIDE THEIR RUNNERS, which is why the gap was easy
+    # to miss: run_scent_fixed.py sets Trainer.resume_path when run_dir holds a last_gfn.pt, and
+    # rxnflow's runner calls loop.load_checkpoint(). RGFN's runner has supported --resume-from all
+    # along (scripts/fixed_reward.py -> Trainer.resume_path); nothing was passing it. So "all three
+    # runners resume" was true of the runners and false of this launcher.
+    #
+    # THE *_cache STRIP IS LOAD-BEARING: RGFN's forward policy carries lazily-populated `*_cache`
+    # buffers that a freshly-built model does not have, so a STRICT load_state_dict against a raw
+    # checkpoint FAILS (Logs/021). Ported from scale5k/submit_rgfn.sh, which solved this before.
+    CKPT="$RUN_DIR/train/checkpoints/last_gfn.pt"
+    RESUME_ARGS=()
+    if [ -f "$CKPT" ]; then
+      CLEAN="${CKPT%.pt}.resumeclean.pt"
+      python - "$CKPT" "$CLEAN" <<'PY'
+import sys, torch
+d = torch.load(sys.argv[1], map_location="cpu")
+for k in [k for k in list(d["model"]) if k.endswith("_cache")]:
+    d["model"].pop(k)
+torch.save(d, sys.argv[2])
+print(f"[v2train] resume: cleaned checkpoint -> resume from iter {int(d['metrics']['epoch']) + 1}",
+      flush=True)
+PY
+      _clean_rc=$?
+      if [ "$_clean_rc" -eq 0 ] && [ -f "$CLEAN" ]; then
+        RESUME_ARGS=(--resume-from "$CLEAN")
+        echo "[v2train] RESUMING $CELL_TAG from $CKPT"
+      else
+        # REFUSE RATHER THAN FALL BACK TO A FRESH START. scale5k could fall back safely because a
+        # fresh link there just redid work; here the arm-B stop would CREDIT the earlier round's
+        # molecules to a model that never saw them, so the cell would report a 320,000 budget it
+        # did not train on. A dead cell is recoverable; that one is not detectable.
+        echo "FATAL: $CELL_TAG has a checkpoint at $CKPT that could not be cleaned for resume" >&2
+        echo "       (rc=$_clean_rc). Refusing to train from scratch on top of an existing run:" >&2
+        echo "       the arm-B stop counts DISTINCT across rotated trace siblings, so this run" >&2
+        echo "       would inherit the earlier round's budget while starting from a random init." >&2
+        exit 2
+      fi
+    else
+      echo "[v2train] fresh start (no checkpoint in $RUN_DIR)"
+    fi
     python scripts/fixed_reward.py \
-        --cfg "$CFG" --seed "$SEED" --root-dir "$ROOT/train" --run-name "$CELL_TAG/arm$TRAIN_ARM"
+        --cfg "$CFG" --seed "$SEED" --root-dir "$ROOT/train" --run-name "$CELL_TAG/arm$TRAIN_ARM" \
+        "${RESUME_ARGS[@]}"
     RC=$? ;;
   scent)
     # --log-recipes: promoted-fragment routes are observable ONLY during training, so a run without

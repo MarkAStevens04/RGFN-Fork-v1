@@ -504,6 +504,16 @@ class BudgetCheckpointer:
         self._save = save
         self.tag = tag
         self.fired = False
+        # ARM A IS A ONCE-PER-CELL EVENT AND ``fired`` IS ONLY PER-PROCESS. A docking cell runs as a
+        # multi-task array, so the second task builds a NEW checkpointer with fired=False against a
+        # trace whose distinct count the BudgetStopper has already seeded to the cell-level union
+        # (``trace._train_seen |= prior``). Without the guard below, the budget reads as reached on
+        # task 1's FIRST iteration boundary and ``_save`` overwrites arm_a_10k.pt with a model that
+        # has seen the whole run. Tracked separately from ``fired`` so the manifest can say which
+        # happened: a suppressed checkpointer has no crossing to report, and reporting fired=True
+        # with crossed_at_*=None would be a contradiction a reader has to guess at.
+        self.suppressed_already_crossed = False
+        self._first_check = True
         self.crossed_at_n_train_distinct: Optional[int] = None
         self.crossed_at_n_train_scored: Optional[int] = None
         self.crossed_at_n_scored: Optional[int] = None
@@ -528,7 +538,27 @@ class BudgetCheckpointer:
         ``n_train_distinct`` is the only counter free of both. ``n_train_scored`` is kept in the
         manifest as a diagnostic, because the gap between them IS the repeat rate.
         """
-        if self.fired or self.trace.n_train_distinct < self.budget:
+        if self.fired or self.suppressed_already_crossed:
+            return
+        # THE FIRST BOUNDARY OF A ROUND IS THE ONLY PLACE A RESUME IS DISTINGUISHABLE. A fresh run
+        # reaches its first boundary having scored one batch -- 200 distinct on the docking cells,
+        # 1,000 on the surrogate ones, against a 10,000 budget -- so "already at or past the budget
+        # before this process has trained an iteration" cannot happen on a fresh run and always
+        # happens on a resumed one. Checked here rather than in __init__ because the stopper seeds
+        # the writer's set, and nothing guarantees it is constructed before this object is.
+        if self._first_check:
+            self._first_check = False
+            if self.trace.n_train_distinct >= self.budget:
+                self.suppressed_already_crossed = True
+                print(
+                    f"[{self.tag}] ARM A: already crossed in an earlier round "
+                    f"({self.trace.n_train_distinct:,} distinct training molecules >= "
+                    f"{self.budget:,} before this round trained an iteration). NOT re-checkpointing "
+                    f"-- the existing arm-A checkpoint is the one taken at the budget.",
+                    flush=True,
+                )
+                return
+        if self.trace.n_train_distinct < self.budget:
             return
         self.fired = True
         self.crossed_at_n_train_distinct = self.trace.n_train_distinct
@@ -552,6 +582,10 @@ class BudgetCheckpointer:
         return {
             "budget_oracle_calls": self.budget,
             "fired": self.fired,
+            # True when THIS round found the budget already spent by an earlier round and left the
+            # existing arm-A checkpoint alone. fired=False + suppressed=True is a healthy resumed
+            # round; fired=False + suppressed=False means arm A never happened at all.
+            "suppressed_already_crossed": self.suppressed_already_crossed,
             # THE GATE: distinct molecules that actually reached the oracle.
             "crossed_at_n_train_distinct": self.crossed_at_n_train_distinct,
             # Diagnostic: presentations including repeats. The gap to the gate is the repeat rate.
