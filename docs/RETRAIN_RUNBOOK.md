@@ -1512,6 +1512,57 @@ stretch of a run whose rate DEGRADES as molecules grow (rgfn/clpp measured 90.96
 100.90 → 111.28 s/iteration across its first four iterations). Do not read a rate off the
 first ten minutes and treat it as the run's rate.
 
+### 8.11 A correct seam carrying the WRONG NUMBER — 6TD3-B scored on dvina
+
+Two independent defects produced one symptom, and fixing either alone leaves the symptom.
+
+1. **The orientation could not reach the reward.** `DockingBridgeReward.__init__` has taken
+   `higher_is_better` in all five competitor bridges since the sign seam landed, and that was
+   treated as the seam being done. Nothing forwarded it: no factory accepted it, no runner read it
+   from a config, and none of the eleven construction sites passed it. Every competitor docking
+   cell therefore ran on the default `sign = -1` whatever its config said.
+2. **The bridge returned the wrong metric.** `scripts/score_batch.py:_score` and
+   `glue/oracles/docking_server.py` both did `d.get("dvina")` whenever an oracle exposed
+   `score_detailed()`. That silently made EVERY detailed oracle a dvina oracle.
+   `Docking6TD3BGpuOracle.score()` returns `cnn_vs` and was simply never called.
+
+Either one alone gives a flat reward for 6TD3-B, and they hide each other: fix the seam and the
+number arriving is still dvina; fix the metric and the sign is still `-1`. cnn_vs is
+higher-is-better and dvina is negative, so a config that *correctly* said `higher_is_better: true`
+computed `max(+dvina, 0) = 0.0` for every molecule — no exception, no nan, nothing in any log, for
+the whole docking budget.
+
+**Why it survived every reading.** The seam LOOKS present everywhere you would check: the
+constructor takes the argument, a long class comment explains the orientation, and a shadowing note
+warns you not to rename it. The hardcoded key looks right too — 6TD3 and ClpP both score on `dvina`,
+so the wrong default was correct for every target that existed before 6TD3-B. The dock server even
+documents itself as "mirroring score_batch", so the two agreed with each other and not with the
+oracle. Agreement between two callers is not evidence; they can share an assumption.
+
+**What found it.** Not reading — a four-molecule smoke through the real oracle. The raw values came
+back **negative** (−2.690, −0.006, −3.533, −0.021) when `cnn_vs` is a product of two positive gnina
+heads and cannot be. The sign check alone would have "passed": it showed `sign=+1`, exactly as
+configured.
+
+**The fixes.** The scoring key is now DECLARED on the oracle (`detail_score_key`, default `"dvina"`,
+overridden to `"cnn_vs"`) and both bridges read it. `score()` is deliberately still not called
+there — it re-runs `score_detailed()`, so using it to pick a column would dock every batch twice.
+`score_batch` now prints which column became the label, because the failure it replaces was silent.
+
+**The invariant, and why it needs a test.** The declared key and `score()` are two lines in
+different parts of a class; a subclass that changes one and not the other rebuilds the original bug
+exactly. `glue/tests/test_detail_score_key.py` asserts the pair against a stubbed breakdown (no GPU,
+no receptor), and was itself checked for the ability to fail by forcing 6TD3-B back to `"dvina"`.
+
+**Sanity check that generalises.** After the fix the raw values are +3.483, +3.272, +2.068, +3.710
+— positive, and sitting where the oracle's own docstring says our candidates sit (median 2.63
+against 7.59 for real glues). A metric read from the wrong column will usually be in the wrong
+RANGE; comparing a measured value against the range its own documentation predicts is a cheap check
+that a sign test cannot give you.
+
+**Cost: nothing.** All eight queued 6TD3-B cells were still PENDING when the smoke ran; they were
+held, fixed and released. No 6TD3-B cell has ever trained. 6TD3 and ClpP are unaffected.
+
 ## 9. What gets rebuilt downstream
 
 Re-running a cell invalidates everything derived from it. This is the dependency map, so nothing is
