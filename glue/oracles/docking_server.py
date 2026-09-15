@@ -180,7 +180,12 @@ class _ServerState:
             t0 = time.monotonic()
             if self._score_detailed is not None:
                 details = self._score_detailed(smiles)
-                labels = [d.get("dvina", None) for d in details]
+                # THE ORACLE SAYS WHICH KEY IS ITS SCORE -- this mirrored score_batch's hardcoded
+                # "dvina", and mirrored the bug with it: docking_6td3b_gpu scores on cnn_vs, so
+                # every client of this server got dvina under a cnn_vs config and trained against
+                # max(+dvina, 0) = 0.0. Both paths now read the same declared attribute.
+                key = getattr(self.oracle, "detail_score_key", "dvina")
+                labels = [d.get(key, None) for d in details]
             else:
                 labels = list(self.oracle.score(smiles))
                 details = None

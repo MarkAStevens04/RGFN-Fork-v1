@@ -117,6 +117,13 @@ class GpuDifferentialDockingOracle(GlueOracle):
     name = "gpu_differential_docking"
     # Vina binding-energy differential: MORE NEGATIVE = better glue -> lower is better.
     higher_is_better = False
+    # WHICH KEY OF score_detailed() IS THIS ORACLE'S SCORE. Declared rather than assumed, because
+    # the cross-env callers cannot call score(): score() re-runs score_detailed(), and re-docking a
+    # batch to pick a different column costs the dock twice. They therefore take the breakdown and
+    # select a key -- and both of them hardcoded "dvina", which silently made every detailed oracle
+    # a dvina oracle no matter what its own score() returned. Subclasses that score on another key
+    # MUST override this; the pair (score(), detail_score_key) is checked by a test.
+    detail_score_key = "dvina"
 
     def __init__(
         self,
@@ -463,6 +470,10 @@ class Docking6TD3BGpuOracle(Docking6TD3GpuOracle):
 
     name = "docking_6td3b_gpu"
     higher_is_better = True  # CNN_VS is affinity-scaled: larger is a better predicted binder
+    # ⛔ THE WHOLE POINT OF THIS SUBCLASS. Without this override the cross-env bridges handed back
+    # the parent's `dvina` while the config said higher_is_better, so the reward became
+    # max(+dvina, 0) = 0.0 for every molecule -- a flat reward, silent, for the entire budget.
+    detail_score_key = "cnn_vs"
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

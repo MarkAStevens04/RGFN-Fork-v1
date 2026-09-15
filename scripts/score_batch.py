@@ -123,25 +123,32 @@ def _parse_oracle_args(pairs: Optional[List[str]]) -> Dict:
 
 
 def _score(oracle, smiles: List[str]):
-    """Return ``(scores, details)``. ``details`` is a list of per-molecule breakdown
+    """Return ``(scores, details, label_key)``. ``details`` is a list of per-molecule breakdown
     dicts when the oracle exposes ``score_detailed`` (e.g. the GPU differential
-    oracle), else ``None``. Mirrors ``ActiveLearningLoop._score_batch`` so RGFN and
-    the baselines share identical scoring semantics."""
+    oracle), else ``None``; ``label_key`` is the breakdown key that became the score, or ``None``
+    when the oracle's own ``score()`` was called. Mirrors ``ActiveLearningLoop._score_batch`` so
+    RGFN and the baselines share identical scoring semantics."""
     score_detailed = getattr(oracle, "score_detailed", None)
     if callable(score_detailed):
         details = score_detailed(smiles)
-        scores = [d.get("dvina", float("nan")) for d in details]
-        return scores, details
-    return list(oracle.score(smiles)), None
+        # THE ORACLE SAYS WHICH KEY IS ITS SCORE; this used to be hardcoded "dvina". score() is not
+        # called here because it would re-run score_detailed() and dock the batch a second time, so
+        # the key is declared on the class instead. The hardcoded version made
+        # docking_6td3b_gpu -- whose score() returns cnn_vs -- hand back dvina, and a config that
+        # correctly said higher_is_better then computed max(+dvina, 0) = 0.0 for every molecule.
+        key = getattr(oracle, "detail_score_key", "dvina")
+        scores = [d.get(key, float("nan")) for d in details]
+        return scores, details, key
+    return list(oracle.score(smiles)), None, None
 
 
-def _write_labels(path: str, smiles, scores, details) -> None:
+def _write_labels(path: str, smiles, scores, details, label_key: str = "dvina") -> None:
     """Write the labels CSV returned to the caller (smiles,label,+breakdown)."""
     extra_cols: List[str] = []
     if details:
         for d in details:
             for k in d or {}:
-                if k not in extra_cols and k != "dvina":
+                if k not in extra_cols and k != label_key:
                     extra_cols.append(k)
     with open(path, "w", newline="") as fh:
         w = csv.writer(fh)
@@ -151,14 +158,16 @@ def _write_labels(path: str, smiles, scores, details) -> None:
             w.writerow([smi, sc, *[(d or {}).get(c, "") for c in extra_cols]])
 
 
-def _append_shard(sug_dir: Path, step: int, smiles, scores, details) -> None:
+def _append_shard(
+    sug_dir: Path, step: int, smiles, scores, details, label_key: str = "dvina"
+) -> None:
     shard_dir = sug_dir / SHARD_DIRNAME
     shard_dir.mkdir(parents=True, exist_ok=True)
     extra_cols: List[str] = []
     if details:
         for d in details:
             for k in d or {}:
-                if k not in extra_cols and k != "dvina":
+                if k not in extra_cols and k != label_key:
                     extra_cols.append(k)
     path = shard_dir / f"round_{step:03d}.csv"
     with open(path, "w", newline="") as fh:
@@ -357,19 +366,24 @@ def main() -> None:
         f"(higher_is_better={higher_is_better})",
         flush=True,
     )
-    scores, details = _score(oracle, smiles)
+    scores, details, label_key = _score(oracle, smiles)
+    if label_key is not None:
+        # Stated in the log because the whole failure this replaces was SILENT: the label column
+        # was dvina while the oracle's own score() returned cnn_vs, and nothing anywhere said so.
+        print(f"[score_batch] oracle={args.oracle} label column = {label_key!r}", flush=True)
+    label_key = label_key or "dvina"
 
     n_valid = sum(1 for s in scores if s is not None and s == s)
     print(f"[score_batch] scored {n_valid}/{len(smiles)} successfully", flush=True)
 
     if args.out:
-        _write_labels(args.out, smiles, scores, details)
+        _write_labels(args.out, smiles, scores, details, label_key)
         print(f"[score_batch] wrote labels -> {args.out}", flush=True)
 
     if args.suggestions_dir:
         sug_dir = Path(args.suggestions_dir)
         sug_dir.mkdir(parents=True, exist_ok=True)
-        _append_shard(sug_dir, args.step, smiles, scores, details)
+        _append_shard(sug_dir, args.step, smiles, scores, details, label_key)
         if args.routes:
             n_r = _store_routes(sug_dir, args.step, args.routes)
             print(f"[score_batch] round {args.step}: stored {n_r} route(s)", flush=True)
