@@ -413,6 +413,11 @@ def decide(cell, arm: str) -> tuple[str, str]:
             "artifacts exist but verification has not passed -- retraining would "
             "destroy the evidence of why. Run verify_cell.py first"
         )
+    if st == "failed-start":
+        # A run that died before writing anything: no trace AND no checkpoint. There is nothing to
+        # destroy, so the `no-trace` refusal below does not apply -- refusing here would strand the
+        # cell on the strength of a file that records only that it failed.
+        return "submit", "failed before writing any artifact -- nothing to preserve, resubmitting"
     if st == "no-trace":
         return "refuse", (
             "artifacts but NO trace: the budget cannot be evidenced, and the "

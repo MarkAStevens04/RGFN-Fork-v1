@@ -390,6 +390,17 @@ class Cell:
             # The cell may still be perfectly usable -- a missing trace costs Stage 2 its free pool,
             # not correctness -- but it is never ACCEPTED without one, because the arm's budget
             # cannot be evidenced.
+            #
+            # ...UNLESS THERE IS NOTHING THERE TO PROTECT. `no-trace` makes the driver REFUSE the
+            # cell, and rightly so when a checkpoint survives a lost trace -- that refusal exists
+            # because retraining once destroyed s3gfn_seh/43's only history. But it keyed on the
+            # ABSENCE of a trace, not on the PRESENCE of anything worth keeping, so six rxnflow
+            # cells that died 13 seconds in -- leaving a directory whose entire contents were a
+            # 217-byte TRAIN_DONE.json recording exit_code 1 -- were refused for the rest of the
+            # campaign, protecting the failure marker that said they had failed.
+            has_ckpt = any(self.train_dir(arm).rglob("*.pt"))
+            if not has_ckpt:
+                return "failed-start"
             return "no-trace"
         budget = self.arm_calls(arm) or 0
         # THE AXIS DEPENDS ON THE ARM, because the two arms come from two literatures (see
