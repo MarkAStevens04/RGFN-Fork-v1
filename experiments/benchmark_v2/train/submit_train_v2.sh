@@ -126,17 +126,18 @@ mkdir -p "$RUN_DIR"
 if [ -f "$RUN_DIR/TRAIN_DONE.json" ]; then
   _want="$(python "$MANIFEST" --emit "$GEN" "$TARGET" "$SEED" --arm "$TRAIN_ARM" 2>/dev/null \
             | sed -n 's/^ARM_CALLS=//p')"
-  _verdict=$(python - "$RUN_DIR" "${_want:-0}" <<'PY'
+  _fwd_rate="$(python "$MANIFEST" --emit "$GEN" "$TARGET" "$SEED" --arm "$TRAIN_ARM" 2>/dev/null \
+                | sed -n 's/^ARM_B_FWD_PER_ITER=//p' | tr -d \"\')"
+  _verdict=$(python - "$RUN_DIR" "${_want:-0}" "${_fwd_rate:-0}" <<'PY'
 import csv, glob, json, os, sys
-run_dir, want = sys.argv[1], int(sys.argv[2] or 0)
+run_dir, want, fwd = sys.argv[1], int(sys.argv[2] or 0), int(sys.argv[3] or 0)
 try:
     rc = json.load(open(os.path.join(run_dir, "TRAIN_DONE.json"))).get("exit_code")
 except Exception:
     print("unreadable 0 0"); raise SystemExit
-# THE UNION ACROSS ROTATED SIBLINGS -- the same set the arm-B stop gates on. An extended cell keeps
-# its earlier rounds in trace.csv.N, so counting only trace.csv under-reports every extension and
-# would re-extend a finished cell for ever.
-seen = set()
+# ACROSS ROTATED SIBLINGS EITHER WAY. An extended cell keeps its earlier rounds in trace.csv.N, so
+# reading only trace.csv under-reports every extension and would re-extend a finished cell for ever.
+seen, max_step = set(), -1
 base = os.path.join(run_dir, "trace.csv")
 for path in [base] + sorted(glob.glob(base + ".*")):
     try:
@@ -146,9 +147,16 @@ for path in [base] + sorted(glob.glob(base + ".*")):
                     smi = r.get("smiles")
                     if smi:
                         seen.add(smi)
+                st = (r.get("step") or "").strip()
+                if st:
+                    max_step = max(max_step, int(st))
     except Exception:
         pass
-print(f"{rc} {len(seen)} {want}")
+# THE AXIS MUST MATCH THE ARM. Arm B is SCENT's protocol and counts FORWARD TRAJECTORIES sampled
+# (iterations x the generator's rate); arm A is PMO's and counts DISTINCT molecules. Reading arm B
+# on distinct is what made nine finished SCENT cells look 21.6-96.8% short.
+have = (max_step + 1) * fwd if fwd else len(seen)
+print(f"{rc} {have} {want}")
 PY
 )
   set -- $_verdict
@@ -160,7 +168,8 @@ PY
     exit 0
   fi
   if [ "$_done_rc" = "0" ]; then
-    echo "[v2train] $CELL_TAG exited cleanly but is SHORT: $_have of $_want distinct. EXTENDING" >&2
+    _axis="distinct molecules"; [ -n "${_fwd_rate:-}" ] && _axis="forward trajectories"
+    echo "[v2train] $CELL_TAG exited cleanly but is SHORT: $_have of $_want $_axis. EXTENDING" >&2
     echo "[v2train] rather than no-opping -- a clean exit short of budget means the iteration" >&2
     echo "[v2train] ceiling bound before the budget did, and the budget is what arm B means." >&2
   else
@@ -233,6 +242,19 @@ if [ "$TRAIN_ARM" = b ]; then
     exit 2
   fi
   export BENCHMARK_V2_ARM_B_CALLS="$ARM_B_CALLS"
+  # THE AXIS, exported only for arm B. Set => the stop gates on FORWARD TRAJECTORIES (SCENT's
+  # protocol, which is what the 320,000 came from); unset => it gates on DISTINCT molecules (the PMO
+  # convention, which is arm A's). Two arms, two literatures, two units. Empty is not an error here:
+  # an unset value falls back to the distinct gate, which is what every pre-ruling config expects.
+  _ARM_B_FWD="$(python "$MANIFEST" --emit "$GEN" "$TARGET" "$SEED" --arm b 2>/dev/null \
+                 | sed -n 's/^ARM_B_FWD_PER_ITER=//p' | tr -d \"\')"
+  if [ -n "${_ARM_B_FWD:-}" ]; then
+    export BENCHMARK_V2_ARM_B_FWD_PER_ITER="$_ARM_B_FWD"
+    echo "[v2train] arm B gates on FORWARD TRAJECTORIES: $ARM_B_CALLS at $_ARM_B_FWD/iteration"
+  else
+    echo "[v2train] WARNING no forward-trajectory rate for '$GEN'; arm B falls back to the" >&2
+    echo "[v2train] DISTINCT gate, which is NOT the protocol 320,000 was taken from." >&2
+  fi
 fi
 
 # ANY job that docks must source this -- batch jobs included. QuickVina2-GPU links against boost

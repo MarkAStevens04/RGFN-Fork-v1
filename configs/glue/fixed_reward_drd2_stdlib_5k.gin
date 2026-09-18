@@ -8,4 +8,15 @@
 # Run:  python scripts/fixed_reward.py --cfg configs/glue/fixed_reward_drd2_stdlib_5k.gin --seed 42
 include 'configs/glue/fixed_reward_drd2_stdlib.gin'
 
-Trainer.n_iterations = 5000
+# ⛔ 3,200 IS ARM B'S PROTOCOL FOR RGFN, NOT A CAP (set 2026-09-18, researcher's ruling).
+# Arm B is SCENT's published protocol -- "All the models sampled 320,000 forward trajectories
+# during the training in total" (Gainski et al. 2025, App. B) -- and 320,000 is 64 trajectories x
+# 5,000 iterations. RGFN samples 100 forward trajectories per iteration (train_forward_n_trajectories,
+# inherited from the upstream base config; measured at 119.9 traced rows/iteration = 100 forward +
+# 20 replay), so the SAME protocol is 320,000 / 100 = 3,200 iterations here. SCENT's own config says
+# 5,000 for exactly this reason and is already correct; this file was 5,000 by coincidence of the
+# "5k" naming, which would have sampled 500,000 trajectories -- 56% over the protocol.
+#
+# The number is derived, not chosen: manifest.FORWARD_PER_ITER holds the per-generator rates and
+# arm_b_iterations() computes this. Change it there, not here.
+Trainer.n_iterations = 3200

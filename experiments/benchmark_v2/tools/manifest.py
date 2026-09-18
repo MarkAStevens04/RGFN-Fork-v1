@@ -352,6 +352,34 @@ class Cell:
         except (OSError, ValueError, IndexError):
             return None
 
+    def trace_iterations(self, arm: str = "a") -> Optional[int]:
+        """Training ITERATIONS this cell has run -- (last step index + 1), read from the trace.
+
+        The step column is written per training row and is ABSOLUTE across a resume, so this is the
+        cell's total rather than this round's. Multiplied by the generator's forward-trajectory rate
+        it gives arm B's axis exactly, and it does so WITHOUT depending on how many of those
+        trajectories produced a traced molecule -- which is the point: SCENT fixed the number
+        SAMPLED, and a trajectory whose molecule is invalid or undockable was still sampled.
+        """
+        p = self.trace_path(arm)
+        try:
+            with open(p, "rb") as fh:
+                header = fh.readline().decode("utf-8", "replace").strip().split(",")
+                if "step" not in header:
+                    return None
+                idx = header.index("step")
+                fh.seek(0, os.SEEK_END)
+                size = fh.tell()
+                fh.seek(-min(size, 8192), os.SEEK_END)
+                tail = fh.read().decode("utf-8", "replace").strip().splitlines()
+            for line in reversed(tail):  # last row with a populated step
+                parts = line.split(",")
+                if len(parts) > idx and parts[idx].strip():
+                    return int(parts[idx]) + 1
+            return None
+        except (OSError, ValueError, IndexError):
+            return None
+
     def status(self, arm: str = "a") -> str:
         if not self.has_arm(arm):
             return "n/a"
@@ -364,18 +392,64 @@ class Cell:
             # cannot be evidenced.
             return "no-trace"
         budget = self.arm_calls(arm) or 0
-        # THE GATE IS DISTINCT MOLECULES, which is what the budget means and what the arm-B stop
-        # and verify_cell.py both use. Falls back to rows only for a trace written before the
-        # column existed -- where it is the only number available, not the right one.
-        got = self.trace_distinct(arm)
-        measure = "distinct" if got is not None else "rows"
+        # THE AXIS DEPENDS ON THE ARM, because the two arms come from two literatures (see
+        # FORWARD_PER_ITER). Arm B is SCENT's protocol and counts FORWARD TRAJECTORIES sampled;
+        # arm A is PMO's and counts DISTINCT molecules that reached the oracle. Measuring arm B on
+        # distinct is what made nine complete SCENT cells read as 21.6-96.8% short.
+        fwd = FORWARD_PER_ITER.get(self.generator) if arm == "b" else None
+        if fwd:
+            iters = self.trace_iterations(arm)
+            got = (iters * fwd) if iters is not None else None
+        else:
+            got = self.trace_distinct(arm)
         if got is None:
-            got = rows
-        if got < budget * 0.95:
+            got = rows  # pre-column trace: the only number available, not the right one
+        # THE 5% TOLERANCE IS FOR A BOUNDARY THAT CAN BE STRADDLED, and the trajectory axis has
+        # none: the target is iterations x a per-generator constant, so a run either completed its
+        # iterations or did not. Applying 5% there passes a cell 160 iterations short (rgfn_drd2_s42
+        # at 309,400 of 320,000) as complete. The distinct axis keeps the tolerance -- a minibatch
+        # really can cross 10,000 mid-iteration, which is the case it was written for.
+        limit = budget if fwd else budget * 0.95
+        if got < limit:
             return f"short-trace:{got}/{budget}"
         if not self.verified(arm):
             return "unverified"
         return "frozen" if self.frozen(arm) else "verified"
+
+
+# FORWARD TRAJECTORIES SAMPLED PER TRAINING ITERATION, per generator -- the unit ARM B is counted
+# in (researcher's ruling 2026-09-18, after checking what the papers actually do).
+#
+# WHY THIS AXIS AND NOT DISTINCT MOLECULES. Arm B's number is SCENT's protocol, and SCENT counts
+# sampled trajectories: "All the models sampled 320,000 forward trajectories during the training in
+# total" (Gainski et al. 2025, App. B "Training Details"). The word "oracle" does not occur once in
+# that paper's 23 pages. 320,000 IS 64 x 5,000, so measuring it in DISTINCT molecules measures
+# something the source never claimed -- and penalises a generator for repeating itself, which is a
+# property to report, not a budget to spend: at 47% unique SCENT needed ~46% more iterations than
+# RGFN at 75% to clear the same distinct bar.
+#
+# ARM A IS THE OTHER LITERATURE AND KEEPS DISTINCT. PMO's optimizer canonicalises and then does
+# `if smi in self.mol_buffer: pass`, so a repeat never reaches the evaluator and the budget IS
+# len(mol_buffer); RGFN reports the same thing (CachedProxyBase.n_proxy_calls -> len(self.cache),
+# read by standard_gfn_metrics) and its paper's "normalized iterations ... simply translates to the
+# number of oracle calls"; S3-GFN restates PMO's "strictly limited to 10,000 oracle calls". Two arms,
+# two literatures, two units -- which the runbook already says this benchmark is the first to span.
+#
+# READ FROM EACH GENERATOR'S OWN TRAINER CONFIG, not chosen here: rgfn and scent set
+# train_forward_n_trajectories (100 and 64) and rxnflow's num_from_policy defaults to 64. Verified
+# against landed runs: scent traces 96.0 rows/iteration = 64 forward + 32 replay, rgfn 119.9 = 100 +
+# 20. Counting trajectories rather than traced rows is deliberate -- a trajectory whose molecule is
+# invalid or undockable was still sampled, and rxnflow lands ~57 traced rows per 64 sampled.
+ARM_B_FORWARD_TRAJECTORIES = 320_000
+FORWARD_PER_ITER = {"rgfn": 100, "scent": 64, "rxnflow": 64}
+
+
+def arm_b_iterations(generator: str) -> Optional[int]:
+    """Iterations that deliver ARM_B_FORWARD_TRAJECTORIES for this generator, or None."""
+    fwd = FORWARD_PER_ITER.get(generator)
+    if not fwd:
+        return None
+    return -(-ARM_B_FORWARD_TRAJECTORIES // fwd)  # ceil
 
 
 def load_grid(path: Path = GRID_CSV) -> List[Cell]:
@@ -462,6 +536,10 @@ def emit_shell(cell: Cell, arm: str = "a") -> str:
         "PHASE": cell.phase,
         "ARM": arm,
         "ARM_CALLS": cell.arm_calls(arm) if cell.has_arm(arm) else "",
+        # Arm B only. Empty for arm A, which keeps the PMO distinct gate -- the launcher exports this
+        # ONLY for arm B, so a cell cannot silently change the axis it is measured on.
+        "ARM_B_FWD_PER_ITER": (FORWARD_PER_ITER.get(cell.generator, "") if arm == "b" else ""),
+        "ARM_B_ITERATIONS": (arm_b_iterations(cell.generator) or "") if arm == "b" else "",
         "REWARD_NAME": t.reward_name,
         "REWARD_TYPE": t.reward_type,
         "HIGHER_IS_BETTER": "true" if t.higher_is_better else "false",

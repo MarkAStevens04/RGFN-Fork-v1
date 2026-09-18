@@ -151,6 +151,18 @@ class BudgetStopper:
         self.budget = int(budget)
         self.tag = tag
         self.fired = False
+        # Set => gate on FORWARD TRAJECTORIES (arm B, SCENT's protocol). Unset => gate on distinct
+        # molecules (arm A, the PMO convention, which dedupes: its optimizer canonicalises and skips
+        # the evaluator on a buffer hit, so its budget IS len(mol_buffer)). Two arms, two literatures,
+        # two units -- read from the environment so no call site has to know which it is.
+        self.fwd_per_iter = forward_trajectories_per_iteration()
+        if self.fwd_per_iter:
+            print(
+                f"[{tag}] gating on FORWARD TRAJECTORIES: budget {int(budget):,} at "
+                f"{self.fwd_per_iter}/iteration => stops at iteration "
+                f"{-(-int(budget) // self.fwd_per_iter):,}",
+                flush=True,
+            )
 
         # SEEDED INTO THE WRITER'S OWN SET rather than kept beside it. The writer already adds every
         # training molecule to `_train_seen`, so seeding it with the earlier rounds' molecules makes
@@ -184,15 +196,39 @@ class BudgetStopper:
     def note_iteration(self, iteration_idx: int) -> None:
         if self.fired:
             return
-        total = self.total_train_distinct
+        if self.fwd_per_iter:
+            # ARM B IS SCENT'S PROTOCOL AND SCENT COUNTS SAMPLED FORWARD TRAJECTORIES, not distinct
+            # molecules: "All the models sampled 320,000 forward trajectories during the training in
+            # total" (Gainski et al. 2025, App. B), a paper in which the word "oracle" does not
+            # appear once in 23 pages. The number 320,000 IS 64 forward trajectories x 5,000
+            # iterations, so measuring it in distinct molecules measures something the source never
+            # claimed -- and costs a generator with a lower unique rate strictly more sampling to
+            # clear the same bar (SCENT 47% unique needed ~46% more iterations than RGFN's 75%).
+            #
+            # Counted as iterations x forward-trajectories-per-iteration rather than from the trace,
+            # because that is the quantity SCENT fixed: a trajectory that yields an invalid or
+            # undockable molecule was still sampled, and RxnFlow lands ~57 traced rows per 64
+            # sampled. Exact across a resume, since iteration_idx is absolute.
+            total = (int(iteration_idx) + 1) * self.fwd_per_iter
+            unit = "FORWARD TRAJECTORIES"
+            extra = (
+                f"({self.fwd_per_iter}/iteration x {int(iteration_idx) + 1} iterations; "
+                f"{self.total_train_distinct:,} distinct, "
+                f"{int(getattr(self.trace, 'n_train_scored', 0)):,} presented this process)"
+            )
+        else:
+            total = self.total_train_distinct
+            unit = "DISTINCT training molecules"
+            extra = (
+                f"({self.n_prior:,} of them from earlier rounds; "
+                f"{int(getattr(self.trace, 'n_train_scored', 0)):,} presentations this process)"
+            )
         if total < self.budget:
             return
         self.fired = True
         print(
-            f"[{self.tag}] budget reached at iteration {iteration_idx}: {total:,} DISTINCT training "
-            f"molecules ({self.n_prior:,} of them from earlier rounds; "
-            f"{int(getattr(self.trace, 'n_train_scored', 0)):,} presentations this process) "
-            f">= {self.budget:,}",
+            f"[{self.tag}] budget reached at iteration {iteration_idx}: {total:,} {unit} "
+            f"{extra} >= {self.budget:,}",
             flush=True,
         )
         raise BudgetReached(total, self.budget, iteration_idx)
@@ -200,6 +236,8 @@ class BudgetStopper:
     def summary(self) -> dict:
         return {
             "budget_oracle_calls": self.budget,
+            "budget_unit": ("forward_trajectories" if self.fwd_per_iter else "distinct_molecules"),
+            "forward_trajectories_per_iteration": self.fwd_per_iter,
             "fired": self.fired,
             # THE GATE: distinct molecules that reached the oracle, cell-wide.
             "n_train_distinct_total": self.total_train_distinct,
@@ -209,6 +247,30 @@ class BudgetStopper:
             # is reported rather than discarded.
             "n_train_presented_this_process": int(getattr(self.trace, "n_train_scored", 0)),
         }
+
+
+def forward_trajectories_per_iteration() -> Optional[int]:
+    """Forward trajectories sampled per training iteration, from the environment, or ``None``.
+
+    ``None`` means "gate on distinct molecules", which is right for arm A and for every config that
+    predates the 2026-09-18 ruling. Set only by submit_train_v2.sh for arm B, from the manifest's
+    per-generator table, so a run cannot silently change which axis it is measured on.
+    """
+    import os
+
+    raw = os.environ.get("BENCHMARK_V2_ARM_B_FWD_PER_ITER")
+    if not raw:
+        return None
+    try:
+        val = int(raw)
+    except ValueError:
+        print(
+            f"[budget-stop] WARNING BENCHMARK_V2_ARM_B_FWD_PER_ITER={raw!r} is not an int; "
+            f"falling back to the DISTINCT gate",
+            flush=True,
+        )
+        return None
+    return val if val > 0 else None
 
 
 def arm_b_budget(default: Optional[int] = None) -> Optional[int]:
