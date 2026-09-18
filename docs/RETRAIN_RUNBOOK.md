@@ -125,8 +125,51 @@ defined on calls.
 
 | arm | budget | who | purpose |
 |---|---|---|---|
-| **A** | **10,000 oracle calls** | all 9 generators | the PMO convention the competitors' own papers use |
-| **B** | **320,000 oracle calls** | the 3 reaction-GFNs | **SCENT's own published protocol** — 64 forward trajectories × 5,000 iterations |
+| **A** | **10,000 DISTINCT molecules** | all 9 generators | the PMO convention the competitors' own papers use |
+| **B** | **320,000 FORWARD TRAJECTORIES** | the 3 reaction-GFNs | **SCENT's own published protocol** — 64 forward trajectories × 5,000 iterations |
+
+**⛔ THE TWO ARMS ARE IN DIFFERENT UNITS, AND THAT IS NOT SLOPPINESS — IT IS THE PRECEDENT
+(checked 2026-09-18).** Arm B was labelled "320,000 oracle calls" here for weeks. It is not oracle
+calls, and the mislabel cost real work: it made nine finished SCENT cells read as 21.6–96.8% short
+and produced a phantom 1,240-GPU-hour shortfall on scent/clpp.
+
+| source | counts | evidence |
+|---|---|---|
+| **PMO** (arm A) | **distinct** | `optimizer.py` canonicalises then `if smi in self.mol_buffer: pass` — a repeat never reaches the evaluator; the budget test is on `len(mol_buffer)` |
+| **RGFN** | **distinct** | Fig. 4's axis is "normalized iterations", which "simply translates to the number of oracle calls"; code reports `CachedProxyBase.n_proxy_calls → len(self.cache)` |
+| **S3-GFN** | **distinct** | "the optimization budget is strictly limited to 10,000 oracle calls" |
+| **SCENT** (arm B) | **sampled trajectories** | "All the models sampled 320,000 forward trajectories during the training in total" (App. B). The word *oracle* appears **0 times in 23 pages** |
+
+So 320,000 **is** 64 × 5,000. Measuring it in distinct molecules measures something SCENT never
+claimed, and penalises a generator for repeating itself — which `verify_cell.py` already says is
+"MODE COLLAPSE to report, not a shortfall to repair" for the uncached providers. At 47% unique
+SCENT needed ~46% more iterations than RGFN at 75% to clear the same distinct bar, on the very axis
+arm B exists to hold fixed.
+
+**The target is per-generator, because the rate is.** `manifest.FORWARD_PER_ITER` holds the rates,
+read from each generator's own trainer config, and `arm_b_iterations()` derives the target. A guard
+checks every arm-B config against it.
+
+| generator | forward/iter | arm-B iterations | verified against |
+|---|---|---|---|
+| RGFN | 100 | **3,200** | 119.9 traced rows/iter = 100 forward + 20 replay |
+| SCENT | 64 | **5,000** | 96.0 rows/iter = 64 + 32, in all three cells measured |
+| RxnFlow | 64 | **5,000** | `num_from_policy` default 64; ~57 traced rows per 64 sampled |
+
+Counted as *iterations × rate*, never from the trace: SCENT fixed the number **sampled**, and a
+trajectory whose molecule is invalid or undockable was still sampled.
+
+**The 5% tolerance does not apply to arm B.** It exists for a boundary a minibatch can straddle. The
+trajectory target is iterations × a constant, so a run either completed its iterations or did not;
+at 5% a cell 160 iterations short read as complete. Arm A keeps it — a minibatch really can cross
+10,000 mid-iteration.
+
+**Already-landed cells carry a known overshoot.** RGFN's arm-B ceiling was 5,000 by coincidence of
+the "5k" naming, so the cells that stopped on the distinct gate ran 342,100–357,200 trajectories
+against 320,000 (7–12% over). Arm B's stated purpose is the *internal* matrix, within-generator on
+an identical pool, so this does not bias that comparison — but it does flatter arm B against arm A
+in the compute↔reactions exhibit, and the trace can be sliced at 3,200 iterations for a
+protocol-exact prefix. Report the overshoot; do not quietly call those cells 320,000.
 
 **Each exhibit uses the arm that makes it valid (decided 2026-09-08). Arm B's downstream is NOT
 paused.**
