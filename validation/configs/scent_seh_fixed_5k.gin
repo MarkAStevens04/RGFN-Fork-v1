@@ -15,7 +15,14 @@ include 'configs/proxies/target/seh.gin'
 beta = 8
 WandbLogger.mode = 'offline'
 
-Trainer.n_iterations = 5000
+# ⛔ THE CEILING IS A BACKSTOP, NOT THE BUDGET (raised 2026-09-18, researcher's ruling that arm B
+# IS 320,000 distinct molecules). At 5,000 this bound BEFORE the budget did and the run stopped
+# early with the budget unspent -- seeds 42/43/44 stopped at 226,169 / 223,814 / 231,751 on a tail rate of ~41/iter. Nothing
+# flagged it: the runs exited 0 and every artifact looked complete. Sized from the measured
+# tail rate of those very runs plus headroom, so the BUDGET STOP is what ends the run and this
+# number never binds again. If it ever does bind, the cell is short and must be extended, not
+# reported.
+Trainer.n_iterations = 9000
 Trainer.valid_every_n_iterations = 250   # periodic checkpoint cadence for 3-day auto-requeue (Logs/030)
 trainer/gin.singleton.constructor = @Trainer
 trainer = @trainer/gin.singleton()

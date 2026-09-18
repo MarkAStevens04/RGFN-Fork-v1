@@ -115,18 +115,57 @@ mkdir -p "$RUN_DIR"
 # Keyed on TRAIN_DONE.json with exit_code 0, which is written only after the runner RETURNS: a
 # walltime kill never reaches it, so an interrupted task correctly does NOT look finished here. This
 # is the launcher's own completion signal, not an acceptance -- verify/freeze still run outside.
+#
+# ⛔ AND "FINISHED" MEANS REACHED ITS BUDGET, NOT "THE PROCESS EXITED CLEANLY". Those two came apart
+# the first time this ran: all nine SCENT cells returned exit_code 0 having stopped at the
+# 5,000-ITERATION ceiling instead of at the budget, landing between 21.6% and 96.8% of 320,000
+# distinct. A guard keyed on the exit code alone calls every one of them finished and REFUSES to
+# extend them -- turning a recoverable shortfall into a permanent one, silently, because such a cell
+# looks complete in every artifact it wrote. Researcher's ruling 2026-09-18: arm B IS 320,000
+# distinct molecules, so that is the thing to check.
 if [ -f "$RUN_DIR/TRAIN_DONE.json" ]; then
-  _done_rc=$(python -c "
-import json,sys
-try: print(json.load(open('$RUN_DIR/TRAIN_DONE.json')).get('exit_code'))
-except Exception: print('unreadable')" 2>/dev/null)
-  if [ "$_done_rc" = "0" ]; then
-    echo "[v2train] $CELL_TAG already finished (TRAIN_DONE.json exit_code=0). Nothing to do."
-    echo "[v2train] This is the expected end of an over-provisioned array: the cell reached its"
+  _want="$(python "$MANIFEST" --emit "$GEN" "$TARGET" "$SEED" --arm "$TRAIN_ARM" 2>/dev/null \
+            | sed -n 's/^ARM_CALLS=//p')"
+  _verdict=$(python - "$RUN_DIR" "${_want:-0}" <<'PY'
+import csv, glob, json, os, sys
+run_dir, want = sys.argv[1], int(sys.argv[2] or 0)
+try:
+    rc = json.load(open(os.path.join(run_dir, "TRAIN_DONE.json"))).get("exit_code")
+except Exception:
+    print("unreadable 0 0"); raise SystemExit
+# THE UNION ACROSS ROTATED SIBLINGS -- the same set the arm-B stop gates on. An extended cell keeps
+# its earlier rounds in trace.csv.N, so counting only trace.csv under-reports every extension and
+# would re-extend a finished cell for ever.
+seen = set()
+base = os.path.join(run_dir, "trace.csv")
+for path in [base] + sorted(glob.glob(base + ".*")):
+    try:
+        with open(path, newline="") as fh:
+            for r in csv.DictReader(fh):
+                if (r.get("phase") or "") == "train":
+                    smi = r.get("smiles")
+                    if smi:
+                        seen.add(smi)
+    except Exception:
+        pass
+print(f"{rc} {len(seen)} {want}")
+PY
+)
+  set -- $_verdict
+  _done_rc="${1:-unreadable}"; _have="${2:-0}"; _want="${3:-0}"
+  if [ "$_done_rc" = "0" ] && [ "$_want" -gt 0 ] && [ "$_have" -ge "$_want" ]; then
+    echo "[v2train] $CELL_TAG already finished: exit_code=0 AND $_have >= $_want distinct."
+    echo "[v2train] This is the expected end of an over-provisioned array -- the cell reached its"
     echo "[v2train] budget in an earlier task, so this one exits without touching its artifacts."
     exit 0
   fi
-  echo "[v2train] TRAIN_DONE.json present but exit_code=$_done_rc; continuing (not a clean finish)" >&2
+  if [ "$_done_rc" = "0" ]; then
+    echo "[v2train] $CELL_TAG exited cleanly but is SHORT: $_have of $_want distinct. EXTENDING" >&2
+    echo "[v2train] rather than no-opping -- a clean exit short of budget means the iteration" >&2
+    echo "[v2train] ceiling bound before the budget did, and the budget is what arm B means." >&2
+  else
+    echo "[v2train] TRAIN_DONE.json present but exit_code=$_done_rc; continuing (not a clean finish)" >&2
+  fi
 fi
 
 # ---- environment ---------------------------------------------------------------------------------

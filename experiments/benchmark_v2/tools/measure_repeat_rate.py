@@ -127,6 +127,14 @@ _PROXY_DIRS = (
     "glue/proxies",
     "rgfn/gfns/reaction_gfn/proxies",
     "validation/generators",  # SCENT's DockingBridgeProxy lives with its bridge, not with ours
+    # ...AND SCENT'S SURROGATE PROXIES LIVE IN ITS CLONE, which is neither. SCENT runs by chdir'ing
+    # into external/scent and its gin binds @TDCProxy, defined only there -- so drd2 resolved to
+    # "provider unresolved: operative_config.gin binds @TDCProxy, but no file defines it" and three
+    # cells sat at verdict `unknown`, measured against nothing. The line above shows the shape of the
+    # mistake: the clone was remembered for the DOCKING proxy and forgotten for the surrogate one.
+    # TDCProxy subclasses CachedProxyBase, so those cells gate on DISTINCT, and at 306,842-309,669
+    # they are short of 320,000 rather than unmeasurable.
+    "external/scent/rgfn/gfns/reaction_gfn/proxies",
 )
 
 

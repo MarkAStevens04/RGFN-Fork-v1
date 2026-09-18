@@ -313,6 +313,45 @@ class Cell:
     def verified(self, arm: str = "a") -> bool:
         return self.verified_marker(arm).is_file()
 
+    def trace_distinct(self, arm: str = "a") -> Optional[int]:
+        """DISTINCT training molecules this cell has sent to the oracle -- the budget's own unit.
+
+        NOT ``trace_rows``. That tail-reads ``n_scored``, which counts PRESENTATIONS across every
+        phase, and the two differ by the repeat rate plus the evaluation rows: scent_seh_s42 read
+        504,932 there while having sent 226,169 distinct molecules to the oracle. Comparing the
+        first against a budget expressed in the second is how nine SCENT cells at 21.6-96.8% of
+        budget classified as complete and then as ``unverified`` -- a state the driver REFUSES to
+        resubmit -- instead of ``short-trace``, which it resumes. verify_cell.py had it right all
+        along and rejected them on exactly this number; only the classifier disagreed.
+
+        Read from the trace's own ``n_train_distinct`` column, by NAME rather than position, and
+        from the LAST row, which costs one seek. That column is already the CELL-level union rather
+        than this round's count, because BudgetStopper seeds the writer's set from the rotated
+        siblings at construction -- so an extended cell reports its running total here for free.
+        """
+        p = (
+            self.trace_path(arm)
+            if hasattr(self, "trace_path")
+            else self.train_dir(arm) / "trace.csv"
+        )
+        try:
+            with open(p, "rb") as fh:
+                header = fh.readline().decode("utf-8", "replace").strip().split(",")
+                if "n_train_distinct" not in header:
+                    return None  # pre-column trace: caller falls back
+                idx = header.index("n_train_distinct")
+                fh.seek(0, os.SEEK_END)
+                size = fh.tell()
+                back = min(size, 8192)
+                fh.seek(-back, os.SEEK_END)
+                tail = fh.read().decode("utf-8", "replace").strip().splitlines()
+            if len(tail) < 2 and size <= 8192:
+                return None
+            cells = tail[-1].split(",")
+            return int(cells[idx])
+        except (OSError, ValueError, IndexError):
+            return None
+
     def status(self, arm: str = "a") -> str:
         if not self.has_arm(arm):
             return "n/a"
@@ -325,8 +364,15 @@ class Cell:
             # cannot be evidenced.
             return "no-trace"
         budget = self.arm_calls(arm) or 0
-        if rows < budget * 0.95:
-            return f"short-trace:{rows}/{budget}"
+        # THE GATE IS DISTINCT MOLECULES, which is what the budget means and what the arm-B stop
+        # and verify_cell.py both use. Falls back to rows only for a trace written before the
+        # column existed -- where it is the only number available, not the right one.
+        got = self.trace_distinct(arm)
+        measure = "distinct" if got is not None else "rows"
+        if got is None:
+            got = rows
+        if got < budget * 0.95:
+            return f"short-trace:{got}/{budget}"
         if not self.verified(arm):
             return "unverified"
         return "frozen" if self.frozen(arm) else "verified"

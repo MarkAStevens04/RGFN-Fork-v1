@@ -503,10 +503,20 @@ WALLTIMES = {"clpp": 2, "6td3b": 3}  # surrogate targets default to 1
 # the cheap side of the trade -- submit_train_v2.sh no-ops on a finished cell.
 SHORT_DOCKING_WALLTIMES = {"synformer": 2, "tango": 2}
 
+# A SURROGATE TARGET IS NOT AUTOMATICALLY A ONE-WALLTIME CELL, and assuming it was cost two cells.
+# The rate table this file quotes measured rxnflow and scent surrogates (0.2-0.5 d) and NO rgfn
+# surrogate at all, so rgfn/drd2 inherited the default of 1. It actually runs 2.6-3+ days to reach
+# 320,000: seed 43 COMPLETED at 2-15:04, while seeds 42 and 44 hit the 3-day walltime at 291,085
+# and 293,414 distinct -- 91% of budget, ~300 iterations short, with NO second task to continue
+# into because they were sized at one. A gap in the measurements read as a measurement of 1.
+# rgfn/seh is left at 1: it completed in 1-10 to 1-16 across all three seeds.
+LONG_SURROGATE_WALLTIMES = {("rgfn", "drd2"): 2}
+
 
 def walltimes_for(cell) -> int:
     if cell.target_name not in WALLTIMES:
-        return 1  # surrogate target: finishes inside one walltime on either arm
+        # Surrogate target -- one walltime UNLESS measured otherwise for this generator.
+        return LONG_SURROGATE_WALLTIMES.get((cell.generator, cell.target_name), 1)
     if not cell.has_arm("b"):
         return SHORT_DOCKING_WALLTIMES.get(cell.generator, 1)
     return WALLTIMES[cell.target_name]
