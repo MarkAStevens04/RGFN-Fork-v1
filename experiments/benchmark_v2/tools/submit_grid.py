@@ -424,6 +424,18 @@ def decide(cell, arm: str) -> tuple[str, str]:
             "checkpoints are all that survive. Retraining overwrites them"
         )
     if st.startswith("short-trace"):
+        # ...BUT ONLY IF THIS DRIVER IS ALLOWED TO TRAIN IT. train_plan was consulted for
+        # `not-started` below and not here, so a SHORT cell owned by copy_forward was offered for
+        # submission while submit_train_v2.sh refuses it outright ("has train_plan='copy', not
+        # 'generate'"). synformer_drd2_s43 is exactly that: short at 6,950/10,000 and plan=copy, so
+        # every submission died in 4 seconds. Harmless when a human is watching and a fast retry
+        # loop when one is not.
+        plan = getattr(cell, "train_plan", "")
+        if plan not in ("generate", ""):
+            return "refuse", (
+                f"incomplete ({st}) but train_plan='{plan}' -- this driver only trains "
+                f"'generate' cells and the runner refuses the rest; {plan}_forward owns it"
+            )
         return "submit", f"incomplete ({st}) -- resubmit resumes"
     if st == "not-started":
         # train_plan read HERE, for intent only: a re-sample is minutes against a frozen policy and
