@@ -3,7 +3,20 @@
 #SBATCH --partition=compute
 #SBATCH --exclude=balam008
 #SBATCH --gpus-per-node=1
-#SBATCH --time=3-00:00:00
+# ⛔ 24 HOURS IS A HARD CEILING NOW, AND sinfo DOES NOT SHOW IT (measured 2026-09-24).
+# `sinfo -o "%P %l"` still reports compute at 3-00:00:00 and jobs submitted earlier are still
+# RUNNING with 3-day limits, but a submit filter now rejects anything above 24 h outright:
+#   "In the compute partition, walltime must be at most 24 hour(s)"
+# Probed: 24:00:00 accepted, 1-00:00:01 rejected. Every submission failed until this line changed,
+# and the failure is at SUBMIT, so nothing queues and nothing runs.
+#
+# CLAUDE.md says to trust sinfo over the public SciNet page, which said 24 h. That advice was right
+# when written and is now backwards: the page's number is the one being enforced. Trust neither --
+# probe with `sbatch --test-only`, which is what established this.
+#
+# THE ARRAY MATH DEPENDS ON THIS. Links are now a THIRD as long, so a cell needs three times as many
+# of them, and the 60-TASK QOS cap counts every one. See WALLTIMES in submit_grid.py.
+#SBATCH --time=24:00:00
 #SBATCH --output=/scratch/markymoo/rgfn_runs/%x-%j.out
 #SBATCH --error=/scratch/markymoo/rgfn_runs/%x-%j.err
 #

@@ -497,7 +497,33 @@ def decide(cell, arm: str) -> tuple[str, str]:
 # taken from an early, fast stretch of a run whose rate DEGRADES as molecules grow: rgfn/clpp was
 # observed going 90.96 -> 94.17 -> 100.90 -> 111.28 s/iteration over its first four iterations.
 # clpp keeps two: its live projection is 3.9 d against 6, which absorbs the same degradation.
-WALLTIMES = {"clpp": 2, "6td3b": 3}  # surrogate targets default to 1
+# ⛔ A LINK IS 24 HOURS NOW, NOT 72 (2026-09-24). A submit filter began rejecting anything above
+# 24 h in the compute partition -- `sinfo` still reports 3-00:00:00 and older jobs still RUN with
+# 3-day limits, but nothing new submits above 24 h. Every count below is therefore expressed as
+# EXPECTED HOURS and divided by the link length, so the next change to that ceiling is a one-line
+# edit rather than a re-derivation of five hand-tuned integers.
+LINK_HOURS = 24
+
+# Measured wall-clock to finish a cell, per (generator, target) where it exceeds one link, from the
+# landed runs: rgfn/seh 34-40 h, rgfn/drd2 63-72 h, scent/clpp 56-62 h, rgfn/clpp ~108 h to its
+# 3,200-iteration target, 6TD3-B cells still running past 69 h. A cell not listed here finishes
+# inside one link (the surrogate cells land at 5-12 h).
+EXPECTED_HOURS = {
+    ("rgfn", "seh"): 40,
+    ("rgfn", "drd2"): 72,
+    ("rgfn", "clpp"): 108,
+    ("rgfn", "6td3b"): 130,
+    ("scent", "clpp"): 62,
+    ("scent", "6td3b"): 80,
+    ("rxnflow", "clpp"): 90,
+    ("rxnflow", "6td3b"): 100,
+}
+
+# ⚠ THE 60-TASK QOS CAP NOW BINDS MUCH HARDER. At 72-hour links a 6TD3-B cell cost 3 tasks; at 24 it
+# costs 6, so nine of them is 54 of the 60 slots. Over-provisioning is still safe -- an unused link
+# no-ops on TRAIN_DONE plus budget -- but it is no longer cheap in SLOTS, so these are sized to the
+# measurement rather than rounded up generously.
+WALLTIMES = {"clpp": 2, "6td3b": 3}  # legacy, superseded by EXPECTED_HOURS; kept for surrogate keys
 
 # ...BUT THE TARGET ALONE DOES NOT DETERMINE THE LENGTH; THE BUDGET DOES. The numbers above are for
 # the arm-B cells, which train to 320,000 DISTINCT molecules. The competitor cells train to arm A's
@@ -531,12 +557,22 @@ LONG_SURROGATE_WALLTIMES = {("rgfn", "drd2"): 2}
 
 
 def walltimes_for(cell) -> int:
-    if cell.target_name not in WALLTIMES:
-        # Surrogate target -- one walltime UNLESS measured otherwise for this generator.
-        return LONG_SURROGATE_WALLTIMES.get((cell.generator, cell.target_name), 1)
-    if not cell.has_arm("b"):
-        return SHORT_DOCKING_WALLTIMES.get(cell.generator, 1)
-    return WALLTIMES[cell.target_name]
+    """Links to request, = ceil(expected hours / LINK_HOURS), minimum 1."""
+    hours = EXPECTED_HOURS.get((cell.generator, cell.target_name))
+    if hours is None:
+        # Not measured above => finishes inside one link. The arm-A competitor cells all do; the
+        # two that did not (synformer, tango on a docking target, 20-35 h) are listed here.
+        hours = SHORT_DOCKING_HOURS.get((cell.generator, cell.target_name), 0)
+    return max(1, -(-int(hours) // LINK_HOURS))
+
+
+# Arm-A docking cells that exceed one link. Measured from their ClpP siblings' timing.json.
+SHORT_DOCKING_HOURS = {
+    ("synformer", "clpp"): 21,
+    ("synformer", "6td3b"): 30,
+    ("tango", "clpp"): 35,
+    ("tango", "6td3b"): 48,
+}
 
 
 def submit_cmd(cell, out_root: str) -> list[str]:
