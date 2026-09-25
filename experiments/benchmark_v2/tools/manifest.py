@@ -433,6 +433,27 @@ class Cell:
                 best = got
         return best
 
+    def _count_distinct(self, arm: str = "a") -> Optional[int]:
+        """DISTINCT training SMILES, counted across the cell's rounds. O(rows); see the caller."""
+        import csv as _csv
+        import glob as _glob
+
+        base = str(self.trace_path(arm))
+        seen: set = set()
+        found = False
+        for path in [base] + sorted(_glob.glob(base + ".*")):
+            try:
+                with open(path, newline="") as fh:
+                    for r in _csv.DictReader(fh):
+                        found = True
+                        if (r.get("phase") or "") == "train":
+                            smi = r.get("smiles")
+                            if smi:
+                                seen.add(smi)
+            except OSError:
+                continue
+        return len(seen) if found else None
+
     def status(self, arm: str = "a") -> str:
         if not self.has_arm(arm):
             return "n/a"
@@ -466,8 +487,19 @@ class Cell:
             got = (iters * fwd) if iters is not None else None
         else:
             got = self.trace_distinct(arm)
+        if got is None and not fwd:
+            # NO n_train_distinct COLUMN, AND THIS ARM GATES ON DISTINCT -- so COUNT it rather than
+            # fall back to the row count. The older competitor traces predate that column, and the
+            # fallback silently substituted presentations for distinct: fraggfn_clpp_s42 reported
+            # 10,048 and passed as complete while having reached 9,371 distinct, 6% short. The
+            # comment here used to say "the only number available, not the right one" and then used
+            # it anyway, which is how a known-wrong number gets treated as a verdict.
+            #
+            # Affordable because only the DISTINCT axis needs it and those cells are ~10k rows; the
+            # 500k-row arm-B traces gate on trajectories and never reach this branch.
+            got = self._count_distinct(arm)
         if got is None:
-            got = rows  # pre-column trace: the only number available, not the right one
+            got = rows  # genuinely nothing better available
         # THE 5% TOLERANCE IS FOR A BOUNDARY THAT CAN BE STRADDLED, and the trajectory axis has
         # none: the target is iterations x a per-generator constant, so a run either completed its
         # iterations or did not. Applying 5% there passes a cell 160 iterations short (rgfn_drd2_s42
