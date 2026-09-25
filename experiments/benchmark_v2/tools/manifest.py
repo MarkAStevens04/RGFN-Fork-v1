@@ -140,6 +140,12 @@ _CFG = {
     #
     # TANGO IS SATURN'S AGENT PLUS A SECOND ORACLE COMPONENT, not a seventh generator, so it has its
     # own config but shares saturn's runner and reward bridge.
+    # The two ClpP competitor configs, registered 2026-09-24 when those six cells were re-scoped
+    # from copy to generate. They existed as v1 files and were referenced by nothing in v2, which is
+    # why the committed fraggfn_clpp file could drift to n_train_steps: 400 while every run recorded
+    # 157 -- a config nothing loads is a config nothing checks.
+    ("fraggfn", "clpp"): "validation/configs/fraggfn_clpp_docking_fixed.yaml",
+    ("s3gfn", "clpp"): "validation/configs/s3gfn_clpp_fixed.yaml",
     ("fraggfn", "6td3b"): "validation/configs/fraggfn_6td3b_docking_fixed.yaml",
     ("s3gfn", "6td3b"): "validation/configs/s3gfn_6td3b_fixed.yaml",
     ("saturn", "6td3b"): "validation/configs/saturn_6td3b_fixed.yaml",
