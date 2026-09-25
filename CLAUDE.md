@@ -171,10 +171,22 @@ suboptimal set, i.e. a *lower bound on the competitor*, which flatters us. Re-so
   Mac laptop and **validate what you can locally** (imports, `py_compile`, gin
   config-include integrity, `bash -n`) — full train/dock validation happens on
   Balam. State clearly in your summary what you did vs. couldn't verify.
-- **SLURM walltime limits (authoritative — `sinfo -o "%P %l"`, NOT the public SciNet
-  page, which still says 24 h):** `compute` and `compute_full` **3 days**; `debug`
-  **2 hours**; `debug_full_node` **1 hour**. Ask for what the work needs, not the
-  max — short requests backfill sooner.
+- **SLURM walltime limits — TWO different limits, and the stricter one is invisible to
+  `sinfo` (corrected 2026-09-25):** the PARTITION still allows **3 days** on `compute`
+  (`scontrol show partition compute` → `MaxTime=3-00:00:00`), but `/opt/slurm/bin/sbatch`
+  is a SciNet python wrapper ("sbatchfilter") that **rejects any new submission over 24 h**
+  on Balam — its `balam` branch reads `'compute':{'maxHours':24}`, with no QOS or account
+  exemption. It changed under this project on 2026-09-24 (the file carries its own
+  `# Commit: ... Thu Sep 24 11:46:19 2026` and an mtime to match): jobs submitted before it
+  went through at 3 days and are **still running** with 3-day limits, which is exactly why
+  every status view kept agreeing with the old number while nothing new would queue.
+  `debug` **1 hour**, `debug_full_node` **1 hour** by the same filter.
+  **The previous version of this note said to trust `sinfo` over the public SciNet page,
+  which said 24 h. That was right when written and is now backwards.** Trust neither:
+  `sbatch --test-only --partition=compute --time=<T> --gpus-per-node=1 --wrap="echo x"`
+  answers it in one second, and `experiments/benchmark_v2/tools/preflight.py` runs that
+  check against the trainer's own `#SBATCH --time` before a launch. Ask for what the work
+  needs, not the max — short requests backfill sooner.
 - **ANY job that docks must `source ~/bin/rgfn-smoke-env.sh` — batch jobs included,
   not just login smokes. Never hand-roll `LD_LIBRARY_PATH`.** QuickVina2-GPU links
   against `libboost_{program_options,system,filesystem}.so.1.83.0`, which live in
