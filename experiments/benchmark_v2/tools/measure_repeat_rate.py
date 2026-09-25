@@ -84,6 +84,8 @@ import manifest  # noqa: E402
 # Same tolerance verify_cell uses: a batch may straddle the boundary, 5% is one batch at any of
 # our batch sizes. Imported as a constant rather than restated, so the two cannot drift.
 BUDGET_TOLERANCE = 0.95
+# The upper bound. Asymmetric with the lower one on purpose -- see _verdict.
+OVER_TOLERANCE = 1.10
 
 # Where each generator's reward providers are defined. File locations, not verdicts -- the verdict is
 # read out of the file. `rgfn` and `scent` are ours and go through upstream's CachedProxyBase.
@@ -276,6 +278,20 @@ def _verdict(row: dict, budget: int) -> tuple[str, str]:
         return "unknown", "not measured against the ruling"
     reached = int(row["distinct"] if row["cached"] == "yes" else row["train_rows"])
     basis = "distinct" if row["cached"] == "yes" else "rows"
+    # OVER IS A VERDICT TOO. This only ever asked whether a cell fell short, so a cell at 2.50x its
+    # budget returned "ok" -- fraggfn_6td3b x3 at ~25,000 against 10,000, which is the arm whose
+    # whole purpose is cross-generator budget parity. A one-sided check on a two-sided quantity
+    # cannot fail in the direction it was not pointed at.
+    #
+    # The asymmetry in the bound is deliberate, not sloppiness: a run can only stop at an iteration
+    # BOUNDARY, so a small overshoot is structural and a small undershoot is not. One batch is ~1%
+    # of arm A at every batch size here, so 1.10 is generous for the boundary and still catches the
+    # 2.5x. Both directions are reported with the ratio, because "over" needs a size to be judged.
+    if reached > budget * OVER_TOLERANCE:
+        return "OVER", (
+            f"{reached:,}/{budget:,} on {basis}, OVER by {reached - budget:,} "
+            f"({reached / budget:.2f}x)"
+        )
     if reached >= budget * BUDGET_TOLERANCE:
         return "ok", f"{reached:,}/{budget:,} on {basis}"
     return "SHORT", f"{reached:,}/{budget:,} on {basis}, short by {budget - reached:,}"
@@ -298,17 +314,26 @@ def measure(cell, arm: str) -> dict:
     }
     d = cell.train_dir(arm)
     t = d / "trace.csv"
-    if not t.is_file() or t.stat().st_size < 200:
+    # ACROSS ROTATED SIBLINGS, and keyed on whether any of them holds rows rather than on the live
+    # file's size. A round that resumes an already-finished cell rotates trace.csv to trace.csv.N and
+    # writes only a 76-byte header, so three s3gfn_6td3b cells reported "no usable trace" while
+    # holding 12,048 rows each in trace.csv.1. The budget is a CELL-level quantity; reading one round
+    # of it measures whichever round happened to be last.
+    traces = [
+        q for q in [t] + sorted(d.glob("trace.csv.*")) if q.is_file() and q.stat().st_size >= 200
+    ]
+    if not traces:
         row["evidence"] = "NOT MEASURED: no usable trace"
         return row
 
     n, seen = 0, set()
-    with open(t, newline="") as fh:
-        for r in csv.DictReader(fh):
-            if r.get("phase") != "train":
-                continue
-            n += 1
-            seen.add(r.get("smiles", ""))
+    for _t in traces:
+        with open(_t, newline="") as fh:
+            for r in csv.DictReader(fh):
+                if r.get("phase") != "train":
+                    continue
+                n += 1
+                seen.add(r.get("smiles", ""))
     row["train_rows"] = n
     row["distinct"] = len(seen)
     row["unique_pct"] = f"{100*len(seen)/n:.1f}" if n else ""

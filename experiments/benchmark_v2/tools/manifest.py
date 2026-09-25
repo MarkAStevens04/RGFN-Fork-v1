@@ -297,9 +297,40 @@ class Cell:
                 fh.seek(-back, os.SEEK_END)
                 tail = fh.read().decode("utf-8", "replace").strip().splitlines()
             if len(tail) < 2 and size <= 8192:
-                return None  # header only
+                # HEADER ONLY -- but that does NOT mean the cell has no trace. A round that resumes
+                # an already-finished cell rotates trace.csv to trace.csv.N and writes only a header,
+                # so the live file is 76 bytes while the real history sits beside it. Three
+                # s3gfn_6td3b cells read as `no-trace` that way -- a state the driver REFUSES -- while
+                # holding 12,048 rows and a 5.3 GB checkpoint each. Fall back to the newest sibling
+                # that actually has rows.
+                import glob as _glob
+
+                sibs = sorted(_glob.glob(str(p) + ".*"), key=lambda q: os.path.getmtime(q))
+                for sib in reversed(sibs):
+                    got = self._trace_rows_of(sib)
+                    if got is not None:
+                        return got
+                return None
             last = tail[-1].split(",")
             return int(last[0])
+        except (OSError, ValueError, IndexError):
+            return None
+
+    @staticmethod
+    def _trace_rows_of(path) -> Optional[int]:
+        """Row count from ONE trace file's last row, or None if it holds only a header."""
+        try:
+            with open(path, "rb") as fh:
+                fh.readline()
+                fh.seek(0, os.SEEK_END)
+                size = fh.tell()
+                if size == 0:
+                    return None
+                fh.seek(-min(size, 8192), os.SEEK_END)
+                tail = fh.read().decode("utf-8", "replace").strip().splitlines()
+            if len(tail) < 2 and size <= 8192:
+                return None
+            return int(tail[-1].split(",")[0])
         except (OSError, ValueError, IndexError):
             return None
 
@@ -361,24 +392,46 @@ class Cell:
         trajectories produced a traced molecule -- which is the point: SCENT fixed the number
         SAMPLED, and a trajectory whose molecule is invalid or undockable was still sampled.
         """
-        p = self.trace_path(arm)
-        try:
-            with open(p, "rb") as fh:
-                header = fh.readline().decode("utf-8", "replace").strip().split(",")
-                if "step" not in header:
-                    return None
-                idx = header.index("step")
-                fh.seek(0, os.SEEK_END)
-                size = fh.tell()
-                fh.seek(-min(size, 8192), os.SEEK_END)
-                tail = fh.read().decode("utf-8", "replace").strip().splitlines()
-            for line in reversed(tail):  # last row with a populated step
-                parts = line.split(",")
-                if len(parts) > idx and parts[idx].strip():
-                    return int(parts[idx]) + 1
-            return None
-        except (OSError, ValueError, IndexError):
-            return None
+        import glob as _glob
+
+        def _last_step(path: str) -> Optional[int]:
+            # WIDENING TAIL, NOT A FIXED 8 KiB. The step column is BLANK on eval rows, and a round
+            # can end with more than 8 KiB of them: rgfn_drd2_s42's final round is 4,999 eval rows
+            # and zero train rows, so a fixed window found no step at all, returned None, and the
+            # caller fell back to a raw row count -- reporting a cell that had finished its 3,200
+            # iterations as "short-trace:4999/320000" and queueing it to be trained again.
+            try:
+                with open(path, "rb") as fh:
+                    header = fh.readline().decode("utf-8", "replace").strip().split(",")
+                    if "step" not in header:
+                        return None
+                    idx = header.index("step")
+                    fh.seek(0, os.SEEK_END)
+                    size = fh.tell()
+                    window = 8192
+                    while True:
+                        fh.seek(-min(size, window), os.SEEK_END)
+                        tail = fh.read().decode("utf-8", "replace").strip().splitlines()
+                        for line in reversed(tail):
+                            parts = line.split(",")
+                            if len(parts) > idx and parts[idx].strip():
+                                return int(parts[idx]) + 1
+                        if window >= size:
+                            return None  # genuinely no populated step anywhere in this file
+                        window *= 16
+            except (OSError, ValueError, IndexError):
+                return None
+
+        # ACROSS ROTATED SIBLINGS. The step is absolute across a resume, so the cell's iteration
+        # count is the MAX over its rounds -- and the newest round is not always the one holding it,
+        # because a round that no-ops training and only re-samples writes a file with no steps at all.
+        base = str(self.trace_path(arm))
+        best = None
+        for path in [base] + sorted(_glob.glob(base + ".*")):
+            got = _last_step(path)
+            if got is not None and (best is None or got > best):
+                best = got
+        return best
 
     def status(self, arm: str = "a") -> str:
         if not self.has_arm(arm):
