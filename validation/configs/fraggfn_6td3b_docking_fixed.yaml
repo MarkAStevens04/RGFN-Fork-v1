@@ -45,7 +45,23 @@ run:
   seed: 42
 
 fixed_reward:
-  n_train_steps: 400
+  # ⛔ THIS NUMBER IS THE BUDGET, AND IT DOES NOT TRANSFER BETWEEN TARGETS (recalibrated 2026-09-24).
+  # This entrant has no "stop at N molecules" setting -- unlike saturn/synformer/tango, whose configs
+  # carry a real `budget:` -- so its round count IS its budget, exactly as the REINVENT config states
+  # it: "steps x batch IS the budget". That makes the round count a PRESENTATION budget while arm A is
+  # a DISTINCT-molecule budget, and the two agree only at a ~100% unique rate.
+  #
+  # Was 400, copied from the ClpP sibling under "only the reward differs". 6TD3-B yields 64 traced
+  # rows per round against ClpP's 25.1, so those 400 rounds bought 24,965-25,038 distinct molecules --
+  # 2.50x the allowance, on the arm whose entire purpose is equal allowances.
+  #
+  # Calibrated from the landed traces of these very cells: the round at which cumulative DISTINCT
+  # first reaches 10,000, per seed, sized to the worst seed so every seed lands inside 0.95-1.10x.
+  # Projected landing: 10,243 / 10,304 / 10,304.
+  #
+  # If this config is ever copied to a new target, RE-DERIVE this number. Copying it is what produced
+  # the defect above. measure_repeat_rate now reports OVER as well as SHORT, so a bad copy is caught.
+  n_train_steps: 170
   n_samples: 200
   sample_oversample: 6.0
   top_k: 100

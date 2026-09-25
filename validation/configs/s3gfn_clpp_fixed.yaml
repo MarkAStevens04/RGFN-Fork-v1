@@ -25,7 +25,21 @@ run:
 fixed_reward:
   system: clpp                          # target system (provenance + mode gate)
   reward_name: clpp_docking             # fixed reward generator name (manifest 'oracle' field)
-  n_train_steps: 157                    # 157 x 64 = 10,048 scored -- their PMO max_oracle_calls.
+  # ⛔ THIS NUMBER IS THE BUDGET, AND IT DOES NOT TRANSFER BETWEEN TARGETS (recalibrated 2026-09-24).
+  # This entrant has no "stop at N molecules" setting -- unlike saturn/synformer/tango, whose configs
+  # carry a real `budget:` -- so its round count IS its budget. That makes it a PRESENTATION budget
+  # while arm A is a DISTINCT-molecule budget; the two agree only at a ~100% unique rate.
+  #
+  # Was 157, i.e. 10,048 presentations, which bought only 8,451-8,912 distinct: 11-15% short.
+  # Same defect as the 6TD3-B sibling -- a presentation count standing in for a distinct budget.
+  #
+  # Calibrated from the landed traces of these very cells: the round at which cumulative DISTINCT
+  # first reaches 10,000, per seed, sized to the worst seed so every seed lands inside 0.95-1.10x.
+  # Projected landing: 10,253 / 10,845 / 10,676.
+  #
+  # If this config is copied to a new target, RE-DERIVE this number -- copying it is what produced
+  # the defect above. measure_repeat_rate now reports OVER as well as SHORT, so a bad copy is caught.
+  n_train_steps: 202
                                         # WAS 5000 (=320,000), matched to OUR generators rather than
                                         # to their paper; a ~32x advantage (audit 2026-08-20).
   n_samples: 2000                       # unique valid molecules to emit as candidates

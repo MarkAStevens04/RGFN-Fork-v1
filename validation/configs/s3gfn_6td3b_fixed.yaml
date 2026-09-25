@@ -47,7 +47,24 @@ run:
 fixed_reward:
   system: 6td3b                          # target system (provenance + mode gate)
   reward_name: 6td3b             # fixed reward generator name (manifest 'oracle' field)
-  n_train_steps: 157                    # 157 x 64 = 10,048 scored -- their PMO max_oracle_calls.
+  # ⛔ THIS NUMBER IS THE BUDGET, AND IT DOES NOT TRANSFER BETWEEN TARGETS (recalibrated 2026-09-24).
+  # This entrant has no "stop at N molecules" setting -- unlike saturn/synformer/tango, whose configs
+  # carry a real `budget:` -- so its round count IS its budget. That makes it a PRESENTATION budget
+  # while arm A is a DISTINCT-molecule budget; the two agree only at a ~100% unique rate.
+  #
+  # Was 157. The comment it replaces said "157 x 64 = 10,048 scored -- their PMO max_oracle_calls",
+  # which is the defect in one line: 10,048 SCORED is a presentation count, and PMO's budget is
+  # DISTINCT (its optimizer canonicalises and skips the evaluator on a buffer hit). S3-GFN is only
+  # ~79% unique, so those 10,048 presentations bought 7,412-7,970 distinct -- a quarter short.
+  # Under-resourcing a competitor is the direction that flatters our own result.
+  #
+  # Calibrated from the landed traces of these very cells: the round at which cumulative DISTINCT
+  # first reaches 10,000, per seed, sized to the worst seed so every seed lands inside 0.95-1.10x.
+  # Projected landing: 10,785 / 10,466 / 10,065.
+  #
+  # If this config is copied to a new target, RE-DERIVE this number -- copying it is what produced
+  # the defect above. measure_repeat_rate now reports OVER as well as SHORT, so a bad copy is caught.
+  n_train_steps: 240
                                         # WAS 5000 (=320,000), matched to OUR generators rather than
                                         # to their paper; a ~32x advantage (audit 2026-08-20).
   n_samples: 2000                       # unique valid molecules to emit as candidates
