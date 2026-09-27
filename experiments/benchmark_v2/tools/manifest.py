@@ -348,7 +348,24 @@ class Cell:
         return d.is_dir() and not os.access(d, os.W_OK)
 
     def verified(self, arm: str = "a") -> bool:
-        return self.verified_marker(arm).is_file()
+        """Verified AND still about THIS run.
+
+        A marker that predates the trace attests to a run that no longer exists. The six ClpP cells
+        re-trained on 2026-09-26 still carried markers written on 2026-09-12, so they read `verified`
+        on evidence about the run they had just replaced -- and `verified` is the state the driver
+        treats as done and the freeze step turns into an acceptance. Verification is a statement
+        about a specific artifact, so it expires when that artifact changes.
+        """
+        m = self.verified_marker(arm)
+        if not m.is_file():
+            return False
+        t = self.trace_path(arm)
+        try:
+            if t.is_file() and t.stat().st_mtime > m.stat().st_mtime:
+                return False
+        except OSError:
+            pass
+        return True
 
     def trace_distinct(self, arm: str = "a") -> Optional[int]:
         """DISTINCT training molecules this cell has sent to the oracle -- the budget's own unit.
@@ -491,6 +508,14 @@ class Cell:
         if fwd:
             iters = self.trace_iterations(arm)
             got = (iters * fwd) if iters is not None else None
+        elif any(self.trace_path(arm).parent.glob(self.trace_path(arm).name + ".*")):
+            # ROTATED => THE COLUMN IS ROUND-LOCAL, so count the union instead. n_train_distinct is
+            # only the CELL total when a BudgetStopper seeded the writer's set from the siblings, and
+            # arm A has no stopper. After fraggfn_clpp extended by 12 steps the fresh round's last row
+            # read 768 (12 x 64) and status called a finished cell "short-trace:768/10000" -- while
+            # measure_repeat_rate, which counts, read 10,138. Same number, two readers, one of them
+            # reading one round of it.
+            got = self._count_distinct(arm)
         else:
             got = self.trace_distinct(arm)
         if got is None and not fwd:
