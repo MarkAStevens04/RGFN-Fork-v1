@@ -495,8 +495,26 @@ class Cell:
             # cells that died 13 seconds in -- leaving a directory whose entire contents were a
             # 217-byte TRAIN_DONE.json recording exit_code 1 -- were refused for the rest of the
             # campaign, protecting the failure marker that said they had failed.
-            has_ckpt = any(self.train_dir(arm).rglob("*.pt"))
-            if not has_ckpt:
+            # ⛔ "NOTHING TO PRESERVE" IS A SIZE QUESTION, NOT AN EXTENSION QUESTION. This first
+            # read `any(rglob("*.pt"))`, which is RGFN's checkpoint suffix and nobody else's:
+            # tango/saturn write `mamba_*_agent.ckpt`, so two cells holding six 21 MB checkpoints
+            # each -- 148 MB from SIX DAYS of training across two walltimes -- classified as
+            # "failed before writing any artifact" and would have been handed to the driver to
+            # overwrite. That is the exact loss the `no-trace` refusal exists to prevent, put back
+            # by the fix meant to narrow it.
+            #
+            # A run that died before writing anything leaves metadata and nothing else: the six
+            # rxnflow cells this branch was written for held ONE 217-byte TRAIN_DONE.json. Total
+            # bytes separates that from a real run by five orders of magnitude and cannot be fooled
+            # by a suffix nobody thought of.
+            d = self.train_dir(arm)
+            try:
+                nbytes = sum(
+                    f.stat().st_size for f in d.rglob("*") if f.is_file() and not f.is_symlink()
+                )
+            except OSError:
+                nbytes = 0
+            if nbytes < 1_048_576:  # < 1 MiB: metadata only, nothing a re-run could destroy
                 return "failed-start"
             return "no-trace"
         budget = self.arm_calls(arm) or 0
