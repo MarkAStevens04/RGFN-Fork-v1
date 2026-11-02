@@ -3,20 +3,17 @@
 #SBATCH --partition=compute
 #SBATCH --exclude=balam008
 #SBATCH --gpus-per-node=1
-# ⛔ 24 HOURS IS A HARD CEILING NOW, AND sinfo DOES NOT SHOW IT (measured 2026-09-24).
-# `sinfo -o "%P %l"` still reports compute at 3-00:00:00 and jobs submitted earlier are still
-# RUNNING with 3-day limits, but a submit filter now rejects anything above 24 h outright:
-#   "In the compute partition, walltime must be at most 24 hour(s)"
-# Probed: 24:00:00 accepted, 1-00:00:01 rejected. Every submission failed until this line changed,
-# and the failure is at SUBMIT, so nothing queues and nothing runs.
+# WALLTIME IS 3 DAYS AGAIN (re-probed 2026-11-02). For five weeks it was not: a SciNet submit
+# filter capped Balam's compute partition at 24 h from 2026-09-24, rejecting anything larger
+# outright, and this line was 24:00:00 to get anything queued at all. That cap has been REVERTED --
+# /opt/slurm/bin/sbatch now reads 'compute':{'maxHours':72} and its mtime is 2026-10-27 -- so the
+# restriction is gone and keeping 24 h would kill the long docking cells two thirds of the way in.
 #
-# CLAUDE.md says to trust sinfo over the public SciNet page, which said 24 h. That advice was right
-# when written and is now backwards: the page's number is the one being enforced. Trust neither --
-# probe with `sbatch --test-only`, which is what established this.
-#
-# THE ARRAY MATH DEPENDS ON THIS. Links are now a THIRD as long, so a cell needs three times as many
-# of them, and the 60-TASK QOS cap counts every one. See WALLTIMES in submit_grid.py.
-#SBATCH --time=24:00:00
+# THE LESSON IS THE PROBE, NOT THE NUMBER. Both the partition metadata and `sinfo` said 3 days
+# throughout, including while nothing above 24 h would submit, so neither is sufficient. The filter
+# is a python wrapper whose own `maxHours` is the operative value, and the cheap way to read it is
+# `sbatch --test-only`, which preflight.py runs against this line before a launch.
+#SBATCH --time=3-00:00:00
 #SBATCH --output=/scratch/markymoo/rgfn_runs/%x-%j.out
 #SBATCH --error=/scratch/markymoo/rgfn_runs/%x-%j.err
 #

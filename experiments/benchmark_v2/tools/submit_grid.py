@@ -497,12 +497,11 @@ def decide(cell, arm: str) -> tuple[str, str]:
 # taken from an early, fast stretch of a run whose rate DEGRADES as molecules grow: rgfn/clpp was
 # observed going 90.96 -> 94.17 -> 100.90 -> 111.28 s/iteration over its first four iterations.
 # clpp keeps two: its live projection is 3.9 d against 6, which absorbs the same degradation.
-# ⛔ A LINK IS 24 HOURS NOW, NOT 72 (2026-09-24). A submit filter began rejecting anything above
-# 24 h in the compute partition -- `sinfo` still reports 3-00:00:00 and older jobs still RUN with
-# 3-day limits, but nothing new submits above 24 h. Every count below is therefore expressed as
-# EXPECTED HOURS and divided by the link length, so the next change to that ceiling is a one-line
-# edit rather than a re-derivation of five hand-tuned integers.
-LINK_HOURS = 24
+# A LINK IS 72 HOURS (re-probed 2026-11-02; it was 24 for five weeks). A SciNet submit filter capped
+# Balam's compute partition at 24 h from 2026-09-24 and reverted it by 2026-10-27, which is why the
+# counts below are expressed as EXPECTED HOURS divided by the link length rather than as hand-tuned
+# integers: a change to that ceiling is this one line.
+LINK_HOURS = 72
 
 # Measured wall-clock to finish a cell, per (generator, target) where it exceeds one link, from the
 # landed runs: rgfn/seh 34-40 h, rgfn/drd2 63-72 h, scent/clpp 56-62 h, rgfn/clpp ~108 h to its
@@ -519,10 +518,9 @@ EXPECTED_HOURS = {
     ("rxnflow", "6td3b"): 100,
 }
 
-# ⚠ THE 60-TASK QOS CAP NOW BINDS MUCH HARDER. At 72-hour links a 6TD3-B cell cost 3 tasks; at 24 it
-# costs 6, so nine of them is 54 of the 60 slots. Over-provisioning is still safe -- an unused link
-# no-ops on TRAIN_DONE plus budget -- but it is no longer cheap in SLOTS, so these are sized to the
-# measurement rather than rounded up generously.
+# ⚠ THE 60-TASK QOS CAP IS COUNTED IN TASKS, so links are slots: a 6TD3-B cell at 72 h costs 2, and
+# cost 6 while the ceiling was 24 h. Over-provisioning is safe -- an unused link no-ops on
+# TRAIN_DONE plus budget -- but it is not free in slots, so these are sized to the measurement.
 WALLTIMES = {"clpp": 2, "6td3b": 3}  # legacy, superseded by EXPECTED_HOURS; kept for surrogate keys
 
 # ...BUT THE TARGET ALONE DOES NOT DETERMINE THE LENGTH; THE BUDGET DOES. The numbers above are for
