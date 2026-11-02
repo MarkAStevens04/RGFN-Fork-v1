@@ -176,7 +176,11 @@ def verify_train(cell: Cell, arm: str) -> Result:
             r.add("arm_meta.json", False, f"unparseable: {e}")
 
     # -- the checkpoint itself
-    ckpt_name = (meta or {}).get("checkpoint", "checkpoint.pt")
+    # `.get(k, default)` RETURNS None WHEN THE KEY EXISTS WITH A NULL VALUE, which is exactly what
+    # write_arm_meta records for a cell whose checkpoint it could not find. That made `d / ckpt_name`
+    # raise TypeError and ABORT THE WHOLE --all SWEEP on the 13th cell, so a truncated run of 12
+    # looked like a completed run of 12. `or` covers both the missing key and the null value.
+    ckpt_name = (meta or {}).get("checkpoint") or "checkpoint.pt"
     ckpt = d / ckpt_name
     r.add(
         "checkpoint",
@@ -208,38 +212,63 @@ def verify_train(cell: Cell, arm: str) -> Result:
     n_train_rows = 0
     n_train_distinct = 0
     train_smiles: set = set()
+    # ⛔ READ THE CELL, NOT THE LIVE ROUND. Every statistic below -- rows, presentations, phases,
+    # distinct, and the checkpoint-placement bound -- is a property of the CELL, and a resumed cell
+    # keeps its earlier rounds in trace.csv.N. Reading only trace.csv reported one round as the whole
+    # thing: it failed seventeen arm-B cells on "recorded at 320,064 train rows ... trace ends 6,086"
+    # and two more on a phase column that holds only `eval` because the final round trained nothing.
+    # This function already knew rotations existed -- its header-only branch names them -- but handled
+    # only that degenerate case.
+    #
+    # n_scored RESTARTS each round, so monotonicity is checked WITHIN a file and the cell's total
+    # presentations are the SUM of each round's final value. max_step is tracked for the arm-B bound.
+    traces = [tp] + sorted(tp.parent.glob(tp.name + ".*"))
+    max_step = -1
     try:
-        with open(tp) as fh:
-            rd = csv.DictReader(fh)
-            missing = [c for c in ("n_scored", "phase") if c not in (rd.fieldnames or [])]
-            if missing:
-                r.add("trace schema", False, f"missing columns {missing}; want {TRACE_FIELDS}")
-                return r
-            r.add("trace schema", True, ",".join(rd.fieldnames or []))
-            for row in rd:
-                n_rows += 1
-                try:
-                    ns = int(row["n_scored"])
-                except (TypeError, ValueError):
-                    continue
-                if ns < prev:
-                    monotone = False
-                prev = last_scored = ns
-                ph = (row.get("phase") or "").strip()
-                phases.add(ph)
-                if ph == "train":
-                    n_train_rows += 1
-                    _smi = row.get("smiles")
-                    if _smi:
-                        train_smiles.add(_smi)
+        for _i, _t in enumerate(traces):
+            with open(_t) as fh:
+                rd = csv.DictReader(fh)
+                if _i == 0:
+                    missing = [c for c in ("n_scored", "phase") if c not in (rd.fieldnames or [])]
+                    if missing:
+                        r.add(
+                            "trace schema", False, f"missing columns {missing}; want {TRACE_FIELDS}"
+                        )
+                        return r
+                    r.add("trace schema", True, ",".join(rd.fieldnames or []))
+                prev = 0
+                _file_last = 0
+                for row in rd:
+                    n_rows += 1
+                    _st = (row.get("step") or "").strip()
+                    if _st:
+                        try:
+                            max_step = max(max_step, int(_st))
+                        except ValueError:
+                            pass
                     try:
-                        n_train_distinct = max(n_train_distinct, int(row["n_train_distinct"]))
-                    except (TypeError, ValueError, KeyError):
+                        ns = int(row["n_scored"])
+                    except (TypeError, ValueError):
+                        continue
+                    if ns < prev:
+                        monotone = False
+                    prev = _file_last = ns
+                    ph = (row.get("phase") or "").strip()
+                    phases.add(ph)
+                    if ph == "train":
+                        n_train_rows += 1
+                        _smi = row.get("smiles")
+                        if _smi:
+                            train_smiles.add(_smi)
+                        try:
+                            n_train_distinct = max(n_train_distinct, int(row["n_train_distinct"]))
+                        except (TypeError, ValueError, KeyError):
+                            pass
+                    try:
+                        max_distinct = max(max_distinct, int(row.get("n_distinct") or 0))
+                    except ValueError:
                         pass
-                try:
-                    max_distinct = max(max_distinct, int(row.get("n_distinct") or 0))
-                except ValueError:
-                    pass
+                last_scored += _file_last
     except OSError as e:
         r.add("trace.csv", False, f"unreadable: {e}")
         return r
@@ -387,12 +416,19 @@ def verify_train(cell: Cell, arm: str) -> Result:
     # run. The migration ships in the same commit as the rename, so no cell is red in practice.
     if meta and "n_train_scored_at_checkpoint" in meta:
         at = int(meta["n_train_scored_at_checkpoint"])
-        ok = at >= budget * BUDGET_TOLERANCE and at <= last_scored
+        # ROWS BOUNDED BY ROWS. This check asks only "does the checkpoint sit where the trace says
+        # it does" -- whether the cell SPENT its budget is the `budget reached` check above, which is
+        # arm-aware and reads forward trajectories on arm B. Keeping the two separate is what stops
+        # this one needing to know the arm, and stops the recorded field having two possible units.
+        # (Bounding a trajectory figure by a row count failed six complete RxnFlow cells, because
+        # only ~57 of every 64 sampled trajectories yield a traced row.)
+        ok = at <= last_scored
         total = meta.get("n_total_scored_at_checkpoint")
         r.add(
             "checkpoint placement",
             ok,
-            f"recorded at {at:,} train rows (budget {budget:,}, trace ends {last_scored:,})"
+            f"recorded at {at:,} train rows (trace holds {last_scored:,} across "
+            f"{len(traces)} round(s); budget is checked separately)"
             + (f"   [counter read {int(total):,}]" if total else ""),
         )
     elif meta and "n_scored_at_checkpoint" in meta:

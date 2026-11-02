@@ -207,9 +207,15 @@ CELL_OVERRIDES = {
         "Stage 2 loses its free-pool harvest here and must sample the checkpoint instead",
     ),
     ("synformer", "drd2", 43): (
-        "copy",
-        "trace short at 6,950 of 10,000 training calls -- usable but under budget; do not quote "
-        "this cell in a budget-matched comparison without saying so",
+        "generate",
+        "re-scoped 2026-11-02, same treatment as the six ClpP cells: the v1 run stopped at 6,950 of "
+        "10,000 oracle calls, 31% short, and 'usable but under budget' is not usable in the arm whose "
+        "entire point is equal budgets. SynFormer's provider does not cache, so ROWS is the axis and "
+        "6,950 really is 6,950 real invocations -- not a repeat-rate artefact. Unlike fraggfn/s3gfn "
+        "its config carries a real `budget: 10000` and the launcher passes --budget, so nothing needs "
+        "recalibrating; it just has to run to the budget. No resume path either (the only torch.load "
+        "is the pretrained sf_ed_default.ckpt), so this is a clean re-run, and the short artifacts "
+        "are archived rather than deleted",
     ),
 }
 

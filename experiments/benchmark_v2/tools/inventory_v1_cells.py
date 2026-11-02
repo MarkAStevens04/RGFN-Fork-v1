@@ -71,7 +71,12 @@ CKPT_GLOBS = {
     "synformer": ["population_checkpoints/*", "checkpoints/*"],
     "fraggfn": ["checkpoints/*.pt"],
     "rgfn": ["train/checkpoints/*.pt"],
-    "rxnflow": ["checkpoints/*.pt"],
+    # RxnFlow writes to train/checkpoints/, exactly like rgfn and scent above -- this glob was one
+    # directory too shallow and matched nothing, so write_arm_meta recorded `checkpoint: null` for
+    # all eleven rxnflow arm-A cells and verify_cell then failed them on "missing checkpoint.pt".
+    # The checkpoints were there the whole time, 42 MB each. Both paths are listed because the
+    # shallow one is what v1 used, and best_trace deduplicates overlapping globs by design.
+    "rxnflow": ["train/checkpoints/*.pt", "checkpoints/*.pt"],
     "scent": ["train/checkpoints/*.pt"],
 }
 

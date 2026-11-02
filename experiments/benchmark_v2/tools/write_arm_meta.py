@@ -48,6 +48,7 @@ Exit 0 = written. 1 = refused (and the reason is printed).
 from __future__ import annotations
 
 import argparse
+import csv as _csv
 import json
 import sys
 from pathlib import Path
@@ -55,6 +56,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+import manifest as _manifest  # noqa: E402
 from copy_forward import (  # noqa: E402  the naming heuristic, not a second guess
     _final_checkpoint,
 )
@@ -76,7 +78,62 @@ def build(
     # requeue -- two disjoint halves of one run. copy_forward already collapsed v1's alternatives on
     # the way in, so the ambiguous shape cannot reach here. max would record ONE round's budget and
     # fail the cell's own budget gate while it is genuinely complete (SCENT arm B requeues 2-3x).
-    t = best_trace(run_dir, combine="sum") or {}
+    # ⛔ THE "TWO DISJOINT HALVES" ASSUMPTION ABOVE IS FALSE FOR A REAL RESUME, and arm B does not
+    # want a sum anyway. A resume starts from the last PERIODIC checkpoint, so it re-does every
+    # iteration trained between that checkpoint and the kill, and the rounds OVERLAP: rgfn_clpp_s42
+    # runs 0..1558, then 1551..3025, then 3021..3199. best_trace(combine="sum") correctly REFUSES to
+    # add those -- summing would charge the redone iterations twice -- and raises, which is why
+    # seventeen arm-B cells ended up with no arm_meta.json at all and could not be verified.
+    #
+    # Arm B's budget is not a sum and never was: it is 320,000 FORWARD TRAJECTORIES = iterations x
+    # the generator's rate, counted from the MAXIMUM step reached across rounds. A redone iteration
+    # is the same iteration, counted once, so the overlap is not a correction to make -- it simply
+    # is not on this axis. Arm A keeps the summing path, where rows are the thing being accumulated.
+    t = {}
+    fwd = _manifest.FORWARD_PER_ITER.get(gen) if arm == "b" else None
+    if fwd:
+        max_step, rows, scored, smiles = -1, 0, 0, set()
+        base = run_dir / "trace.csv"
+        for path in [base] + sorted(run_dir.glob("trace.csv.*")):
+            if not path.is_file():
+                continue
+            try:
+                with open(path, newline="") as fh:
+                    for r in _csv.DictReader(fh):
+                        scored += 1
+                        if (r.get("phase") or "") == "train":
+                            rows += 1
+                            smi = r.get("smiles")
+                            if smi:
+                                smiles.add(smi)
+                            st = (r.get("step") or "").strip()
+                            if st:
+                                max_step = max(max_step, int(st))
+            except (OSError, ValueError):
+                continue
+        if max_step >= 0:
+            iters = max_step + 1
+            t = {
+                "source": "trace.csv + rotated siblings (max step, not summed)",
+                "combined": "max_step",
+                "sum_verified": None,
+                "n_rows": rows,
+                "n_scored": scored,
+                # ROWS IN THE ROWS FIELD. The budget measure for this arm is forward trajectories,
+                # carried separately below -- putting it here would give one field two units
+                # depending on when it was written, which is how six complete cells came to fail a
+                # bound expressed in the other unit.
+                "train_rows": rows,
+                "forward_trajectories": iters * fwd,
+                "iterations": iters,
+                "train_distinct": len(smiles),
+                "train_distinct_source": (
+                    f"union across rounds; {iters:,} iterations x {fwd} forward trajectories "
+                    f"= {iters * fwd:,} (rows {rows:,} double-count the resume overlap)"
+                ),
+            }
+    if not t:
+        t = best_trace(run_dir, combine="sum") or {}
     # DEDUPLICATED: the per-generator glob lists OVERLAP by design. S3-GFN's are
     # ["*/model_state*.pt", "*/*.pt", ...], so any file matching the first also matches the second
     # and a naive `+=` would report n_checkpoints twice its true value -- a count that later reads
