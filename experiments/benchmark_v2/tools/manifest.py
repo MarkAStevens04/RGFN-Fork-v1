@@ -526,6 +526,41 @@ class Cell:
         if fwd:
             iters = self.trace_iterations(arm)
             got = (iters * fwd) if iters is not None else None
+        elif arm == "a":
+            # ⛔ ARM A'S AXIS DEPENDS ON WHETHER THE PROVIDER CACHES, and this cannot be guessed.
+            # Where it caches, a repeat never reaches the oracle, so the budget is DISTINCT. Where it
+            # does NOT, every presentation IS a real invocation and a low unique rate is MODE COLLAPSE
+            # TO REPORT, not a shortfall to repair. measure_repeat_rate resolves the provider from the
+            # cell's own config and reads cache status out of the class body by AST; it is the only
+            # thing here that knows, and it costs ~4 s for all 108 cells.
+            #
+            # Counting distinct unconditionally -- which this did -- called five healthy cells SHORT:
+            # s3gfn_drd2 x3 at 3,458-4,537 distinct and s3gfn_seh x2 at 7,644-7,931, every one of them
+            # at 10,048 of 10,000 ROWS against an uncached provider. measure_repeat_rate's docstring
+            # predicted it exactly ("s3gfn_drd2 (34-45% unique) reads as 60% short and three healthy
+            # cells are re-run for nothing") and I reintroduced it anyway.
+            #
+            # A false SHORT is the DESTRUCTIVE error: it hands a good cell to the driver to retrain.
+            # A false complete merely defers to verify_cell, which does the full check. So when the
+            # provider cannot be resolved, fall back to ROWS and let verification settle it.
+            try:
+                import measure_repeat_rate as _mrr  # lazy: it imports this module
+
+                _row = _mrr.measure(self, arm)
+                _v = _row.get("verdict")
+                if _v == "SHORT":
+                    _reached = (
+                        _row.get("distinct")
+                        if _row.get("cached") == "yes"
+                        else _row.get("train_rows")
+                    )
+                    return f"short-trace:{_reached}/{budget}"
+                if _v in ("ok", "OVER"):
+                    got = budget  # on budget or over it; not short either way
+                else:
+                    got = rows  # unresolved -> the non-destructive reading
+            except Exception:
+                got = rows
         elif any(self.trace_path(arm).parent.glob(self.trace_path(arm).name + ".*")):
             # ROTATED => THE COLUMN IS ROUND-LOCAL, so count the union instead. n_train_distinct is
             # only the CELL total when a BudgetStopper seeded the writer's set from the siblings, and

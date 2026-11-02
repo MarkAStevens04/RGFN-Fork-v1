@@ -354,7 +354,35 @@ def measure(cell, arm: str) -> dict:
     cached, ev = _class_caches(src, cls)
     row["cached"] = {True: "yes", False: "no", None: "unknown"}[cached]
     row["evidence"] = ev
-    row["verdict"], row["basis"] = _verdict(row, cell.arm_calls(arm) or 0)
+    # ⛔ ARM B IS NOT ON THE DISTINCT AXIS AT ALL (researcher's ruling 2026-09-18). It is SCENT's
+    # published protocol -- "All the models sampled 320,000 forward trajectories during the training
+    # in total" -- so it is counted as iterations x the generator's forward rate, and the repeat rate
+    # is a PROPERTY of the run rather than a charge against its budget. This file kept judging arm B
+    # on distinct for six weeks after the ruling, which put rgfn_6td3b_s43 at "167,312/320,000, short
+    # by 152,688" where the protocol measure is 281,900 of 320,000 trajectories -- short, but by 12%
+    # rather than 48%. Both numbers are real; only one of them is the budget.
+    fwd = manifest.FORWARD_PER_ITER.get(cell.generator) if arm == "b" else None
+    if fwd:
+        iters = cell.trace_iterations(arm)
+        if iters is None:
+            row["verdict"], row["basis"] = "unknown", "no iteration count in the trace"
+        else:
+            reached = iters * fwd
+            budget = cell.arm_calls(arm) or 0
+            # No straddle tolerance on this axis: the target is iterations x a constant, so a run
+            # either completed its iterations or did not.
+            if reached >= budget:
+                row["verdict"] = "ok"
+                row["basis"] = f"{reached:,}/{budget:,} on forward trajectories"
+            else:
+                row["verdict"] = "SHORT"
+                row["basis"] = (
+                    f"{reached:,}/{budget:,} on forward trajectories, short by "
+                    f"{budget - reached:,} ({iters:,} of {-(-budget // fwd):,} iterations)"
+                )
+        row["basis"] += f"   [repeat rate {row['unique_pct']}% unique: a property, not a charge]"
+    else:
+        row["verdict"], row["basis"] = _verdict(row, cell.arm_calls(arm) or 0)
     return row
 
 
